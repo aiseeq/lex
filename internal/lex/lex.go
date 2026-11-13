@@ -155,11 +155,10 @@ func validateRefresh(codex, topic string, m manifest) error {
 }
 
 type refreshAssessment struct {
-	sourceData       []byte
-	cleanData        []byte
-	purposeEnabled   bool
-	noChange         bool
-	fragmentsCurrent bool
+	sourceData     []byte
+	cleanData      []byte
+	purposeEnabled bool
+	noChange       bool
 }
 
 func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byte) (refreshAssessment, error) {
@@ -170,14 +169,13 @@ func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byt
 	validationErr := validateRefresh(codex, topic, m)
 	purposeEnabled, cleanData, err := prepareRefreshPurpose(codex, m, sourceData)
 	if err != nil {
-		return refreshAssessment{fragmentsCurrent: validationErr == nil}, err
+		return refreshAssessment{}, err
 	}
 	assessment := refreshAssessment{
-		sourceData:       sourceData,
-		cleanData:        cleanData,
-		purposeEnabled:   purposeEnabled,
-		noChange:         sha(sourceData) == m.hash,
-		fragmentsCurrent: validationErr == nil,
+		sourceData:     sourceData,
+		cleanData:      cleanData,
+		purposeEnabled: purposeEnabled,
+		noChange:       sha(sourceData) == m.hash,
 	}
 	if !assessment.noChange && validationErr != nil {
 		return assessment, validationErr
@@ -1030,6 +1028,13 @@ func outputMatchesGenerated(actual, want []byte, header bool, manifestPath strin
 	return bytes.Equal(actual, want) || header && equalOutputIgnoringGeneratedHeader(actual, want, manifestPath)
 }
 
+func fragmentsChangedSinceBuild(codex, manifestPath string, m manifest, want []byte) bool {
+	if m.builtHash != "" {
+		return !generatedHashMatches(want, m.header, manifestPath, m.builtHash)
+	}
+	return validateRefresh(codex, manifestKey(manifestPath), m) != nil
+}
+
 func generatedHashMatches(want []byte, header bool, manifestPath, expectedHash string) bool {
 	if sha(want) == expectedHash {
 		return true
@@ -1086,6 +1091,7 @@ func setManifestHeader(codex, key string, enabled bool) error {
 
 type AbsorbOptions struct {
 	Shared   bool
+	Force    bool
 	DraftDir string
 }
 
@@ -1141,6 +1147,15 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 	}
 	if m.header {
 		built = generatedHeader(selected, built)
+	}
+	fragmentsChanged := fragmentsChangedSinceBuild(codex, selected, m, built)
+	if fragmentsChanged && !outputMatchesGenerated(actual, built, m.header, selected) && !options.Force {
+		codexArg, fileArg := strconv.Quote(codex), strconv.Quote(target)
+		fileChanged := statusFileChanged(actual, selected, m)
+		if fileChanged {
+			return fmt.Errorf("%s: file and fragments both changed since the last build; run `lex absorb --force --codex %s %s` to keep the file and lose fragment text edits not in it, or `lex build --force --codex %s %s` to keep the fragments and lose file edits", target, codexArg, fileArg, codexArg, fileArg)
+		}
+		return fmt.Errorf("%s: fragments changed since the last build; run `lex build --codex %s %s` to carry fragment edits into the file, or `lex absorb --force --codex %s %s` to discard them", target, codexArg, fileArg, codexArg, fileArg)
 	}
 	fileBytes := actual
 	if m.header {
@@ -2098,7 +2113,7 @@ func checkSelectedOutputs(codex, tree string, selected []*selectedManifestUnder,
 			continue
 		}
 		if !outputMatchesGenerated(data, body, entry.m.header, entry.path) {
-			problems = append(problems, builtDiffers(out, codex))
+			problems = append(problems, builtDiffers(out, codex, entry.m, entry.path, body, data))
 		}
 	}
 	return finishCheck(warnings, problems)
@@ -2141,7 +2156,7 @@ func checkDisk(codex string) ([]string, error) {
 			continue
 		}
 		if !outputMatchesGenerated(data, body, m.header, path) {
-			problems = append(problems, builtDiffers(m.out, codex))
+			problems = append(problems, builtDiffers(m.out, codex, m, path, body, data))
 		}
 	}
 	if err := appendOrphanProblem(codex, referenced); err != nil {
@@ -2291,7 +2306,7 @@ func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map
 		problems = append(problems, m.out+": index and disk differ — stage the whole file (git add) or restore it")
 	}
 	if !outputMatchesGenerated(staged, body, m.header, path) {
-		problems = append(problems, builtDiffers(m.out, codex))
+		problems = append(problems, builtDiffers(m.out, codex, m, path, body, staged))
 		problems = append(problems, unstagedFragmentHints(fragPaths, indexed, m.out)...)
 	}
 	return warnings, problems, nil
@@ -2383,8 +2398,17 @@ func stagedOrphans(commit *stagedPaths, codex string, referenced map[string]bool
 	return problems, warnings, nil
 }
 
-func builtDiffers(out, codex string) string {
-	return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`, or keep this edit with `lex absorb --codex %s %s`", out, codex, codex, out)
+func builtDiffers(out, codex string, m manifest, manifestPath string, want, actual []byte) string {
+	codexArg, fileArg := strconv.Quote(codex), strconv.Quote(out)
+	fragmentsChanged := fragmentsChangedSinceBuild(codex, manifestPath, m, want)
+	fileChanged := statusFileChanged(actual, manifestPath, m)
+	if fragmentsChanged && !fileChanged {
+		return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`", out, codexArg)
+	}
+	if fragmentsChanged && fileChanged {
+		return fmt.Sprintf("%s: built output differs from its fragments — run `lex absorb --force --codex %s %s` to keep the file, or `lex build --force --codex %s %s` to keep the fragments", out, codexArg, fileArg, codexArg, fileArg)
+	}
+	return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`, or keep this edit with `lex absorb --codex %s %s`", out, codexArg, codexArg, fileArg)
 }
 
 func finishCheck(warnings, problems []string) ([]string, error) {
@@ -2892,12 +2916,7 @@ func statusFileChanged(actual []byte, manifestPath string, m manifest) bool {
 
 func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath string, m manifest, actual, want []byte) error {
 	assessment, refreshErr := assessRefresh(codex, manifestKey(manifestPath), manifestPath, m, actual)
-	fragmentsChanged := false
-	if m.builtHash != "" {
-		fragmentsChanged = !generatedHashMatches(want, m.header, manifestPath, m.builtHash)
-	} else {
-		fragmentsChanged = !assessment.fragmentsCurrent
-	}
+	fragmentsChanged := fragmentsChangedSinceBuild(codex, manifestPath, m, want)
 	rel, err := filepath.Rel(home, m.out)
 	if err != nil {
 		return fmt.Errorf("%s: resolve source path: %w", m.out, err)
@@ -2905,7 +2924,7 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 	target := strconv.Quote(codex) + " " + strconv.Quote(filepath.Join(home, rel))
 	entry.Command = "lex import --refresh --codex " + target
 	if fragmentsChanged {
-		entry.Command = "lex absorb --codex " + target
+		entry.Command = "lex absorb --force --codex " + target
 		entry.KeepFragments = "lex build --force --codex " + target
 		if m.builtHash == "" {
 			entry.ConflictSummary = "the file differs from its recorded source and the fragments differ from the manifest"

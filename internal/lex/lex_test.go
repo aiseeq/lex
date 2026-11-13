@@ -2468,7 +2468,7 @@ func TestStatusConflictDiagnosticsAndPartialFragmentErrors(t *testing.T) {
 				if err != nil || len(entries) != 1 {
 					t.Fatalf("status = %#v, %v; want one conflict", entries, err)
 				}
-				if !strings.HasPrefix(entries[0].Command, "lex absorb --codex ") || !strings.HasPrefix(entries[0].KeepFragments, "lex build --force --codex ") || entries[0].Problem != "" {
+				if !strings.HasPrefix(entries[0].Command, "lex absorb --force --codex ") || !strings.HasPrefix(entries[0].KeepFragments, "lex build --force --codex ") || entries[0].Problem != "" {
 					t.Errorf("conflict entry = %#v; want absorb to keep the file and build --force to keep the fragments", entries[0])
 				}
 			})
@@ -2659,7 +2659,7 @@ func TestStatusLegacyFragmentsAndHints(t *testing.T) {
 				t.Fatalf("status after both edits = %#v, %v; want one entry", entries, err)
 			}
 			entry := entries[0]
-			if !strings.HasPrefix(entry.Command, "lex absorb --codex ") ||
+			if !strings.HasPrefix(entry.Command, "lex absorb --force --codex ") ||
 				!strings.HasPrefix(entry.KeepFragments, "lex build --force --codex ") {
 				t.Fatalf("legacy conflict entry = %#v", entry)
 			}
@@ -4923,6 +4923,212 @@ func TestStagedHintsFragmentDeletedOnDisk(t *testing.T) {
 	err := checkIn(t, repo, codex)
 	if err == nil || !strings.Contains(err.Error(), frag+": fragment deleted on disk but not staged") {
 		t.Fatalf("expected a hint about the fragment deleted on disk, got %v", err)
+	}
+}
+
+func TestAbsorbRefusesFragmentDriftUntilForced(t *testing.T) {
+	codex := t.TempDir()
+	out := filepath.Join(t.TempDir(), "built.md")
+	if err := importData(codex, out, "built.md", []byte("alpha\nbeta\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	fragment := fragmentOf(t, codex, "built.md")
+	fragmentBytes, err := os.ReadFile(fragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragmentBodyBytes, err := fragmentBody(fragmentBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, fragment, replaceFragmentBody(fragmentBytes, fragmentBodyBytes, bytes.Replace(fragmentBodyBytes, []byte("alpha"), []byte("fragment edit"), 1)))
+	fileBytes, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, out, bytes.Replace(fileBytes, []byte("beta"), []byte("file edit"), 1))
+	beforeFragment, _ := os.ReadFile(fragment)
+	beforeManifest, _ := os.ReadFile(filepath.Join(codex, "manifest", codexKey("built.md")+".yaml"))
+	beforeFile, _ := os.ReadFile(out)
+	if err := Absorb(codex, out, AbsorbOptions{DraftDir: codex}); err == nil ||
+		!strings.Contains(err.Error(), "lex absorb --force --codex") || !strings.Contains(err.Error(), "lex build --force --codex") {
+		t.Fatalf("absorb error = %v; want both recovery commands", err)
+	}
+	afterFile, _ := os.ReadFile(out)
+	afterFragment, _ := os.ReadFile(fragment)
+	afterManifest, _ := os.ReadFile(filepath.Join(codex, "manifest", codexKey("built.md")+".yaml"))
+	if !bytes.Equal(beforeFile, afterFile) || !bytes.Equal(beforeFragment, afterFragment) || !bytes.Equal(beforeManifest, afterManifest) {
+		t.Fatal("refused absorb changed file, fragments, or manifest")
+	}
+	if _, err := os.Stat(filepath.Join(codex, "drafts")); !os.IsNotExist(err) {
+		t.Fatalf("refused absorb created drafts: %v", err)
+	}
+	if err := Absorb(codex, out, AbsorbOptions{Force: true, DraftDir: codex}); err != nil {
+		t.Fatalf("forced absorb: %v", err)
+	}
+}
+
+func TestAbsorbRefusesFragmentOnlyDrift(t *testing.T) {
+	codex := t.TempDir()
+	out := filepath.Join(t.TempDir(), "built.md")
+	if err := importData(codex, out, "built.md", []byte("alpha\nbeta\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	fragment := fragmentOf(t, codex, "built.md")
+	fragmentBytes, err := os.ReadFile(fragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := fragmentBody(fragmentBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, fragment, replaceFragmentBody(fragmentBytes, body, bytes.Replace(body, []byte("alpha"), []byte("fragment edit"), 1)))
+	beforeFile, _ := os.ReadFile(out)
+	beforeFragment, _ := os.ReadFile(fragment)
+	manifest := filepath.Join(codex, "manifest", codexKey("built.md")+".yaml")
+	beforeManifest, _ := os.ReadFile(manifest)
+	err = Absorb(codex, out, AbsorbOptions{DraftDir: codex})
+	if err == nil || !strings.Contains(err.Error(), "lex build --codex") || !strings.Contains(err.Error(), "lex absorb --force --codex") || strings.Contains(err.Error(), "lex build --force") {
+		t.Fatalf("absorb error = %v; want fragment-only recovery commands", err)
+	}
+	afterFile, _ := os.ReadFile(out)
+	afterFragment, _ := os.ReadFile(fragment)
+	afterManifest, _ := os.ReadFile(manifest)
+	if !bytes.Equal(beforeFile, afterFile) || !bytes.Equal(beforeFragment, afterFragment) || !bytes.Equal(beforeManifest, afterManifest) {
+		t.Fatal("refused absorb changed file, fragment, or manifest")
+	}
+	if _, err := os.Stat(filepath.Join(codex, "drafts")); !os.IsNotExist(err) {
+		t.Fatalf("refused absorb created drafts: %v", err)
+	}
+}
+
+func TestAbsorbAcceptsFileEqualToCurrentBuild(t *testing.T) {
+	codex := t.TempDir()
+	out := filepath.Join(t.TempDir(), "built.md")
+	if err := importData(codex, out, "built.md", []byte("alpha\nbeta\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	fragment := fragmentOf(t, codex, "built.md")
+	fragmentBytes, err := os.ReadFile(fragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := fragmentBody(fragmentBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, fragment, replaceFragmentBody(fragmentBytes, body, bytes.Replace(body, []byte("alpha"), []byte("gamma"), 1)))
+	mustWrite(t, out, []byte("gamma\nbeta\n"))
+	beforeFragment, _ := os.ReadFile(fragment)
+	if err := Absorb(codex, out, AbsorbOptions{DraftDir: codex}); err != nil {
+		t.Fatalf("absorb of a file equal to the current build: %v", err)
+	}
+	afterFragment, _ := os.ReadFile(fragment)
+	afterFile, _ := os.ReadFile(out)
+	if !bytes.Equal(beforeFragment, afterFragment) || string(afterFile) != "gamma\nbeta\n" {
+		t.Fatal("absorb changed a file or fragment that already match")
+	}
+	if _, err := os.Stat(filepath.Join(codex, "drafts")); !os.IsNotExist(err) {
+		t.Fatalf("absorb of a matching file created drafts: %v", err)
+	}
+}
+
+func TestAbsorbRefusesFragmentDriftWithoutBuiltHash(t *testing.T) {
+	codex := t.TempDir()
+	out := filepath.Join(t.TempDir(), "built.md")
+	if err := importData(codex, out, "built.md", []byte("alpha\nbeta\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(codex, "manifest", codexKey("built.md")+".yaml")
+	data, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, manifest, bytes.Replace(data, []byte("built_sha256: "+sha([]byte("alpha\nbeta\n"))+"\n"), nil, 1))
+	fragment := fragmentOf(t, codex, "built.md")
+	fragmentBytes, _ := os.ReadFile(fragment)
+	body, _ := fragmentBody(fragmentBytes)
+	mustWrite(t, fragment, replaceFragmentBody(fragmentBytes, body, bytes.Replace(body, []byte("alpha"), []byte("fragment edit"), 1)))
+	fileBytes, _ := os.ReadFile(out)
+	mustWrite(t, out, bytes.Replace(fileBytes, []byte("beta"), []byte("file edit"), 1))
+	if err := Absorb(codex, out, AbsorbOptions{}); err == nil || !strings.Contains(err.Error(), "lex build --force --codex") {
+		t.Fatalf("absorb without built hash error = %v; want both-changed refusal", err)
+	}
+	if err := Absorb(codex, out, AbsorbOptions{Force: true}); err != nil {
+		t.Fatalf("forced absorb without built hash: %v", err)
+	}
+}
+
+func TestCheckBuiltDiffersRecommendations(t *testing.T) {
+	for _, tc := range []struct {
+		name                        string
+		fragment, file, noBuiltHash bool
+		want, absent                []string
+	}{
+		{name: "fragment only", fragment: true, want: []string{"lex build --codex"}, absent: []string{"lex absorb"}},
+		{name: "file only", file: true, want: []string{"lex absorb --codex"}, absent: []string{"--force"}},
+		{name: "both", fragment: true, file: true, want: []string{"lex absorb --force --codex", "lex build --force --codex"}},
+		{name: "fragment only without built hash", fragment: true, noBuiltHash: true, want: []string{"lex build --codex"}, absent: []string{"lex absorb"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			codex := t.TempDir()
+			out := filepath.Join(t.TempDir(), "built.md")
+			if err := importData(codex, out, "built.md", []byte("alpha\nbeta\n"), false); err != nil {
+				t.Fatal(err)
+			}
+			if err := Build(codex, false); err != nil {
+				t.Fatal(err)
+			}
+			manifest := filepath.Join(codex, "manifest", codexKey("built.md")+".yaml")
+			if tc.noBuiltHash {
+				data, err := os.ReadFile(manifest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mustWrite(t, manifest, bytes.Replace(data, []byte("built_sha256: "+sha([]byte("alpha\nbeta\n"))+"\n"), nil, 1))
+			}
+			if tc.fragment {
+				fragment := fragmentOf(t, codex, "built.md")
+				data, _ := os.ReadFile(fragment)
+				body, _ := fragmentBody(data)
+				mustWrite(t, fragment, replaceFragmentBody(data, body, bytes.Replace(body, []byte("alpha"), []byte("fragment edit"), 1)))
+			}
+			if tc.file {
+				data, _ := os.ReadFile(out)
+				mustWrite(t, out, bytes.Replace(data, []byte("beta"), []byte("file edit"), 1))
+			}
+			_, err := CheckWithWarnings(codex, CheckOptions{})
+			if err == nil {
+				t.Fatal("check passed with differing output")
+			}
+			line := err.Error()
+			if !strings.Contains(line, "built output differs from its fragments") {
+				t.Fatalf("check error: %v", err)
+			}
+			for _, text := range tc.want {
+				if !strings.Contains(line, text) {
+					t.Errorf("check error %q lacks %q", line, text)
+				}
+			}
+			for _, text := range tc.absent {
+				if strings.Contains(line, text) {
+					t.Errorf("check error %q unexpectedly contains %q", line, text)
+				}
+			}
+		})
 	}
 }
 

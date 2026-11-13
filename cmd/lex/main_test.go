@@ -172,7 +172,8 @@ func TestStatusDescriptionAndError(t *testing.T) {
 		t.Errorf("build help flags = %q, want optional [FILE]", buildFlags)
 	}
 	for _, text := range []string{
-		"Если файл и фрагменты разошлись, status называет обе команды: lex absorb сохраняет текст файла и теряет правки текста фрагментов, которых нет в файле; lex build --force сохраняет фрагменты и теряет правки файла.",
+		"Если файл и фрагменты разошлись, status называет обе команды: lex absorb --force сохраняет текст файла и теряет правки текста фрагментов, которых нет в файле; lex build --force сохраняет фрагменты и теряет правки файла.",
+		"Если absorb отказывает из-за правок фрагментов после сборки, запусти lex absorb --force --codex <кодекс> <файл>, чтобы сохранить файл, либо lex build --force --codex <кодекс> <файл>, чтобы сохранить фрагменты.",
 		"lex status --codex <кодекс> показывает файл, который отличается от последней сборки или записанного источника.",
 		"Если манифест содержит built_sha256, status сверяет с ним файл и текущую сборку; без built_sha256 сверяет файл с source_sha256, убирая шапку lex при header: true.",
 		"Правку только во фрагментах status не показывает: её находит lex check.",
@@ -272,7 +273,7 @@ func TestLegacyStatusConflictLineDoesNotClaimBothChanged(t *testing.T) {
 	}
 	for _, text := range []string{
 		"fragments differ from the manifest",
-		"lex absorb --codex",
+		"lex absorb --force --codex",
 		"lex build --force --codex",
 	} {
 		if !strings.Contains(got, text) {
@@ -790,6 +791,92 @@ func TestCheckOutputsUnderCLIAndStagedConflict(t *testing.T) {
 	err = checkCommand(cliOptions{codex: "codex", staged: true, outputsUnder: "project"})
 	if err == nil || exitCode(err) != 2 || !strings.Contains(err.Error(), "cannot be combined") {
 		t.Fatalf("expected staged conflict usage error, got %v", err)
+	}
+}
+
+func TestAbsorbForceCLIAndHelp(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	codex := filepath.Join(root, "codex")
+	out := filepath.Join(root, "project", "built.md")
+	if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(out, []byte("alpha\nbeta\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := lex.ImportWithOptions(codex, out, lex.ImportOptions{Home: root}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lex.Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	var fragment string
+	err := filepath.WalkDir(filepath.Join(codex, "frag"), func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() {
+			fragment = path
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragmentBytes, err := os.ReadFile(fragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	separator := []byte("\n---\n")
+	separatorAt := bytes.Index(fragmentBytes, separator)
+	if separatorAt < 0 {
+		t.Fatalf("fixture fragment lacks body separator: %q", fragmentBytes)
+	}
+	bodyAt := separatorAt + len(separator)
+	body := bytes.Replace(fragmentBytes[bodyAt:], []byte("alpha"), []byte("fragment edit"), 1)
+	if bytes.Equal(body, fragmentBytes[bodyAt:]) {
+		t.Fatalf("fixture fragment body lacks editable text: %q", fragmentBytes)
+	}
+	if err := os.WriteFile(fragment, append(append([]byte(nil), fragmentBytes[:bodyAt]...), body...), 0644); err != nil {
+		t.Fatal(err)
+	}
+	fileBytes, _ := os.ReadFile(out)
+	if err := os.WriteFile(out, bytes.Replace(fileBytes, []byte("beta"), []byte("file edit"), 1), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := captureStreams(t, func() error {
+		err := run([]string{"absorb", "--codex", codex, out})
+		if err != nil {
+			writeError(os.Stderr, err)
+		}
+		return err
+	})
+	if err == nil || exitCode(err) != 1 || !strings.Contains(err.Error(), "lex absorb --force --codex") || !strings.Contains(stderr, "lex absorb --force --codex") {
+		t.Fatalf("absorb without force: stdout=%q stderr=%q err=%v", stdout, stderr, err)
+	}
+	stdout, stderr, err = captureStreams(t, func() error {
+		err := run([]string{"absorb", "--force", "--codex", codex, out})
+		if err != nil {
+			writeError(os.Stderr, err)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatalf("absorb --force: stdout=%q stderr=%q err=%v", stdout, stderr, err)
+	}
+	fragmentBytes, _ = os.ReadFile(fragment)
+	if !bytes.Contains(fragmentBytes, []byte("file edit")) {
+		t.Fatalf("forced absorb did not transfer file text: %q", fragmentBytes)
+	}
+	absorbFlags := ""
+	for _, command := range commandHelpTable {
+		if command.name == "absorb" {
+			absorbFlags = command.flags
+		}
+	}
+	if !strings.Contains(absorbFlags, "[--force]") {
+		t.Fatalf("absorb help flags = %q", absorbFlags)
 	}
 }
 
