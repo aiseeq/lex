@@ -2423,6 +2423,186 @@ func TestStatusUsesGeneratedOutputAndRefreshability(t *testing.T) {
 	})
 }
 
+func TestStatusConflictDiagnosticsAndPartialFragmentErrors(t *testing.T) {
+	t.Run("header and fragment changes offer both ways", func(t *testing.T) {
+		for _, header := range []bool{true, false} {
+			name := "without header"
+			if header {
+				name = "with header"
+			}
+			t.Run(name, func(t *testing.T) {
+				codex := t.TempDir()
+				out := filepath.Join(t.TempDir(), "conflict.md")
+				if err := importData(codex, out, "conflict.md", []byte("alpha one\nbeta two\n"), false); err != nil {
+					t.Fatal(err)
+				}
+				if header {
+					if err := setManifestHeader(codex, "conflict.md", true); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := Build(codex, false); err != nil {
+					t.Fatal(err)
+				}
+				manifestPath := filepath.Join(codex, "manifest", codexKey("conflict.md")+".yaml")
+				m, err := readManifest(manifestPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fragment := filepath.Join(codex, "frag", filepath.FromSlash(m.parts[len(m.parts)-1])+".md")
+				raw, err := os.ReadFile(fragment)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, err := fragmentBody(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mustWrite(t, fragment, replaceFragmentBody(raw, body, []byte("beta in fragment\n")))
+				built, err := os.ReadFile(out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mustWrite(t, out, bytes.Replace(built, []byte("alpha one"), []byte("alpha in file"), 1))
+				entries, err := StatusWithHome(codex, filepath.Dir(out))
+				if err != nil || len(entries) != 1 {
+					t.Fatalf("status = %#v, %v; want one conflict", entries, err)
+				}
+				if !strings.HasPrefix(entries[0].Command, "lex absorb --codex ") || !strings.HasPrefix(entries[0].KeepFragments, "lex build --force --codex ") || entries[0].Problem != "" {
+					t.Errorf("conflict entry = %#v; want absorb to keep the file and build --force to keep the fragments", entries[0])
+				}
+			})
+		}
+	})
+
+	t.Run("missing fragment does not hide other files", func(t *testing.T) {
+		root := t.TempDir()
+		codex := filepath.Join(root, "codex")
+		lost := filepath.Join(root, "lost.md")
+		kept := filepath.Join(root, "kept.md")
+		if err := importData(codex, lost, "a-lost.md", []byte("lost line\n"), false); err != nil {
+			t.Fatal(err)
+		}
+		if err := importData(codex, kept, "b-kept.md", []byte("kept line\n"), false); err != nil {
+			t.Fatal(err)
+		}
+		if err := setManifestHeader(codex, "a-lost.md", true); err != nil {
+			t.Fatal(err)
+		}
+		if err := setManifestHeader(codex, "b-kept.md", true); err != nil {
+			t.Fatal(err)
+		}
+		if err := Build(codex, false); err != nil {
+			t.Fatal(err)
+		}
+		m, err := readManifest(filepath.Join(codex, "manifest", codexKey("a-lost.md")+".yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fragment := filepath.Join(codex, "frag", filepath.FromSlash(m.parts[0])+".md")
+		if err := os.Remove(fragment); err != nil {
+			t.Fatal(err)
+		}
+		lostData, err := os.ReadFile(lost)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, lost, bytes.Replace(lostData, []byte("lost line"), []byte("lost edited"), 1))
+		keptData, err := os.ReadFile(kept)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, kept, bytes.Replace(keptData, []byte("kept line"), []byte("kept edited"), 1))
+		entries, err := StatusWithHome(codex, root)
+		if err != nil || len(entries) != 2 {
+			t.Fatalf("status = %#v, %v; want two entries", entries, err)
+		}
+		foundLost, foundKept := false, false
+		for _, entry := range entries {
+			switch entry.Output {
+			case lost:
+				foundLost = strings.Contains(entry.Problem, fragment) && entry.Command == ""
+			case kept:
+				foundKept = strings.HasPrefix(entry.Command, "lex absorb --codex ") && entry.KeepFragments == "" && entry.Problem == ""
+			}
+		}
+		if !foundLost || !foundKept {
+			t.Fatalf("status entries = %#v; missing fragment error or kept file command", entries)
+		}
+	})
+}
+
+func TestRefreshStoresDiskHashAndRecognizesHeaderVariants(t *testing.T) {
+	t.Run("refresh stores complete file hash and next edit suggests absorb", func(t *testing.T) {
+		root := t.TempDir()
+		codex := filepath.Join(root, "codex")
+		out := filepath.Join(root, "refresh.md")
+		mustWrite(t, out, []byte("item one\n"))
+		if err := ImportWithOptions(codex, out, ImportOptions{Home: root}); err != nil {
+			t.Fatal(err)
+		}
+		if err := setManifestHeader(codex, "refresh.md", true); err != nil {
+			t.Fatal(err)
+		}
+		if err := Build(codex, false); err != nil {
+			t.Fatal(err)
+		}
+		built, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, out, bytes.Replace(built, []byte("item one"), []byte("item one edited"), 1))
+		if err := ImportWithOptions(codex, out, ImportOptions{Home: root, Refresh: true}); err != nil {
+			t.Fatal(err)
+		}
+		disk, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := readManifest(filepath.Join(codex, "manifest", codexKey("refresh.md")+".yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.builtHash != sha(disk) {
+			t.Fatalf("built hash = %s, want disk hash %s", m.builtHash, sha(disk))
+		}
+		mustWrite(t, out, bytes.Replace(disk, []byte("item one edited"), []byte("item one edited again"), 1))
+		entries, err := StatusWithHome(codex, root)
+		if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Command, "lex absorb --codex ") || entries[0].KeepFragments != "" {
+			t.Fatalf("status after next file edit = %#v, %v; want only absorb", entries, err)
+		}
+	})
+
+	t.Run("alternate generated header is equivalent", func(t *testing.T) {
+		root := t.TempDir()
+		t.Setenv("HOME", root)
+		codex := filepath.Join(root, "codex")
+		out := filepath.Join(root, "document.md")
+		if err := importData(codex, out, "document.md", []byte("document body\n"), false); err != nil {
+			t.Fatal(err)
+		}
+		if err := setManifestHeader(codex, "document.md", true); err != nil {
+			t.Fatal(err)
+		}
+		if err := Build(codex, false); err != nil {
+			t.Fatal(err)
+		}
+		built, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		alternate := bytes.ReplaceAll(built, []byte("~/codex"), []byte(resolvePath(codex)))
+		if bytes.Equal(alternate, built) {
+			t.Fatal("generated header did not contain preferred home-relative path")
+		}
+		mustWrite(t, out, alternate)
+		entries, err := StatusWithHome(codex, root)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("status for alternate generated header = %#v, %v", entries, err)
+		}
+	})
+}
+
 func TestCutoverHeaderAndStatus(t *testing.T) {
 	codex := t.TempDir()
 	out := filepath.Join(t.TempDir(), "out.md")

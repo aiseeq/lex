@@ -133,6 +133,66 @@ func TestCommandHelpFlags(t *testing.T) {
 	}
 }
 
+func TestStatusLineForms(t *testing.T) {
+	plain := lex.StatusEntry{Manifest: "m.yaml", Output: "out.md", Command: "lex absorb --codex c out.md"}
+	if got := statusLine(plain); got != "m.yaml: out.md; run lex absorb --codex c out.md" {
+		t.Errorf("plain line = %q", got)
+	}
+	both := plain
+	both.KeepFragments = "lex build --force --codex c out.md"
+	got := statusLine(both)
+	for _, want := range []string{
+		"m.yaml: out.md; the file and its fragments both changed since the last build",
+		"run lex absorb --codex c out.md to keep the file's text and drop the fragment edits",
+		"or lex build --force --codex c out.md to keep the fragments and drop the file's edits",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("conflict line %q lacks %q", got, want)
+		}
+	}
+	problem := lex.StatusEntry{Manifest: "m.yaml", Output: "out.md", Problem: "frag/a.md: no such file"}
+	if got := statusLine(problem); got != "m.yaml: out.md; cannot compare with the fragments: frag/a.md: no such file" {
+		t.Errorf("problem line = %q", got)
+	}
+}
+
+func TestStatusDescriptionAndError(t *testing.T) {
+	buildFlags := ""
+	for _, command := range commandHelpTable {
+		if command.name == "build" {
+			buildFlags = command.flags
+		}
+	}
+	if !strings.Contains(buildFlags, "[FILE]") {
+		t.Errorf("build help flags = %q, want optional [FILE]", buildFlags)
+	}
+	for _, text := range []string{"lex build --force", "теряет правки фрагментов", "теряет правки файла"} {
+		if !strings.Contains(guideText, text) {
+			t.Errorf("guide lacks status guidance %q", text)
+		}
+	}
+
+	root := t.TempDir()
+	codex := filepath.Join(root, "codex")
+	output := filepath.Join(root, "source.md")
+	if err := os.WriteFile(output, []byte("source\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := lex.ImportWithOptions(codex, output, lex.ImportOptions{Home: root}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lex.Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(output, []byte("changed\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := captureRun(t, "status", "--codex", codex)
+	if err == nil || err.Error() != "files differ from the codex" {
+		t.Fatalf("status error = %v, want files differ from the codex", err)
+	}
+}
+
 func TestGuideHelpCommands(t *testing.T) {
 	for _, alias := range []string{"-h", "--help", "help"} {
 		got, err := captureRun(t, alias)

@@ -223,6 +223,7 @@ func importData(codex, abs, rel string, data []byte, refresh bool) error {
 }
 
 func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, links []outputLink) error {
+	diskHash := sha(data)
 	key := codexKey(filepath.ToSlash(rel))
 	topic := key
 	manifestPath := filepath.Join(codex, "manifest", key+".yaml")
@@ -293,7 +294,7 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 	if sourceData == nil {
 		sourceData = data
 	}
-	m := manifest{out: abs, hash: sha(sourceData), builtHash: sha(sourceData), parts: parts, fragmentHashes: hashes, header: old.header}
+	m := manifest{out: abs, hash: sha(sourceData), builtHash: diskHash, parts: parts, fragmentHashes: hashes, header: old.header}
 	allLinks := uniqueLinks(append(old.links, links...))
 	m.links = allLinks
 	return finishImport(codex, manifestPath, m, allLinks, topic, units, preservedHeaders)
@@ -2750,7 +2751,18 @@ func appendOrphanProblem(codex string, referenced map[string]bool) error {
 	})
 }
 
-type StatusEntry struct{ Manifest, Output, Command string }
+// StatusEntry describes one output file that differs from the codex.
+type StatusEntry struct {
+	Manifest, Output string
+	// Command settles the difference. When KeepFragments is set as well,
+	// Command keeps the file's text and drops the fragment edits.
+	Command string
+	// KeepFragments is set when the fragments changed after the last build too:
+	// the command that keeps them and drops the file's edits.
+	KeepFragments string
+	// Problem says why the file could not be compared; Command is empty then.
+	Problem string
+}
 
 func Status(codex string) ([]StatusEntry, error) { return StatusWithHome(codex, "") }
 func StatusWithHome(codex, home string) ([]StatusEntry, error) {
@@ -2785,7 +2797,8 @@ func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 		}
 		want, e := manifestBody(codex, m)
 		if e != nil {
-			return nil, e
+			changed = append(changed, StatusEntry{Manifest: p, Output: m.out, Problem: e.Error()})
+			continue
 		}
 		if m.header {
 			want = generatedHeader(p, want)
@@ -2797,11 +2810,16 @@ func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 		if relErr != nil {
 			return nil, fmt.Errorf("%s: resolve source path: %w", m.out, relErr)
 		}
-		command := "lex import --refresh --codex "
-		if m.header || validateRefresh(codex, manifestKey(p), m) != nil {
-			command = "lex absorb --codex "
+		target := strconv.Quote(codex) + " " + strconv.Quote(filepath.Join(home, rel))
+		entry := StatusEntry{Manifest: p, Output: m.out, Command: "lex import --refresh --codex " + target}
+		fragmentsMoved := m.builtHash != "" && sha(want) != m.builtHash
+		if fragmentsMoved || m.header || validateRefresh(codex, manifestKey(p), m) != nil {
+			entry.Command = "lex absorb --codex " + target
 		}
-		changed = append(changed, StatusEntry{Manifest: p, Output: m.out, Command: command + strconv.Quote(codex) + " " + strconv.Quote(filepath.Join(home, rel))})
+		if fragmentsMoved {
+			entry.KeepFragments = "lex build --force --codex " + target
+		}
+		changed = append(changed, entry)
 	}
 	return changed, nil
 }

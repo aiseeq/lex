@@ -43,7 +43,7 @@ type commandHelp struct {
 
 var commandHelpTable = []commandHelp{
 	{"import", "--codex DIR [--refresh] FILE", "импортировать файл во фрагменты и манифест."},
-	{"build", "--codex DIR [--check] [--force] [--no-header] FILE", "собрать файлы из манифестов."},
+	{"build", "--codex DIR [--check] [--force] [--no-header] [FILE]", "собрать файлы из манифестов."},
 	{"absorb", "--codex DIR [--shared] FILE", "перенести правку собранного файла во фрагменты."},
 	{"check", "--codex DIR [--staged] [--outputs-under PATH] [--tree TREE] [--refs-only] [--decisions PATH]", "проверить кодекс и собранные файлы."},
 	{"status", "--codex DIR", "показать изменившиеся файлы и команды для них."},
@@ -76,7 +76,7 @@ const guideText = `## Кодекс
 Кодекс состоит из фрагментов frag/<файл>/<пункт>.md и манифестов manifest/*.yaml. Имена, начинающиеся с точки, видны через ls -A. Собранные файлы отмечены строкой <!-- lex: собран из … -->.
 
 ## Статус
-lex status --codex <кодекс> сверяет файл с последней версией из манифеста. Для собранного файла команда предлагает перенести ручную правку через lex absorb; для исходника — повторный импорт с --refresh.
+lex status --codex <кодекс> показывает файлы, которые правили после последней сборки или импорта, и команду для каждого. Собранному файлу с шапкой — lex absorb. Исходнику без шапки — lex import --refresh, а если его фрагменты уже правили — lex absorb. Если после сборки изменились и файл, и его фрагменты, status называет обе команды: lex absorb сохраняет текст файла и теряет правки фрагментов, lex build --force сохраняет фрагменты и теряет правки файла.
 
 ## Правка собранного файла
 Правь собранный файл прямо в нём, затем выполни команду из его шапки: lex absorb --codex <кодекс> <файл>. После этого запусти lex check --codex <кодекс>; успешная проверка возвращает код 0. Правка, пересекающая границу двух пунктов, сохраняется черновиком в <кодекс>/drafts; перенеси её оттуда вручную.
@@ -384,10 +384,24 @@ func statusCommand(o cliOptions) error {
 		return err
 	}
 	for _, entry := range entries {
-		fmt.Printf("%s: %s; run %s\n", entry.Manifest, entry.Output, entry.Command)
+		fmt.Println(statusLine(entry))
 	}
 	if len(entries) > 0 {
-		return errors.New("files changed since last build")
+		return errors.New("files differ from the codex")
 	}
 	return nil
+}
+
+func statusLine(entry lex.StatusEntry) string {
+	prefix := entry.Manifest + ": " + entry.Output + "; "
+	switch {
+	case entry.Problem != "":
+		return prefix + "cannot compare with the fragments: " + entry.Problem
+	case entry.KeepFragments != "":
+		return prefix + "the file and its fragments both changed since the last build; run " + entry.Command +
+			" to keep the file's text and drop the fragment edits, or " + entry.KeepFragments +
+			" to keep the fragments and drop the file's edits"
+	default:
+		return prefix + "run " + entry.Command
+	}
 }
