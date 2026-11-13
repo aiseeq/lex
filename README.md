@@ -36,3 +36,7 @@ Rule-to-code links follow `тип: правило` and precede `draft: true`. Ad
 `lex check` warns about changed, missing or unconfirmed links without changing its exit status, with one warning per cause. Full checks examine all fragments, including records; `--staged` examines indexed fragments in touched manifests and changed records (targets are read from disk); `--outputs-under` examines selected manifests; `--refs-only` does not examine code links. `lex code-debt --codex DIR` lists all mismatches and returns 0 even when the list is nonempty. Refresh matches headers by body first, then ID; links of unrecognized fragments are retained without duplicates in `code-link-debt.json` and listed as lost. Confirming a target on any fragment removes all lost entries for that target. To remove them without confirmation, run `lex code-debt --codex DIR --drop TARGET`; it fails if the target has no lost entries. Drop does not suppress mismatches on existing fragments.
 
 To keep a rule as a record without putting it in any generated file, explicitly add `запись: true` before `draft: true`, and keep the fragment out of all manifests. An unmarked orphan remains an error; removing a rule through `absorb` does not create a record. A record cannot be built through a manifest. Existing lex binaries cannot parse the new header fields: deploy the updated lex to every machine that builds the codex before adding any of them.
+
+## License
+
+[MIT](LICENSE).
