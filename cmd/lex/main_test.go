@@ -420,6 +420,121 @@ func TestCheckCommandPassesOutputsUnder(t *testing.T) {
 	}
 }
 
+func captureStreams(t *testing.T, action func() error) (stdout, stderr string, err error) {
+	t.Helper()
+	dir := t.TempDir()
+	outFile, createErr := os.Create(filepath.Join(dir, "stdout"))
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	errFile, createErr := os.Create(filepath.Join(dir, "stderr"))
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outFile, errFile
+	err = action()
+	os.Stdout, os.Stderr = oldOut, oldErr
+	for _, f := range []*os.File{outFile, errFile} {
+		if closeErr := f.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+	}
+	outData, readErr := os.ReadFile(outFile.Name())
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	errData, readErr := os.ReadFile(errFile.Name())
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	return string(outData), string(errData), err
+}
+
+func TestCheckPrintsRuleSummaryOnceAfterWarnings(t *testing.T) {
+	root := t.TempDir()
+	codex, output := filepath.Join(root, "codex"), filepath.Join(root, "rules.md")
+	body := "Правило о хранении ящиков.\n\nПравило о поливе теплицы.\n\nПравило о маркировке грядок.\n"
+	if err := os.WriteFile(output, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := lex.ImportWithOptions(codex, output, lex.ImportOptions{Home: root}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lex.Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	fields := map[string]string{
+		"ящиков":  "снять_когда: после разгрузки",
+		"теплицы": "основание: журнал полива",
+		"грядок":  "основание: схема посадок",
+	}
+	frags, err := filepath.Glob(filepath.Join(codex, "frag", "*", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	filled := 0
+	for _, frag := range frags {
+		raw, err := os.ReadFile(frag)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for word, field := range fields {
+			if !bytes.Contains(raw, []byte(word)) {
+				continue
+			}
+			key, _, _ := strings.Cut(field, ":")
+			changed := bytes.Replace(raw, []byte(key+": \n"), []byte(field+"\n"), 1)
+			if bytes.Equal(changed, raw) {
+				t.Fatalf("fragment %s has no empty %s field", frag, key)
+			}
+			if err := os.WriteFile(frag, changed, 0644); err != nil {
+				t.Fatal(err)
+			}
+			filled++
+		}
+	}
+	if filled != len(fields) {
+		t.Fatalf("filled %d fragments of %d, want %d", filled, len(frags), len(fields))
+	}
+	summary := "правил без основания: 1, без условия снятия: 2; фрагментов с цитатой пользователя в тексте: 0"
+	assertStreams := func(t *testing.T, stdout, stderr string) {
+		t.Helper()
+		if stdout != "" {
+			t.Fatalf("check wrote to stdout: %q", stdout)
+		}
+		lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
+		if len(lines) != 4 || lines[3] != summary {
+			t.Fatalf("stderr = %q, want three warnings and then the line %q", stderr, summary)
+		}
+		for _, line := range lines[:3] {
+			if !strings.HasPrefix(line, "warning: ") {
+				t.Fatalf("stderr line %q is not a warning; stderr = %q", line, stderr)
+			}
+		}
+		if got := strings.Count(stderr, "правил без основания"); got != 1 {
+			t.Fatalf("the closing line is printed %d times, want once; stderr = %q", got, stderr)
+		}
+	}
+	t.Run("clean check", func(t *testing.T) {
+		stdout, stderr, err := captureStreams(t, func() error { return run([]string{"check", "--codex", codex}) })
+		if err != nil {
+			t.Fatalf("check failed: %v\n%s", err, stderr)
+		}
+		assertStreams(t, stdout, stderr)
+	})
+	t.Run("failing check", func(t *testing.T) {
+		if err := os.WriteFile(output, []byte(body+"manual edit\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, err := captureStreams(t, func() error { return run([]string{"check", "--codex", codex}) })
+		if err == nil || exitCode(err) != 1 {
+			t.Fatalf("check of an edited output: err = %v, want exit code 1", err)
+		}
+		assertStreams(t, stdout, stderr)
+	})
+}
+
 func TestCheckTreeCLI(t *testing.T) {
 	root := t.TempDir()
 	codex := filepath.Join(root, "codex")
