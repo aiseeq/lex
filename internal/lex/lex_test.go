@@ -2155,6 +2155,145 @@ func TestAbsorbSharedFragmentPreflightAcrossHunks(t *testing.T) {
 	}
 }
 
+func TestStatusUsesBuiltHashAndSuggestsCommandByHeader(t *testing.T) {
+	t.Run("build after fragment edit", func(t *testing.T) {
+		codex := t.TempDir()
+		out := filepath.Join(t.TempDir(), "built.md")
+		if err := importData(codex, out, "built.md", []byte("before\n"), false); err != nil {
+			t.Fatal(err)
+		}
+		if err := setManifestHeader(codex, "built.md", true); err != nil {
+			t.Fatal(err)
+		}
+		if err := Build(codex, false); err != nil {
+			t.Fatal(err)
+		}
+		m, err := readManifest(filepath.Join(codex, "manifest", codexKey("built.md")+".yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fragment := filepath.Join(codex, "frag", filepath.FromSlash(m.parts[0])+".md")
+		raw, err := os.ReadFile(fragment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := fragmentBody(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, fragment, replaceFragmentBody(raw, body, []byte("after\n")))
+		if err := Build(codex, false); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := StatusWithHome(codex, filepath.Dir(out))
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("status after build = %#v, %v", entries, err)
+		}
+	})
+
+	t.Run("absorb", func(t *testing.T) {
+		codex := t.TempDir()
+		out := filepath.Join(t.TempDir(), "built.md")
+		if err := importData(codex, out, "built.md", []byte("before\n"), false); err != nil {
+			t.Fatal(err)
+		}
+		if err := setManifestHeader(codex, "built.md", true); err != nil {
+			t.Fatal(err)
+		}
+		if err := Build(codex, false); err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, out, []byte("after\n"))
+		if err := Absorb(codex, out, AbsorbOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := StatusWithHome(codex, filepath.Dir(out))
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("status after absorb = %#v, %v", entries, err)
+		}
+	})
+
+	t.Run("edited built output suggests absorb", func(t *testing.T) {
+		codex := t.TempDir()
+		out := filepath.Join(t.TempDir(), "built.md")
+		if err := importData(codex, out, "built.md", []byte("before\n"), false); err != nil {
+			t.Fatal(err)
+		}
+		if err := setManifestHeader(codex, "built.md", true); err != nil {
+			t.Fatal(err)
+		}
+		if err := Build(codex, false); err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, out, []byte("edited\n"))
+		entries, err := StatusWithHome(codex, filepath.Dir(out))
+		if err != nil || len(entries) != 1 || !strings.Contains(entries[0].Command, "lex absorb --codex") {
+			t.Fatalf("status = %#v, %v; want absorb command", entries, err)
+		}
+	})
+
+	t.Run("edited source suggests refresh", func(t *testing.T) {
+		codex := t.TempDir()
+		out := filepath.Join(t.TempDir(), "source.md")
+		if err := importData(codex, out, "source.md", []byte("before\n"), false); err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, out, []byte("edited\n"))
+		entries, err := StatusWithHome(codex, filepath.Dir(out))
+		if err != nil || len(entries) != 1 || !strings.Contains(entries[0].Command, "lex import --refresh --codex") {
+			t.Fatalf("status = %#v, %v; want refresh command", entries, err)
+		}
+	})
+
+	t.Run("legacy manifest uses source hash", func(t *testing.T) {
+		codex := t.TempDir()
+		out := filepath.Join(t.TempDir(), "source.md")
+		if err := importData(codex, out, "source.md", []byte("before\n"), false); err != nil {
+			t.Fatal(err)
+		}
+		manifestPath := filepath.Join(codex, "manifest", codexKey("source.md")+".yaml")
+		raw, err := os.ReadFile(manifestPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, manifestPath, bytes.Replace(raw, []byte("built_sha256: "+sha([]byte("before\n"))+"\n"), nil, 1))
+		mustWrite(t, out, []byte("edited\n"))
+		entries, err := StatusWithHome(codex, filepath.Dir(out))
+		if err != nil || len(entries) != 1 || !strings.Contains(entries[0].Command, "lex import --refresh --codex") {
+			t.Fatalf("status = %#v, %v; want legacy refresh command", entries, err)
+		}
+	})
+
+	t.Run("legacy built manifest suggests absorb", func(t *testing.T) {
+		codex := t.TempDir()
+		out := filepath.Join(t.TempDir(), "built.md")
+		if err := importData(codex, out, "built.md", []byte("before\n"), false); err != nil {
+			t.Fatal(err)
+		}
+		if err := setManifestHeader(codex, "built.md", true); err != nil {
+			t.Fatal(err)
+		}
+		if err := Build(codex, false); err != nil {
+			t.Fatal(err)
+		}
+		manifestPath := filepath.Join(codex, "manifest", codexKey("built.md")+".yaml")
+		raw, err := os.ReadFile(manifestPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		built, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, manifestPath, bytes.Replace(raw, []byte("built_sha256: "+sha(built)+"\n"), nil, 1))
+		mustWrite(t, out, []byte("edited\n"))
+		entries, err := StatusWithHome(codex, filepath.Dir(out))
+		if err != nil || len(entries) != 1 || !strings.Contains(entries[0].Command, "lex absorb --codex") {
+			t.Fatalf("status = %#v, %v; want legacy absorb command", entries, err)
+		}
+	})
+}
+
 func TestCutoverHeaderAndStatus(t *testing.T) {
 	codex := t.TempDir()
 	out := filepath.Join(t.TempDir(), "out.md")

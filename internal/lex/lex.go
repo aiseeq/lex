@@ -2780,15 +2780,23 @@ func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 		if e != nil {
 			return nil, fmt.Errorf("%s: %w", m.out, e)
 		}
-		if m.header {
-			b = withoutGeneratedHeader(b, p)
+		expectedHash := m.builtHash
+		if expectedHash == "" {
+			if m.header {
+				b = withoutGeneratedHeader(b, p)
+			}
+			expectedHash = m.hash
 		}
-		if sha(b) != m.hash {
+		if sha(b) != expectedHash {
 			rel, relErr := filepath.Rel(home, m.out)
 			if relErr != nil {
 				return nil, fmt.Errorf("%s: resolve source path: %w", m.out, relErr)
 			}
-			changed = append(changed, StatusEntry{Manifest: p, Output: m.out, Command: "lex import --refresh --codex " + strconv.Quote(codex) + " " + strconv.Quote(filepath.Join(home, rel))})
+			command := "lex import --refresh --codex "
+			if m.header {
+				command = "lex absorb --codex "
+			}
+			changed = append(changed, StatusEntry{Manifest: p, Output: m.out, Command: command + strconv.Quote(codex) + " " + strconv.Quote(filepath.Join(home, rel))})
 		}
 	}
 	return changed, nil

@@ -46,7 +46,7 @@ var commandHelpTable = []commandHelp{
 	{"build", "--codex DIR [--check] [--force] [--no-header] FILE", "собрать файлы из манифестов."},
 	{"absorb", "--codex DIR [--shared] FILE", "перенести правку собранного файла во фрагменты."},
 	{"check", "--codex DIR [--staged] [--outputs-under PATH] [--tree TREE] [--refs-only] [--decisions PATH]", "проверить кодекс и собранные файлы."},
-	{"status", "--codex DIR", "показать изменившиеся исходники и команды обновления."},
+	{"status", "--codex DIR", "показать изменившиеся файлы и команды для них."},
 	{"code-debt", "--codex DIR [--drop TARGET]", "показать или удалить запись о долге ссылок на код."},
 	{"code-confirm", "--codex DIR FRAGMENT", "подтвердить ссылки фрагмента на код."},
 	{"quotes-to-basis", "--codex DIR --report FILE [--apply] [--outputs-under PATH] [--tree TREE]", "перенести цитаты в поле основания."},
@@ -66,6 +66,9 @@ func helpText() string {
 
 const guideText = `## Кодекс
 Кодекс состоит из фрагментов frag/<файл>/<пункт>.md и манифестов manifest/*.yaml. Имена, начинающиеся с точки, видны через ls -A. Собранные файлы отмечены строкой <!-- lex: собран из … -->.
+
+## Статус
+lex status --codex <кодекс> сверяет файл с последней версией из манифеста. Для собранного файла команда предлагает перенести ручную правку через lex absorb; для исходника — повторный импорт с --refresh.
 
 ## Правка собранного файла
 Правь собранный файл прямо в нём, затем выполни команду из его шапки: lex absorb --codex <кодекс> <файл>. После этого запусти lex check --codex <кодекс>; успешная проверка возвращает код 0. Правка, пересекающая границу двух пунктов, сохраняется черновиком в <кодекс>/drafts; перенеси её оттуда вручную.
@@ -369,7 +372,7 @@ func statusCommand(o cliOptions) error {
 		fmt.Printf("%s: %s; run %s\n", entry.Manifest, entry.Output, entry.Command)
 	}
 	if len(entries) > 0 {
-		return errors.New("source files changed since import")
+		return errors.New("files changed since last build")
 	}
 	return nil
 }
