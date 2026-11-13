@@ -154,6 +154,37 @@ func validateRefresh(codex, topic string, m manifest) error {
 	return errors.New(strings.Join(problems, "\n"))
 }
 
+type refreshAssessment struct {
+	sourceData       []byte
+	cleanData        []byte
+	purposeEnabled   bool
+	noChange         bool
+	fragmentsCurrent bool
+}
+
+func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byte) (refreshAssessment, error) {
+	sourceData := diskData
+	if m.header {
+		sourceData = withoutGeneratedHeader(diskData, manifestPath)
+	}
+	validationErr := validateRefresh(codex, topic, m)
+	purposeEnabled, cleanData, err := prepareRefreshPurpose(codex, m, sourceData)
+	if err != nil {
+		return refreshAssessment{fragmentsCurrent: validationErr == nil}, err
+	}
+	assessment := refreshAssessment{
+		sourceData:       sourceData,
+		cleanData:        cleanData,
+		purposeEnabled:   purposeEnabled,
+		noChange:         sha(sourceData) == m.hash,
+		fragmentsCurrent: validationErr == nil,
+	}
+	if !assessment.noChange && validationErr != nil {
+		return assessment, validationErr
+	}
+	return assessment, nil
+}
+
 type ImportOptions struct {
 	Refresh bool
 	Home    string
@@ -231,25 +262,25 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 	var preservedHeaders []preservedFragmentHeader
 	var units [][]byte
 	var sourceData []byte
-	var cleanData []byte
+	var assessment refreshAssessment
 	old, err := readManifest(manifestPath)
 	if err == nil {
 		if old.out != abs {
 			return fmt.Errorf("%s: manifest key already points to %s", manifestPath, old.out)
 		}
-		if refresh && old.header {
-			data = withoutGeneratedHeader(data, manifestPath)
-		}
-		var purposeEnabled bool
 		if refresh {
-			purposeEnabled, cleanData, err = prepareRefreshPurpose(codex, old, data)
+			assessment, err = assessRefresh(codex, topic, manifestPath, old, data)
 			if err != nil {
 				return err
 			}
+			data = assessment.sourceData
 		}
-		digest := sha(data)
 		mergedLinks := uniqueLinks(append(old.links, links...))
-		if old.hash == digest {
+		unchanged := assessment.noChange
+		if !refresh {
+			unchanged = old.hash == sha(data)
+		}
+		if unchanged {
 			if equalLinks(old.links, mergedLinks) {
 				return nil
 			}
@@ -259,21 +290,18 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 		if !refresh {
 			return fmt.Errorf("%s: source changed; re-import with --refresh", abs)
 		}
-		if err := validateRefresh(codex, topic, old); err != nil {
-			return err
-		}
 		preservedHeaders, err = readFragmentHeaders(codex, old.parts)
 		if err != nil {
 			return err
 		}
 		sourceData = append([]byte(nil), data...)
-		if purposeEnabled {
+		if assessment.purposeEnabled {
 			units, err = refreshPurposeUnits(data, preservedHeaders)
 			if err != nil {
 				return err
 			}
 		} else {
-			units = split(cleanData)
+			units = split(assessment.cleanData)
 		}
 		if err := removeOldFragments(codex, old.parts, os.Remove); err != nil {
 			return err
@@ -1000,6 +1028,25 @@ func equalOutputIgnoringGeneratedHeader(actual, want []byte, manifestPath string
 
 func outputMatchesGenerated(actual, want []byte, header bool, manifestPath string) bool {
 	return bytes.Equal(actual, want) || header && equalOutputIgnoringGeneratedHeader(actual, want, manifestPath)
+}
+
+func generatedHashMatches(want []byte, header bool, manifestPath, expectedHash string) bool {
+	if sha(want) == expectedHash {
+		return true
+	}
+	if !header {
+		return false
+	}
+	if sha(withoutGeneratedHeader(want, manifestPath)) == expectedHash {
+		return true
+	}
+	preferred := generatedMarker(manifestPath)
+	for _, marker := range generatedMarkerForms(manifestPath) {
+		if sha(bytes.Replace(want, preferred, marker, 1)) == expectedHash {
+			return true
+		}
+	}
+	return false
 }
 
 func outputHasManualEdits(readErr error, actual, want []byte, m manifest, path string, force bool) bool {
@@ -2760,6 +2807,8 @@ type StatusEntry struct {
 	// KeepFragments is set when the fragments changed after the last build too:
 	// the command that keeps them and drops the file's edits.
 	KeepFragments string
+	// ConflictSummary describes which versions are known to differ.
+	ConflictSummary string
 	// Problem says why the file could not be compared; Command is empty then.
 	Problem string
 }
@@ -2784,44 +2833,79 @@ func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 	sort.Strings(paths)
 	var changed []StatusEntry
 	for _, p := range paths {
-		m, e := readManifest(p)
-		if e != nil {
-			return nil, e
+		m, err := readManifest(p)
+		if err != nil {
+			return nil, err
 		}
-		b, e := os.ReadFile(m.out)
-		if e != nil {
-			return nil, fmt.Errorf("%s: %w", m.out, e)
-		}
-		if sha(b) == m.builtHash {
+		entry := StatusEntry{Manifest: p, Output: m.out}
+		actual, err := os.ReadFile(m.out)
+		if err != nil {
+			entry.Problem = err.Error()
+			changed = append(changed, entry)
 			continue
 		}
-		want, e := manifestBody(codex, m)
-		if e != nil {
-			changed = append(changed, StatusEntry{Manifest: p, Output: m.out, Problem: e.Error()})
+		if !statusFileChanged(actual, p, m) {
+			continue
+		}
+		want, err := manifestBody(codex, m)
+		if err != nil {
+			entry.Problem = err.Error()
+			changed = append(changed, entry)
 			continue
 		}
 		if m.header {
 			want = generatedHeader(p, want)
 		}
-		if outputMatchesGenerated(b, want, m.header, p) {
+		if outputMatchesGenerated(actual, want, m.header, p) {
 			continue
 		}
-		rel, relErr := filepath.Rel(home, m.out)
-		if relErr != nil {
-			return nil, fmt.Errorf("%s: resolve source path: %w", m.out, relErr)
-		}
-		target := strconv.Quote(codex) + " " + strconv.Quote(filepath.Join(home, rel))
-		entry := StatusEntry{Manifest: p, Output: m.out, Command: "lex import --refresh --codex " + target}
-		fragmentsMoved := m.builtHash != "" && sha(want) != m.builtHash
-		if fragmentsMoved || m.header || validateRefresh(codex, manifestKey(p), m) != nil {
-			entry.Command = "lex absorb --codex " + target
-		}
-		if fragmentsMoved {
-			entry.KeepFragments = "lex build --force --codex " + target
+		if err := recommendStatusCommands(&entry, codex, home, p, m, actual, want); err != nil {
+			return nil, err
 		}
 		changed = append(changed, entry)
 	}
 	return changed, nil
+}
+
+func statusFileChanged(actual []byte, manifestPath string, m manifest) bool {
+	if m.builtHash != "" {
+		return sha(actual) != m.builtHash
+	}
+	source := actual
+	if m.header {
+		source = withoutGeneratedHeader(actual, manifestPath)
+	}
+	return sha(source) != m.hash
+}
+
+func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath string, m manifest, actual, want []byte) error {
+	assessment, refreshErr := assessRefresh(codex, manifestKey(manifestPath), manifestPath, m, actual)
+	fragmentsChanged := false
+	if m.builtHash != "" {
+		fragmentsChanged = !generatedHashMatches(want, m.header, manifestPath, m.builtHash)
+	} else {
+		fragmentsChanged = !assessment.fragmentsCurrent
+	}
+	rel, err := filepath.Rel(home, m.out)
+	if err != nil {
+		return fmt.Errorf("%s: resolve source path: %w", m.out, err)
+	}
+	target := strconv.Quote(codex) + " " + strconv.Quote(filepath.Join(home, rel))
+	entry.Command = "lex import --refresh --codex " + target
+	if fragmentsChanged {
+		entry.Command = "lex absorb --codex " + target
+		entry.KeepFragments = "lex build --force --codex " + target
+		if m.builtHash == "" {
+			entry.ConflictSummary = "the file differs from its recorded source and the fragments differ from the manifest"
+		} else {
+			entry.ConflictSummary = "the file and its fragments both changed since the last build"
+		}
+		return nil
+	}
+	if m.header || refreshErr != nil || assessment.noChange {
+		entry.Command = "lex absorb --codex " + target
+	}
+	return nil
 }
 
 func split(data []byte) [][]byte {

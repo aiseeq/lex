@@ -166,7 +166,14 @@ func TestStatusDescriptionAndError(t *testing.T) {
 	if !strings.Contains(buildFlags, "[FILE]") {
 		t.Errorf("build help flags = %q, want optional [FILE]", buildFlags)
 	}
-	for _, text := range []string{"lex build --force", "теряет правки фрагментов", "теряет правки файла"} {
+	for _, text := range []string{
+		"lex build --force",
+		"теряет правки фрагментов",
+		"теряет правки файла",
+		"built_sha256",
+		"source_sha256",
+		"собранного файла или фрагмента нет",
+	} {
 		if !strings.Contains(guideText, text) {
 			t.Errorf("guide lacks status guidance %q", text)
 		}
@@ -190,6 +197,83 @@ func TestStatusDescriptionAndError(t *testing.T) {
 	_, err := captureRun(t, "status", "--codex", codex)
 	if err == nil || err.Error() != "files differ from the codex" {
 		t.Fatalf("status error = %v, want files differ from the codex", err)
+	}
+}
+
+func TestLegacyStatusConflictLineDoesNotClaimBothChanged(t *testing.T) {
+	root := t.TempDir()
+	codex := filepath.Join(root, "codex")
+	output := filepath.Join(root, "document.md")
+	source := "# Start\n\n- alpha old\n\n## Interlude\n\n- beta old\n"
+	if err := os.WriteFile(output, []byte(source), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := lex.ImportWithOptions(codex, output, lex.ImportOptions{Home: root}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lex.Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	manifests, err := filepath.Glob(filepath.Join(codex, "manifest", "*.yaml"))
+	if err != nil || len(manifests) != 1 {
+		t.Fatalf("manifests = %v, %v", manifests, err)
+	}
+	manifestData, err := os.ReadFile(manifests[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldManifest []string
+	for line := range strings.SplitSeq(string(manifestData), "\n") {
+		if !strings.HasPrefix(line, "built_sha256: ") {
+			oldManifest = append(oldManifest, line)
+		}
+	}
+	if err := os.WriteFile(manifests[0], []byte(strings.Join(oldManifest, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var editedFragment string
+	err = filepath.Walk(filepath.Join(codex, "frag"), func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(data), "beta old") {
+			editedFragment = path
+			return os.WriteFile(path, bytes.Replace(data, []byte("beta old"), []byte("beta in fragment"), 1), 0644)
+		}
+		return nil
+	})
+	if err != nil || editedFragment == "" {
+		t.Fatalf("edit beta fragment %q: %v", editedFragment, err)
+	}
+	built, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(output, bytes.Replace(built, []byte("alpha old"), []byte("alpha in file"), 1), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := captureRun(t, "status", "--codex", codex)
+	if err == nil {
+		t.Fatal("status returned no error for changed file")
+	}
+	for _, text := range []string{
+		"fragments differ from the manifest",
+		"lex absorb --codex",
+		"lex build --force --codex",
+	} {
+		if !strings.Contains(got, text) {
+			t.Errorf("status output %q lacks %q", got, text)
+		}
+	}
+	if strings.Contains(got, "both changed since the last build") {
+		t.Errorf("legacy status asserted changes since build: %q", got)
 	}
 }
 

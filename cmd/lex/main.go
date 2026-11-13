@@ -76,7 +76,7 @@ const guideText = `## Кодекс
 Кодекс состоит из фрагментов frag/<файл>/<пункт>.md и манифестов manifest/*.yaml. Имена, начинающиеся с точки, видны через ls -A. Собранные файлы отмечены строкой <!-- lex: собран из … -->.
 
 ## Статус
-lex status --codex <кодекс> показывает файлы, которые правили после последней сборки или импорта, и команду для каждого. Собранному файлу с шапкой — lex absorb. Исходнику без шапки — lex import --refresh, а если его фрагменты уже правили — lex absorb. Если после сборки изменились и файл, и его фрагменты, status называет обе команды: lex absorb сохраняет текст файла и теряет правки фрагментов, lex build --force сохраняет фрагменты и теряет правки файла.
+lex status --codex <кодекс> показывает файл, который отличается от последней сборки или записанного источника. Если манифест содержит built_sha256, status сверяет с ним файл и текущую сборку; без built_sha256 сверяет файл с source_sha256, убирая шапку lex при header: true. Если собранного файла или фрагмента нет, status показывает путь и продолжает список. Для одного только изменения файла с шапкой подходит lex absorb. Без шапки status предлагает lex import --refresh, если refresh изменит файл и пройдёт проверки; иначе — lex absorb. Если изменились и файл, и фрагменты, status называет обе команды: lex absorb сохраняет текст файла и теряет правки фрагментов, lex build --force сохраняет фрагменты и теряет правки файла.
 
 ## Правка собранного файла
 Правь собранный файл прямо в нём, затем выполни команду из его шапки: lex absorb --codex <кодекс> <файл>. После этого запусти lex check --codex <кодекс>; успешная проверка возвращает код 0. Правка, пересекающая границу двух пунктов, сохраняется черновиком в <кодекс>/drafts; перенеси её оттуда вручную.
@@ -398,7 +398,11 @@ func statusLine(entry lex.StatusEntry) string {
 	case entry.Problem != "":
 		return prefix + "cannot compare with the fragments: " + entry.Problem
 	case entry.KeepFragments != "":
-		return prefix + "the file and its fragments both changed since the last build; run " + entry.Command +
+		summary := entry.ConflictSummary
+		if summary == "" {
+			summary = "the file and its fragments both changed since the last build"
+		}
+		return prefix + summary + "; run " + entry.Command +
 			" to keep the file's text and drop the fragment edits, or " + entry.KeepFragments +
 			" to keep the fragments and drop the file's edits"
 	default:

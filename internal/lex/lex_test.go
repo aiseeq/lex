@@ -2603,6 +2603,225 @@ func TestRefreshStoresDiskHashAndRecognizesHeaderVariants(t *testing.T) {
 	})
 }
 
+func TestStatusLegacyFragmentsAndHints(t *testing.T) {
+	for _, header := range []bool{false, true} {
+		name := "without header"
+		if header {
+			name = "with header"
+		}
+		t.Run(name, func(t *testing.T) {
+			codex := t.TempDir()
+			out := filepath.Join(t.TempDir(), "legacy.md")
+			source := []byte("# Start\n\n- alpha old\n\n## Interlude\n\n- beta old\n")
+			if err := importData(codex, out, "legacy.md", source, false); err != nil {
+				t.Fatal(err)
+			}
+			if header {
+				if err := setManifestHeader(codex, "legacy.md", true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := Build(codex, false); err != nil {
+				t.Fatal(err)
+			}
+			manifestPath := filepath.Join(codex, "manifest", codexKey("legacy.md")+".yaml")
+			manifestData, err := os.ReadFile(manifestPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifestData = bytes.Replace(manifestData, []byte("built_sha256: "+sha(source)+"\n"), nil, 1)
+			mustWrite(t, manifestPath, manifestData)
+			m, err := readManifest(manifestPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fragment := filepath.Join(codex, "frag", filepath.FromSlash(m.parts[len(m.parts)-1])+".md")
+			raw, err := os.ReadFile(fragment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := fragmentBody(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, fragment, replaceFragmentBody(raw, body, []byte("beta in fragment\n")))
+			entries, err := StatusWithHome(codex, filepath.Dir(out))
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("status after fragment-only edit = %#v, %v; want clean", entries, err)
+			}
+			built, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, out, bytes.Replace(built, []byte("alpha old"), []byte("alpha in file"), 1))
+			entries, err = StatusWithHome(codex, filepath.Dir(out))
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("status after both edits = %#v, %v; want one entry", entries, err)
+			}
+			entry := entries[0]
+			if !strings.HasPrefix(entry.Command, "lex absorb --codex ") ||
+				!strings.HasPrefix(entry.KeepFragments, "lex build --force --codex ") {
+				t.Fatalf("legacy conflict entry = %#v", entry)
+			}
+			if err := BuildWithOptions(codex, BuildOptions{Force: true, Output: out}); err != nil {
+				t.Fatal(err)
+			}
+			entries, err = StatusWithHome(codex, filepath.Dir(out))
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("status after suggested build --force = %#v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestStatusRefreshNoOpSuggestsAbsorb(t *testing.T) {
+	codex := t.TempDir()
+	out := filepath.Join(t.TempDir(), "back.md")
+	source := []byte("# Back\n\n- back one\n")
+	if err := importData(codex, out, "back.md", source, false); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, out, []byte("# Back\n\n- back one edited\n"))
+	if err := Absorb(codex, out, AbsorbOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, out, source)
+	entries, err := StatusWithHome(codex, filepath.Dir(out))
+	if err != nil || len(entries) != 1 ||
+		!strings.HasPrefix(entries[0].Command, "lex absorb --codex ") ||
+		entries[0].KeepFragments != "" {
+		t.Fatalf("status after restoring source text = %#v, %v; want one absorb", entries, err)
+	}
+	if err := Absorb(codex, out, AbsorbOptions{}); err != nil {
+		t.Fatalf("run suggested absorb: %v", err)
+	}
+	entries, err = StatusWithHome(codex, filepath.Dir(out))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("status after suggested absorb = %#v, %v; want clean", entries, err)
+	}
+}
+
+func TestStatusMissingOutputContinues(t *testing.T) {
+	root := t.TempDir()
+	codex := filepath.Join(root, "codex")
+	missing := filepath.Join(root, "missing.md")
+	present := filepath.Join(root, "present.md")
+	if err := importData(codex, missing, "a-missing.md", []byte("missing text\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := importData(codex, present, "b-present.md", []byte("present text\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := setManifestHeader(codex, "a-missing.md", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := setManifestHeader(codex, "b-present.md", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(missing); err != nil {
+		t.Fatal(err)
+	}
+	presentData, err := os.ReadFile(present)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, present, bytes.Replace(presentData, []byte("present text"), []byte("present edited"), 1))
+	entries, err := StatusWithHome(codex, root)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("status = %#v, %v; want problem and changed output", entries, err)
+	}
+	foundMissing, foundPresent := false, false
+	for _, entry := range entries {
+		switch entry.Output {
+		case missing:
+			foundMissing = strings.Contains(entry.Problem, missing)
+		case present:
+			foundPresent = strings.HasPrefix(entry.Command, "lex absorb --codex ")
+		}
+	}
+	if !foundMissing || !foundPresent {
+		t.Fatalf("status entries = %#v; missing output path or other output command not reported", entries)
+	}
+	if err := BuildWithOptions(codex, BuildOptions{Force: true, Output: missing}); err != nil {
+		t.Fatalf("rebuild missing output: %v", err)
+	}
+	if err := Absorb(codex, present, AbsorbOptions{}); err != nil {
+		t.Fatalf("run suggested absorb: %v", err)
+	}
+	entries, err = StatusWithHome(codex, root)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("status after repairs = %#v, %v; want clean", entries, err)
+	}
+}
+
+func TestStatusHeaderFormAfterAbsorb(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	codex := filepath.Join(root, "codex")
+	out := filepath.Join(root, "form.md")
+	if err := importData(codex, out, "form.md", []byte("form text\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := setManifestHeader(codex, "form.md", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	built, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alternate := bytes.ReplaceAll(built, []byte("~/codex"), []byte(resolvePath(codex)))
+	if bytes.Equal(alternate, built) {
+		t.Fatal("generated header had no alternate path form")
+	}
+	mustWrite(t, out, bytes.Replace(alternate, []byte("form text"), []byte("form text absorbed"), 1))
+	if err := Absorb(codex, out, AbsorbOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	absorbed, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := readManifest(filepath.Join(codex, "manifest", codexKey("form.md")+".yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentBody, err := manifestBody(codex, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.builtHash != sha(absorbed) || sha(generatedHeader(filepath.Join(codex, "manifest", codexKey("form.md")+".yaml"), currentBody)) == m.builtHash {
+		t.Fatalf("fixture does not preserve the alternate header in the absorbed hash")
+	}
+	entries, err := StatusWithHome(codex, root)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("status after absorb = %#v, %v; want clean", entries, err)
+	}
+	edited, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, out, bytes.Replace(edited, []byte("form text absorbed"), []byte("form text edited"), 1))
+	entries, err = StatusWithHome(codex, root)
+	if err != nil || len(entries) != 1 ||
+		!strings.HasPrefix(entries[0].Command, "lex absorb --codex ") ||
+		entries[0].KeepFragments != "" {
+		t.Fatalf("status after file edit = %#v, %v; want one absorb", entries, err)
+	}
+	if err := Absorb(codex, out, AbsorbOptions{}); err != nil {
+		t.Fatalf("run suggested absorb: %v", err)
+	}
+	entries, err = StatusWithHome(codex, root)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("status after suggested absorb = %#v, %v; want clean", entries, err)
+	}
+}
+
 func TestCutoverHeaderAndStatus(t *testing.T) {
 	codex := t.TempDir()
 	out := filepath.Join(t.TempDir(), "out.md")
