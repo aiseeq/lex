@@ -2294,6 +2294,135 @@ func TestStatusUsesBuiltHashAndSuggestsCommandByHeader(t *testing.T) {
 	})
 }
 
+func TestStatusUsesGeneratedOutputAndRefreshability(t *testing.T) {
+	t.Run("refresh with generated header stays clean", func(t *testing.T) {
+		root := t.TempDir()
+		codex := filepath.Join(root, "codex")
+		out := filepath.Join(root, "refresh.md")
+		mustWrite(t, out, []byte("item one\n"))
+		if err := ImportWithOptions(codex, out, ImportOptions{Home: root}); err != nil {
+			t.Fatal(err)
+		}
+		if err := setManifestHeader(codex, "refresh.md", true); err != nil {
+			t.Fatal(err)
+		}
+		if err := Build(codex, false); err != nil {
+			t.Fatal(err)
+		}
+		built, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, out, bytes.Replace(built, []byte("item one"), []byte("item one edited"), 1))
+		if err := ImportWithOptions(codex, out, ImportOptions{Home: root, Refresh: true}); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := StatusWithHome(codex, root)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("status after refresh = %#v, %v", entries, err)
+		}
+	})
+
+	t.Run("fragment edits suggest absorb without header", func(t *testing.T) {
+		codex := t.TempDir()
+		out := filepath.Join(t.TempDir(), "plain.md")
+		if err := importData(codex, out, "plain.md", []byte("line one\n"), false); err != nil {
+			t.Fatal(err)
+		}
+		if err := Build(codex, false); err != nil {
+			t.Fatal(err)
+		}
+		m, err := readManifest(filepath.Join(codex, "manifest", codexKey("plain.md")+".yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fragment := filepath.Join(codex, "frag", filepath.FromSlash(m.parts[0])+".md")
+		raw, err := os.ReadFile(fragment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := fragmentBody(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, fragment, replaceFragmentBody(raw, body, []byte("line one rebuilt\n")))
+		if err := Build(codex, false); err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, out, []byte("line one rebuilt by hand\n"))
+		entries, err := StatusWithHome(codex, filepath.Dir(out))
+		if err != nil || len(entries) != 1 || !strings.Contains(entries[0].Command, "lex absorb --codex") {
+			t.Fatalf("status = %#v, %v; want absorb command", entries, err)
+		}
+	})
+
+	t.Run("legacy manifest matches current fragments", func(t *testing.T) {
+		codex := t.TempDir()
+		out := filepath.Join(t.TempDir(), "legacy.md")
+		if err := importData(codex, out, "legacy.md", []byte("before\n"), false); err != nil {
+			t.Fatal(err)
+		}
+		if err := Build(codex, false); err != nil {
+			t.Fatal(err)
+		}
+		m, err := readManifest(filepath.Join(codex, "manifest", codexKey("legacy.md")+".yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fragment := filepath.Join(codex, "frag", filepath.FromSlash(m.parts[0])+".md")
+		raw, err := os.ReadFile(fragment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := fragmentBody(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, fragment, replaceFragmentBody(raw, body, []byte("after\n")))
+		if err := Build(codex, false); err != nil {
+			t.Fatal(err)
+		}
+		manifestPath := filepath.Join(codex, "manifest", codexKey("legacy.md")+".yaml")
+		manifestData, err := os.ReadFile(manifestPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacy := bytes.Replace(manifestData, []byte("built_sha256: "+sha([]byte("after\n"))+"\n"), nil, 1)
+		if bytes.Contains(legacy, []byte("built_sha256")) {
+			t.Fatalf("manifest still records the build hash: %s", legacy)
+		}
+		mustWrite(t, manifestPath, legacy)
+		entries, err := StatusWithHome(codex, filepath.Dir(out))
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("status for matching legacy output = %#v, %v", entries, err)
+		}
+	})
+
+	t.Run("removed generated header remains changed", func(t *testing.T) {
+		codex := t.TempDir()
+		out := filepath.Join(t.TempDir(), "built.md")
+		if err := importData(codex, out, "built.md", []byte("body\n"), false); err != nil {
+			t.Fatal(err)
+		}
+		if err := setManifestHeader(codex, "built.md", true); err != nil {
+			t.Fatal(err)
+		}
+		if err := Build(codex, false); err != nil {
+			t.Fatal(err)
+		}
+		manifestPath := filepath.Join(codex, "manifest", codexKey("built.md")+".yaml")
+		built, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, out, withoutGeneratedHeader(built, manifestPath))
+		entries, err := StatusWithHome(codex, filepath.Dir(out))
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("status after header removal = %#v, %v; want changed file", entries, err)
+		}
+	})
+}
+
 func TestCutoverHeaderAndStatus(t *testing.T) {
 	codex := t.TempDir()
 	out := filepath.Join(t.TempDir(), "out.md")

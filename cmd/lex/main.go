@@ -58,6 +58,10 @@ func commandHelpLine(command commandHelp) string {
 	return fmt.Sprintf("  %s %s — %s\n", command.name, command.flags, command.description)
 }
 
+func commandUsageText(command commandHelp) string {
+	return fmt.Sprintf("usage: lex %s %s\n%s\n", command.name, command.flags, command.description)
+}
+
 func helpText() string {
 	var b strings.Builder
 	b.WriteString("lex собирает кодекс инструкций из фрагментов по манифестам.\n\nКоманды:\n")
@@ -87,13 +91,13 @@ lex status --codex <кодекс> сверяет файл с последней 
 lex absorb и lex build печатают изменённые файлы; если кодекс лежит внутри ~/.claude и найден ~/.claude-config.git, они также печатают git add для этого репозитория. Закоммить эти изменения в репозитории конфигурации Claude. Кодекс, лежащий в репозитории проекта, коммить в этом репозитории вместе с изменёнными собранными файлами.
 `
 
-func isDispatchCommand(name string) bool {
+func findCommand(name string) (commandHelp, bool) {
 	for _, command := range commandHelpTable {
 		if command.name == name {
-			return true
+			return command, true
 		}
 	}
-	return false
+	return commandHelp{}, false
 }
 
 func exitCode(err error) int {
@@ -130,16 +134,15 @@ func run(args []string) error {
 	if len(args) == 0 {
 		return usageError{message: helpText(), help: true}
 	}
-	if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
-		for _, command := range commandHelpTable {
-			if command.name == args[0] {
-				fmt.Print(commandHelpLine(command))
-				return nil
-			}
-		}
-	}
-	if !isDispatchCommand(args[0]) {
+	command, known := findCommand(args[0])
+	if !known {
 		return usageError{message: helpText(), help: true}
+	}
+	for _, arg := range args[1:] {
+		if arg == "-h" || arg == "--help" {
+			fmt.Print(commandUsageText(command))
+			return nil
+		}
 	}
 	opts, err := parseArguments(args)
 	if err != nil {

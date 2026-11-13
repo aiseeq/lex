@@ -101,20 +101,35 @@ func TestCommandHelpFlags(t *testing.T) {
 				if err != nil {
 					t.Fatalf("help returned %v", err)
 				}
-				row := command.name + " " + command.flags + " — " + command.description
-				if !strings.Contains(got, row) {
-					t.Errorf("help %q lacks command row %q", got, row)
-				}
-				if strings.Contains(got, "Команды:") {
-					t.Errorf("command help includes command list: %q", got)
-				}
-				for _, other := range commandHelpTable {
-					if other.name != command.name && strings.Contains(got, "\n  "+other.name+" ") {
-						t.Errorf("help for %s includes %s", command.name, other.name)
-					}
+				want := "usage: lex " + command.name + " " + command.flags + "\n" + command.description + "\n"
+				if got != want {
+					t.Errorf("help = %q, want %q", got, want)
 				}
 			})
 		}
+	}
+
+	cases := [][]string{
+		{"status", "--codex", "missing", "-h"},
+		{"status", "-h", "--codex", "missing"},
+		{"build", "--check", "--help"},
+		{"import", "--codex", "missing", "missing.md", "--help"},
+	}
+	for _, args := range cases {
+		t.Run(strings.Join(args, "/"), func(t *testing.T) {
+			help, known := findCommand(args[0])
+			if !known {
+				t.Fatalf("unknown command %q", args[0])
+			}
+			got, err := captureRun(t, args...)
+			if err != nil {
+				t.Fatalf("help returned %v", err)
+			}
+			want := "usage: lex " + help.name + " " + help.flags + "\n" + help.description + "\n"
+			if got != want {
+				t.Errorf("help = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

@@ -2780,24 +2780,28 @@ func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 		if e != nil {
 			return nil, fmt.Errorf("%s: %w", m.out, e)
 		}
-		expectedHash := m.builtHash
-		if expectedHash == "" {
-			if m.header {
-				b = withoutGeneratedHeader(b, p)
-			}
-			expectedHash = m.hash
+		if sha(b) == m.builtHash {
+			continue
 		}
-		if sha(b) != expectedHash {
-			rel, relErr := filepath.Rel(home, m.out)
-			if relErr != nil {
-				return nil, fmt.Errorf("%s: resolve source path: %w", m.out, relErr)
-			}
-			command := "lex import --refresh --codex "
-			if m.header {
-				command = "lex absorb --codex "
-			}
-			changed = append(changed, StatusEntry{Manifest: p, Output: m.out, Command: command + strconv.Quote(codex) + " " + strconv.Quote(filepath.Join(home, rel))})
+		want, e := manifestBody(codex, m)
+		if e != nil {
+			return nil, e
 		}
+		if m.header {
+			want = generatedHeader(p, want)
+		}
+		if outputMatchesGenerated(b, want, m.header, p) {
+			continue
+		}
+		rel, relErr := filepath.Rel(home, m.out)
+		if relErr != nil {
+			return nil, fmt.Errorf("%s: resolve source path: %w", m.out, relErr)
+		}
+		command := "lex import --refresh --codex "
+		if m.header || validateRefresh(codex, manifestKey(p), m) != nil {
+			command = "lex absorb --codex "
+		}
+		changed = append(changed, StatusEntry{Manifest: p, Output: m.out, Command: command + strconv.Quote(codex) + " " + strconv.Quote(filepath.Join(home, rel))})
 	}
 	return changed, nil
 }
