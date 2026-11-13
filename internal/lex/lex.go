@@ -3079,33 +3079,38 @@ func ruleFieldWarnings(path string, raw []byte) []string {
 	}
 	header := fragmentHeader(raw)
 	if len(header) > 0 && hasUserQuoteInText(raw[len(header):]) {
-		warnings = append(warnings, path+": цитата пользователя в тексте, место ей — основание")
+		warnings = append(warnings, path+textQuoteWarning)
 	}
 	return warnings
 }
 
+// The three rule warnings of lex check, as they follow the fragment path.
+const (
+	emptyBasisWarning   = ": rule has empty основание"
+	emptyRemovalWarning = ": rule has empty снять_когда"
+	textQuoteWarning    = ": цитата пользователя в тексте, место ей — основание"
+)
+
 func isRuleBasisWarning(warning string) bool {
-	return strings.Contains(warning, ": rule has empty основание") ||
-		strings.Contains(warning, ": rule has empty снять_когда") ||
-		strings.Contains(warning, ": цитата пользователя в тексте, место ей — основание")
+	return strings.Contains(warning, emptyBasisWarning) ||
+		strings.Contains(warning, emptyRemovalWarning) ||
+		strings.Contains(warning, textQuoteWarning)
 }
 
-// RuleBasisWarningCount returns the number of distinct fragments with at least one rule-basis warning.
-func RuleBasisWarningCount(warnings []string) int {
-	paths := make(map[string]bool)
+// RuleWarningSummary returns the closing line of lex check: how many warnings of each rule kind there are.
+func RuleWarningSummary(warnings []string) string {
+	basis, removal, quote := 0, 0, 0
 	for _, warning := range warnings {
-		if !isRuleBasisWarning(warning) {
-			continue
-		}
-		marker := strings.Index(warning, ": rule has empty ")
-		if marker < 0 {
-			marker = strings.Index(warning, ": цитата пользователя в тексте, место ей — основание")
-		}
-		if marker > 0 {
-			paths[warning[:marker]] = true
+		switch {
+		case strings.Contains(warning, emptyBasisWarning):
+			basis++
+		case strings.Contains(warning, emptyRemovalWarning):
+			removal++
+		case strings.Contains(warning, textQuoteWarning):
+			quote++
 		}
 	}
-	return len(paths)
+	return fmt.Sprintf("правил без основания: %d, без условия снятия: %d; фрагментов с цитатой пользователя в тексте: %d", basis, removal, quote)
 }
 func parseManifestLink(line string, m *manifest) (bool, error) {
 	if strings.TrimSpace(line) == "" {
