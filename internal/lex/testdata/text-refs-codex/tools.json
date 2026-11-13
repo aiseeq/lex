@@ -1,0 +1,120 @@
+{
+  "text_refs": {
+    "exceptions": [
+      {
+        "path": "skills/sample-01/SKILL.md",
+        "kind": 2,
+        "contains": "synthetic exception 01",
+        "reason": "Учебное исключение 01 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-02/SKILL.md",
+        "kind": 3,
+        "contains": "synthetic exception 02",
+        "reason": "Учебное исключение 02 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample/SKILL.md",
+        "kind": 4,
+        "contains": "synthetic exception 03",
+        "reason": "Учебное исключение 03 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-04/SKILL.md",
+        "kind": 1,
+        "contains": "synthetic exception 04",
+        "reason": "Учебное исключение 04 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-05/SKILL.md",
+        "kind": 2,
+        "contains": "synthetic exception 05",
+        "reason": "Учебное исключение 05 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-06/SKILL.md",
+        "kind": 3,
+        "contains": "synthetic exception 06",
+        "reason": "Учебное исключение 06 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-07/SKILL.md",
+        "kind": 4,
+        "contains": "synthetic exception 07",
+        "reason": "Учебное исключение 07 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-08/SKILL.md",
+        "kind": 1,
+        "contains": "synthetic exception 08",
+        "reason": "Учебное исключение 08 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-09/SKILL.md",
+        "kind": 2,
+        "contains": "synthetic exception 09",
+        "reason": "Учебное исключение 09 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-10/SKILL.md",
+        "kind": 3,
+        "contains": "synthetic exception 10",
+        "reason": "Учебное исключение 10 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-11/SKILL.md",
+        "kind": 4,
+        "contains": "synthetic exception 11",
+        "reason": "Учебное исключение 11 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-12/SKILL.md",
+        "kind": 1,
+        "contains": "synthetic exception 12",
+        "reason": "Учебное исключение 12 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-13/SKILL.md",
+        "kind": 2,
+        "contains": "synthetic exception 13",
+        "reason": "Учебное исключение 13 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-14/SKILL.md",
+        "kind": 3,
+        "contains": "synthetic exception 14",
+        "reason": "Учебное исключение 14 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-15/SKILL.md",
+        "kind": 4,
+        "contains": "synthetic exception 15",
+        "reason": "Учебное исключение 15 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-16/SKILL.md",
+        "kind": 1,
+        "contains": "synthetic exception 16",
+        "reason": "Учебное исключение 16 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-17/SKILL.md",
+        "kind": 2,
+        "contains": "synthetic exception 17",
+        "reason": "Учебное исключение 17 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-18/SKILL.md",
+        "kind": 3,
+        "contains": "synthetic exception 18",
+        "reason": "Учебное исключение 18 для проверки фильтрации."
+      },
+      {
+        "path": "skills/sample-19/SKILL.md",
+        "kind": 4,
+        "contains": "synthetic exception 19",
+        "reason": "Учебное исключение 19 для проверки фильтрации."
+      }
+    ]
+  }
+}

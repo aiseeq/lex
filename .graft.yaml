@@ -1,0 +1,38 @@
+# Коммит lex — graft: graft commit -m "…" — гейт, git add -A, проверки, коммит, push.
+schema: 1
+graft: '>=2.37.0'
+go_fix:
+  enabled: true
+
+tasks:
+  test:
+    desc: все тесты
+    tests: go
+    run:
+      - go test -p {threads} -json {args} ./...
+  build:
+    desc: собрать lex в bin/
+    run:
+      - go build -o bin/ ./cmd/...
+  install:
+    desc: поставить lex из bin/ в bin_dir (~/bin), только закоммиченное
+    deps: [build]
+    run:
+      - {install: bin/*}
+  glint:
+    desc: static analysis
+    heavy: true
+    env: {GOWORK: "off"}
+    run: [glint check .]
+
+# Гейт: go vet (graft сам), gofmt, тесты и glint без находок.
+gate:
+  - sh: 'test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }'
+  - task: test
+  - task: glint
+
+version:
+  mode: git-tag
+
+lock:
+  scope: worktree
