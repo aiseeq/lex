@@ -54,11 +54,15 @@ var commandHelpTable = []commandHelp{
 	{"override-count", "--codex DIR", "посчитать переопределения правил."},
 }
 
+func commandHelpLine(command commandHelp) string {
+	return fmt.Sprintf("  %s %s — %s\n", command.name, command.flags, command.description)
+}
+
 func helpText() string {
 	var b strings.Builder
 	b.WriteString("lex собирает кодекс инструкций из фрагментов по манифестам.\n\nКоманды:\n")
 	for _, command := range commandHelpTable {
-		fmt.Fprintf(&b, "  %s %s — %s\n", command.name, command.flags, command.description)
+		b.WriteString(commandHelpLine(command))
 	}
 	b.WriteString("\nподробно: lex guide\n")
 	return b.String()
@@ -125,6 +129,14 @@ func run(args []string) error {
 	}
 	if len(args) == 0 {
 		return usageError{message: helpText(), help: true}
+	}
+	if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
+		for _, command := range commandHelpTable {
+			if command.name == args[0] {
+				fmt.Print(commandHelpLine(command))
+				return nil
+			}
+		}
 	}
 	if !isDispatchCommand(args[0]) {
 		return usageError{message: helpText(), help: true}

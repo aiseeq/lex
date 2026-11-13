@@ -93,6 +93,31 @@ func TestGuideCommandTableMatchesDispatch(t *testing.T) {
 	}
 }
 
+func TestCommandHelpFlags(t *testing.T) {
+	for _, command := range commandHelpTable {
+		for _, flag := range []string{"-h", "--help"} {
+			t.Run(command.name+"/"+flag, func(t *testing.T) {
+				got, err := captureRun(t, command.name, flag)
+				if err != nil {
+					t.Fatalf("help returned %v", err)
+				}
+				row := command.name + " " + command.flags + " — " + command.description
+				if !strings.Contains(got, row) {
+					t.Errorf("help %q lacks command row %q", got, row)
+				}
+				if strings.Contains(got, "Команды:") {
+					t.Errorf("command help includes command list: %q", got)
+				}
+				for _, other := range commandHelpTable {
+					if other.name != command.name && strings.Contains(got, "\n  "+other.name+" ") {
+						t.Errorf("help for %s includes %s", command.name, other.name)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestGuideHelpCommands(t *testing.T) {
 	for _, alias := range []string{"-h", "--help", "help"} {
 		got, err := captureRun(t, alias)
