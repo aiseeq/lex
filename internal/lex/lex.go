@@ -2809,8 +2809,19 @@ type StatusEntry struct {
 	KeepFragments string
 	// ConflictSummary describes which versions are known to differ.
 	ConflictSummary string
+	// ProblemFile distinguishes an unreadable output from fragment errors.
+	ProblemFile bool
 	// Problem says why the file could not be compared; Command is empty then.
 	Problem string
+}
+
+// statusFragmentProblem names the path of a failed file operation once.
+func statusFragmentProblem(err error) string {
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		return pathErr.Path + ": " + pathErr.Err.Error()
+	}
+	return err.Error()
 }
 
 func Status(codex string) ([]StatusEntry, error) { return StatusWithHome(codex, "") }
@@ -2841,6 +2852,7 @@ func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 		actual, err := os.ReadFile(m.out)
 		if err != nil {
 			entry.Problem = err.Error()
+			entry.ProblemFile = true
 			changed = append(changed, entry)
 			continue
 		}
@@ -2849,7 +2861,7 @@ func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 		}
 		want, err := manifestBody(codex, m)
 		if err != nil {
-			entry.Problem = err.Error()
+			entry.Problem = statusFragmentProblem(err)
 			changed = append(changed, entry)
 			continue
 		}
@@ -2868,6 +2880,11 @@ func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 }
 
 func statusFileChanged(actual []byte, manifestPath string, m manifest) bool {
+	if m.header {
+		if _, hasHeader := stripGeneratedHeader(actual, manifestPath); !hasHeader {
+			return true
+		}
+	}
 	if m.builtHash != "" {
 		return sha(actual) != m.builtHash
 	}
@@ -2892,6 +2909,11 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 	}
 	target := strconv.Quote(codex) + " " + strconv.Quote(filepath.Join(home, rel))
 	entry.Command = "lex import --refresh --codex " + target
+	_, headerPresent := stripGeneratedHeader(actual, manifestPath)
+	if m.header && !headerPresent && bytes.Equal(actual, withoutGeneratedHeader(want, manifestPath)) {
+		entry.Command = "lex build --force --codex " + target
+		return nil
+	}
 	if fragmentsChanged {
 		entry.Command = "lex absorb --codex " + target
 		entry.KeepFragments = "lex build --force --codex " + target

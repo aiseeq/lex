@@ -76,7 +76,7 @@ const guideText = `## Кодекс
 Кодекс состоит из фрагментов frag/<файл>/<пункт>.md и манифестов manifest/*.yaml. Имена, начинающиеся с точки, видны через ls -A. Собранные файлы отмечены строкой <!-- lex: собран из … -->.
 
 ## Статус
-lex status --codex <кодекс> показывает файл, который отличается от последней сборки или записанного источника. Если манифест содержит built_sha256, status сверяет с ним файл и текущую сборку; без built_sha256 сверяет файл с source_sha256, убирая шапку lex при header: true. Если собранного файла или фрагмента нет, status показывает путь и продолжает список. Для одного только изменения файла с шапкой подходит lex absorb. Без шапки status предлагает lex import --refresh, если refresh изменит файл и пройдёт проверки; иначе — lex absorb. Если изменились и файл, и фрагменты, status называет обе команды: lex absorb сохраняет текст файла и теряет правки фрагментов, lex build --force сохраняет фрагменты и теряет правки файла.
+lex status --codex <кодекс> показывает файл, который отличается от последней сборки или записанного источника. Если манифест содержит built_sha256, status сверяет с ним файл и текущую сборку; без built_sha256 сверяет файл с source_sha256, убирая шапку lex при header: true. Файл с header: true, из которого шапку lex удалили, помечается всегда: если его текст совпадает с текущей сборкой без шапки, lex build --force вернёт шапку; если текст правлен, сначала выполни lex absorb, затем lex build --force. Если собранного файла нет или у изменённого файла не читается фрагмент, status называет причину и продолжает список. Если изменился только файл, при header: true подходит lex absorb. При header: false status предлагает lex import --refresh, если refresh перенесёт правку во фрагменты и пройдёт проверки; иначе — lex absorb. Если файл и фрагменты разошлись, status называет обе команды: lex absorb сохраняет текст файла и теряет правки фрагментов, которых нет в файле; lex build --force сохраняет фрагменты и теряет правки файла.
 
 ## Правка собранного файла
 Правь собранный файл прямо в нём, затем выполни команду из его шапки: lex absorb --codex <кодекс> <файл>. После этого запусти lex check --codex <кодекс>; успешная проверка возвращает код 0. Правка, пересекающая границу двух пунктов, сохраняется черновиком в <кодекс>/drafts; перенеси её оттуда вручную.
@@ -396,14 +396,17 @@ func statusLine(entry lex.StatusEntry) string {
 	prefix := entry.Manifest + ": " + entry.Output + "; "
 	switch {
 	case entry.Problem != "":
-		return prefix + "cannot compare with the fragments: " + entry.Problem
+		if entry.ProblemFile {
+			return prefix + "cannot read the file: " + entry.Problem
+		}
+		return prefix + "cannot build from the fragments: " + entry.Problem
 	case entry.KeepFragments != "":
 		summary := entry.ConflictSummary
 		if summary == "" {
 			summary = "the file and its fragments both changed since the last build"
 		}
 		return prefix + summary + "; run " + entry.Command +
-			" to keep the file's text and drop the fragment edits, or " + entry.KeepFragments +
+			" to keep the file's text and drop the fragment edits that are not in the file, or " + entry.KeepFragments +
 			" to keep the fragments and drop the file's edits"
 	default:
 		return prefix + "run " + entry.Command

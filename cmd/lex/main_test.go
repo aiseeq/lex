@@ -143,7 +143,7 @@ func TestStatusLineForms(t *testing.T) {
 	got := statusLine(both)
 	for _, want := range []string{
 		"m.yaml: out.md; the file and its fragments both changed since the last build",
-		"run lex absorb --codex c out.md to keep the file's text and drop the fragment edits",
+		"run lex absorb --codex c out.md to keep the file's text and drop the fragment edits that are not in the file",
 		"or lex build --force --codex c out.md to keep the fragments and drop the file's edits",
 	} {
 		if !strings.Contains(got, want) {
@@ -151,8 +151,13 @@ func TestStatusLineForms(t *testing.T) {
 		}
 	}
 	problem := lex.StatusEntry{Manifest: "m.yaml", Output: "out.md", Problem: "frag/a.md: no such file"}
-	if got := statusLine(problem); got != "m.yaml: out.md; cannot compare with the fragments: frag/a.md: no such file" {
-		t.Errorf("problem line = %q", got)
+	if got := statusLine(problem); got != "m.yaml: out.md; cannot build from the fragments: frag/a.md: no such file" {
+		t.Errorf("fragment problem line = %q", got)
+	}
+	fileProblem := problem
+	fileProblem.ProblemFile = true
+	if got := statusLine(fileProblem); got != "m.yaml: out.md; cannot read the file: frag/a.md: no such file" {
+		t.Errorf("file problem line = %q", got)
 	}
 }
 
@@ -167,12 +172,13 @@ func TestStatusDescriptionAndError(t *testing.T) {
 		t.Errorf("build help flags = %q, want optional [FILE]", buildFlags)
 	}
 	for _, text := range []string{
-		"lex build --force",
-		"теряет правки фрагментов",
-		"теряет правки файла",
-		"built_sha256",
+		"lex build --force сохраняет фрагменты и теряет правки файла",
+		"lex absorb сохраняет текст файла и теряет правки фрагментов, которых нет в файле",
+		"Если собранного файла нет или у изменённого файла не читается фрагмент, status называет причину и продолжает список",
+		"При header: false status предлагает lex import --refresh, если refresh перенесёт правку во фрагменты и пройдёт проверки; иначе — lex absorb",
+		"Если изменился только файл, при header: true подходит lex absorb",
 		"source_sha256",
-		"собранного файла или фрагмента нет",
+		"Файл с header: true, из которого шапку lex удалили, помечается всегда: если его текст совпадает с текущей сборкой без шапки, lex build --force вернёт шапку; если текст правлен, сначала выполни lex absorb, затем lex build --force",
 	} {
 		if !strings.Contains(guideText, text) {
 			t.Errorf("guide lacks status guidance %q", text)

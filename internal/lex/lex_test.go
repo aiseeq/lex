@@ -2208,8 +2208,15 @@ func TestStatusUsesBuiltHashAndSuggestsCommandByHeader(t *testing.T) {
 			t.Fatal(err)
 		}
 		entries, err := StatusWithHome(codex, filepath.Dir(out))
+		if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Command, "lex build --force --codex ") {
+			t.Fatalf("status after absorb = %#v, %v; want build --force for the missing header", entries, err)
+		}
+		if err := BuildWithOptions(codex, BuildOptions{Force: true}); err != nil {
+			t.Fatalf("restore generated header: %v", err)
+		}
+		entries, err = StatusWithHome(codex, filepath.Dir(out))
 		if err != nil || len(entries) != 0 {
-			t.Fatalf("status after absorb = %#v, %v", entries, err)
+			t.Fatalf("status after restoring header = %#v, %v", entries, err)
 		}
 	})
 
@@ -2521,7 +2528,7 @@ func TestStatusConflictDiagnosticsAndPartialFragmentErrors(t *testing.T) {
 		for _, entry := range entries {
 			switch entry.Output {
 			case lost:
-				foundLost = strings.Contains(entry.Problem, fragment) && entry.Command == ""
+				foundLost = strings.Count(entry.Problem, fragment) == 1 && !entry.ProblemFile && entry.Command == ""
 			case kept:
 				foundKept = strings.HasPrefix(entry.Command, "lex absorb --codex ") && entry.KeepFragments == "" && entry.Problem == ""
 			}
@@ -2745,6 +2752,11 @@ func TestStatusMissingOutputContinues(t *testing.T) {
 	if !foundMissing || !foundPresent {
 		t.Fatalf("status entries = %#v; missing output path or other output command not reported", entries)
 	}
+	for _, entry := range entries {
+		if entry.Output == missing && !entry.ProblemFile {
+			t.Fatalf("missing output problem = %#v; want file read classification", entry)
+		}
+	}
 	if err := BuildWithOptions(codex, BuildOptions{Force: true, Output: missing}); err != nil {
 		t.Fatalf("rebuild missing output: %v", err)
 	}
@@ -2819,6 +2831,182 @@ func TestStatusHeaderFormAfterAbsorb(t *testing.T) {
 	entries, err = StatusWithHome(codex, root)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("status after suggested absorb = %#v, %v; want clean", entries, err)
+	}
+}
+
+func TestStatusHeaderRemovedNeedsBuild(t *testing.T) {
+	root := t.TempDir()
+	codex := filepath.Join(root, "codex")
+	out := filepath.Join(root, "manual.md")
+	if err := importData(codex, out, "manual.md", []byte("original\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := setManifestHeader(codex, "manual.md", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	built, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	without := withoutGeneratedHeader(built, manifestOf(t, codex, "manual.md"))
+	mustWrite(t, out, without)
+	entries, err := StatusWithHome(codex, root)
+	if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Command, "lex build --force --codex ") {
+		t.Fatalf("status after header removal = %#v, %v; want build --force", entries, err)
+	}
+	if err := BuildWithOptions(codex, BuildOptions{Force: true}); err != nil {
+		t.Fatalf("run suggested build: %v", err)
+	}
+	entries, err = StatusWithHome(codex, root)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("status after suggested build = %#v, %v; want clean", entries, err)
+	}
+}
+
+func TestStatusRefreshAfterHeaderRemovalHasSingleRecommendation(t *testing.T) {
+	root := t.TempDir()
+	codex := filepath.Join(root, "codex")
+	out := filepath.Join(root, "refresh.md")
+	if err := importData(codex, out, "refresh.md", []byte("original\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := setManifestHeader(codex, "refresh.md", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := manifestOf(t, codex, "refresh.md")
+	built, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, out, withoutGeneratedHeader(built, manifestPath))
+	mustWrite(t, out, []byte("refreshed\n"))
+	if err := ImportWithOptions(codex, out, ImportOptions{Home: root, Refresh: true}); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, out, []byte("refreshed by hand\n"))
+	entries, err := StatusWithHome(codex, root)
+	if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Command, "lex absorb --codex ") ||
+		entries[0].KeepFragments != "" {
+		t.Fatalf("status after refresh and edit = %#v, %v; want one absorb", entries, err)
+	}
+	if err := Absorb(codex, out, AbsorbOptions{}); err != nil {
+		t.Fatalf("run suggested absorb: %v", err)
+	}
+	entries, err = StatusWithHome(codex, root)
+	if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Command, "lex build --force --codex ") {
+		t.Fatalf("status after suggested absorb = %#v, %v; want build --force", entries, err)
+	}
+	if err := BuildWithOptions(codex, BuildOptions{Force: true}); err != nil {
+		t.Fatalf("run suggested build: %v", err)
+	}
+	entries, err = StatusWithHome(codex, root)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("status after suggested build = %#v, %v; want clean", entries, err)
+	}
+}
+
+func TestStatusLegacyHeaderStripsBeforeSourceHash(t *testing.T) {
+	root := t.TempDir()
+	codex := filepath.Join(root, "codex")
+	out := filepath.Join(root, "legacy.md")
+	if err := importData(codex, out, "legacy.md", []byte("original\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := setManifestHeader(codex, "legacy.md", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := manifestOf(t, codex, "legacy.md")
+	m, err := readManifest(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.builtHash = ""
+	if err := writeManifest(manifestPath, m, m.links); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(m.parts[0])+".md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := fragmentBody(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(codex, "frag", filepath.FromSlash(m.parts[0])+".md"),
+		replaceFragmentBody(raw, body, []byte("changed fragment\n")))
+	entries, err := StatusWithHome(codex, root)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("status for unchanged legacy output = %#v, %v; want clean", entries, err)
+	}
+}
+
+func TestStatusPurposeRefreshNoOpWithEditedFragments(t *testing.T) {
+	codex, out, _, m := purposeFixture(t, "- first\n- second\n")
+	mustWrite(t, out, []byte("- first\n- second\n"))
+	raw, err := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(m.parts[0])+".md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := fragmentBody(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(codex, "frag", filepath.FromSlash(m.parts[0])+".md"),
+		replaceFragmentBody(raw, body, []byte("- changed\n")))
+	before := treeBytes(t, codex)
+	if err := ImportWithOptions(codex, out, ImportOptions{Home: filepath.Dir(out), Refresh: true}); err != nil {
+		t.Fatalf("unchanged refresh should be a no-op despite fragment edits: %v", err)
+	}
+	if after := treeBytes(t, codex); !bytes.Equal(before, after) {
+		t.Fatal("no-op refresh changed codex")
+	}
+}
+
+func TestStatusPurposeAssessmentErrorDoesNotClaimFragmentChange(t *testing.T) {
+	codex, out, manifestPath, m := purposeFixture(t, "- first\n- second\n")
+	purposeFragment(t, codex, manifestPath, m, 0, "reason")
+	purposeSet(t, codex, true)
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	m.builtHash = ""
+	if err := writeManifest(manifestPath, m, m.links); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, out, bytes.Replace(data, []byte(purposeMarker+"reason"), []byte(purposeMarker+"edited"), 1))
+	entries, err := StatusWithHome(codex, filepath.Dir(out))
+	if err != nil || len(entries) != 1 || entries[0].KeepFragments != "" ||
+		!strings.HasPrefix(entries[0].Command, "lex absorb --codex ") {
+		t.Fatalf("status after purpose edit = %#v, %v; want a single absorb recommendation", entries, err)
+	}
+}
+
+func TestStatusFragmentProblemDoesNotRepeatPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "frag", "part.md")
+	_, readErr := os.ReadFile(path)
+	if readErr == nil {
+		t.Fatal("reading a missing fragment succeeded")
+	}
+	got := statusFragmentProblem(fmt.Errorf("%s: %w", path, readErr))
+	if !strings.HasPrefix(got, path+": ") || strings.Count(got, path) != 1 {
+		t.Fatalf("fragment problem = %q; want the path once, at the start", got)
+	}
+	plain := fmt.Errorf("%s: record must not be in a manifest", path)
+	if got := statusFragmentProblem(plain); got != plain.Error() {
+		t.Fatalf("fragment problem = %q; want the error text unchanged", got)
 	}
 }
 
