@@ -2880,11 +2880,6 @@ func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 }
 
 func statusFileChanged(actual []byte, manifestPath string, m manifest) bool {
-	if m.header {
-		if _, hasHeader := stripGeneratedHeader(actual, manifestPath); !hasHeader {
-			return true
-		}
-	}
 	if m.builtHash != "" {
 		return sha(actual) != m.builtHash
 	}
@@ -2909,11 +2904,6 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 	}
 	target := strconv.Quote(codex) + " " + strconv.Quote(filepath.Join(home, rel))
 	entry.Command = "lex import --refresh --codex " + target
-	_, headerPresent := stripGeneratedHeader(actual, manifestPath)
-	if m.header && !headerPresent && bytes.Equal(actual, withoutGeneratedHeader(want, manifestPath)) {
-		entry.Command = "lex build --force --codex " + target
-		return nil
-	}
 	if fragmentsChanged {
 		entry.Command = "lex absorb --codex " + target
 		entry.KeepFragments = "lex build --force --codex " + target

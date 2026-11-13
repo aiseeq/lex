@@ -2208,15 +2208,8 @@ func TestStatusUsesBuiltHashAndSuggestsCommandByHeader(t *testing.T) {
 			t.Fatal(err)
 		}
 		entries, err := StatusWithHome(codex, filepath.Dir(out))
-		if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Command, "lex build --force --codex ") {
-			t.Fatalf("status after absorb = %#v, %v; want build --force for the missing header", entries, err)
-		}
-		if err := BuildWithOptions(codex, BuildOptions{Force: true}); err != nil {
-			t.Fatalf("restore generated header: %v", err)
-		}
-		entries, err = StatusWithHome(codex, filepath.Dir(out))
 		if err != nil || len(entries) != 0 {
-			t.Fatalf("status after restoring header = %#v, %v", entries, err)
+			t.Fatalf("status after absorb = %#v, %v", entries, err)
 		}
 	})
 
@@ -2834,38 +2827,6 @@ func TestStatusHeaderFormAfterAbsorb(t *testing.T) {
 	}
 }
 
-func TestStatusHeaderRemovedNeedsBuild(t *testing.T) {
-	root := t.TempDir()
-	codex := filepath.Join(root, "codex")
-	out := filepath.Join(root, "manual.md")
-	if err := importData(codex, out, "manual.md", []byte("original\n"), false); err != nil {
-		t.Fatal(err)
-	}
-	if err := setManifestHeader(codex, "manual.md", true); err != nil {
-		t.Fatal(err)
-	}
-	if err := Build(codex, false); err != nil {
-		t.Fatal(err)
-	}
-	built, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	without := withoutGeneratedHeader(built, manifestOf(t, codex, "manual.md"))
-	mustWrite(t, out, without)
-	entries, err := StatusWithHome(codex, root)
-	if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Command, "lex build --force --codex ") {
-		t.Fatalf("status after header removal = %#v, %v; want build --force", entries, err)
-	}
-	if err := BuildWithOptions(codex, BuildOptions{Force: true}); err != nil {
-		t.Fatalf("run suggested build: %v", err)
-	}
-	entries, err = StatusWithHome(codex, root)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("status after suggested build = %#v, %v; want clean", entries, err)
-	}
-}
-
 func TestStatusRefreshAfterHeaderRemovalHasSingleRecommendation(t *testing.T) {
 	root := t.TempDir()
 	codex := filepath.Join(root, "codex")
@@ -2899,15 +2860,8 @@ func TestStatusRefreshAfterHeaderRemovalHasSingleRecommendation(t *testing.T) {
 		t.Fatalf("run suggested absorb: %v", err)
 	}
 	entries, err = StatusWithHome(codex, root)
-	if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Command, "lex build --force --codex ") {
-		t.Fatalf("status after suggested absorb = %#v, %v; want build --force", entries, err)
-	}
-	if err := BuildWithOptions(codex, BuildOptions{Force: true}); err != nil {
-		t.Fatalf("run suggested build: %v", err)
-	}
-	entries, err = StatusWithHome(codex, root)
 	if err != nil || len(entries) != 0 {
-		t.Fatalf("status after suggested build = %#v, %v; want clean", entries, err)
+		t.Fatalf("status after suggested absorb = %#v, %v; want clean", entries, err)
 	}
 }
 

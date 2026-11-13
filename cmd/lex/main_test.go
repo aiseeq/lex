@@ -143,7 +143,7 @@ func TestStatusLineForms(t *testing.T) {
 	got := statusLine(both)
 	for _, want := range []string{
 		"m.yaml: out.md; the file and its fragments both changed since the last build",
-		"run lex absorb --codex c out.md to keep the file's text and drop the fragment edits that are not in the file",
+		"run lex absorb --codex c out.md to keep the file's text and drop the fragment text edits that are not in the file",
 		"or lex build --force --codex c out.md to keep the fragments and drop the file's edits",
 	} {
 		if !strings.Contains(got, want) {
@@ -172,13 +172,14 @@ func TestStatusDescriptionAndError(t *testing.T) {
 		t.Errorf("build help flags = %q, want optional [FILE]", buildFlags)
 	}
 	for _, text := range []string{
-		"lex build --force сохраняет фрагменты и теряет правки файла",
-		"lex absorb сохраняет текст файла и теряет правки фрагментов, которых нет в файле",
+		"Если файл и фрагменты разошлись, status называет обе команды: lex absorb сохраняет текст файла и теряет правки текста фрагментов, которых нет в файле; lex build --force сохраняет фрагменты и теряет правки файла.",
+		"lex status --codex <кодекс> показывает файл, который отличается от последней сборки или записанного источника.",
+		"Если манифест содержит built_sha256, status сверяет с ним файл и текущую сборку; без built_sha256 сверяет файл с source_sha256, убирая шапку lex при header: true.",
+		"Правку только во фрагментах status не показывает: её находит lex check.",
+		"Код выхода: 0 — список пуст, 1 — в списке есть файлы.",
 		"Если собранного файла нет или у изменённого файла не читается фрагмент, status называет причину и продолжает список",
 		"При header: false status предлагает lex import --refresh, если refresh перенесёт правку во фрагменты и пройдёт проверки; иначе — lex absorb",
 		"Если изменился только файл, при header: true подходит lex absorb",
-		"source_sha256",
-		"Файл с header: true, из которого шапку lex удалили, помечается всегда: если его текст совпадает с текущей сборкой без шапки, lex build --force вернёт шапку; если текст правлен, сначала выполни lex absorb, затем lex build --force",
 	} {
 		if !strings.Contains(guideText, text) {
 			t.Errorf("guide lacks status guidance %q", text)
