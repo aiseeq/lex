@@ -177,7 +177,7 @@ func TestStatusDescriptionAndError(t *testing.T) {
 		"lex status --codex <кодекс> показывает файл, который отличается от последней сборки или записанного источника.",
 		"Если манифест содержит built_sha256, status сверяет с ним файл и текущую сборку; без built_sha256 сверяет файл с source_sha256, убирая шапку lex при header: true.",
 		"Правку только во фрагментах status не показывает: её находит lex check.",
-		"Код выхода: 0 — список пуст, 1 — в списке есть файлы.",
+		"Код выхода: 0 — список пуст, 1 — в списке есть файлы или status не смог прочесть кодекс (тогда ошибка в stderr), 2 — ошибка вызова.",
 		"Если собранного файла нет или у изменённого файла не читается фрагмент, status называет причину и продолжает список",
 		"При header: false status предлагает lex import --refresh, если refresh перенесёт правку во фрагменты и пройдёт проверки; иначе — lex absorb",
 		"Если изменился только файл, при header: true подходит lex absorb",
@@ -205,6 +205,39 @@ func TestStatusDescriptionAndError(t *testing.T) {
 	_, err := captureRun(t, "status", "--codex", codex)
 	if err == nil || err.Error() != "files differ from the codex" {
 		t.Fatalf("status error = %v, want files differ from the codex", err)
+	}
+	_, err = captureRun(t, "status", "--codex", filepath.Join(root, "no-codex"))
+	if err == nil || err.Error() == "files differ from the codex" || exitCode(err) != 1 {
+		t.Fatalf("status of a missing codex: error %v, code %d; want its own error with code 1", err, exitCode(err))
+	}
+	_, err = captureRun(t, "status", "--codex", codex, "--check")
+	if err == nil || exitCode(err) != 2 {
+		t.Fatalf("status with --check: error %v, code %d; want usage error with code 2", err, exitCode(err))
+	}
+}
+
+func TestStatusMissingOutputLineNamesPathOnce(t *testing.T) {
+	root := t.TempDir()
+	codex := filepath.Join(root, "codex")
+	output := filepath.Join(root, "source.md")
+	if err := os.WriteFile(output, []byte("source\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := lex.ImportWithOptions(codex, output, lex.ImportOptions{Home: root}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lex.Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(output); err != nil {
+		t.Fatal(err)
+	}
+	got, err := captureRun(t, "status", "--codex", codex)
+	if err == nil {
+		t.Fatal("status of a missing output returned no error")
+	}
+	if !strings.Contains(got, "cannot read the file: ") || strings.Count(got, output) != 1 {
+		t.Fatalf("status output %q: want the missing file %q named once", got, output)
 	}
 }
 

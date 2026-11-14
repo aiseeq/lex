@@ -2959,6 +2959,15 @@ func statusFragmentProblem(err error) string {
 	return err.Error()
 }
 
+// statusFileProblem says why the output cannot be read without its path: the status line names the output already.
+func statusFileProblem(err error) string {
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		return pathErr.Err.Error()
+	}
+	return err.Error()
+}
+
 func Status(codex string) ([]StatusEntry, error) { return StatusWithHome(codex, "") }
 func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 	codex, err := canonicalCodex(codex, false)
@@ -2986,7 +2995,7 @@ func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 		entry := StatusEntry{Manifest: p, Output: m.out}
 		actual, err := os.ReadFile(m.out)
 		if err != nil {
-			entry.Problem = err.Error()
+			entry.Problem = statusFileProblem(err)
 			entry.ProblemFile = true
 			changed = append(changed, entry)
 			continue
