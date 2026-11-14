@@ -178,7 +178,7 @@ func run() error {
 			return fmt.Errorf("создать снимок: %w", err)
 		}
 	}
-	if err := archive("e11307f", old); err != nil {
+	if err := archive("33bda589", old); err != nil {
 		return err
 	}
 	if err := archive("HEAD", current); err != nil {
