@@ -1235,16 +1235,17 @@ func ForeignHeaderPhrase(owner string) string {
 
 // foreignOutputOwner reports the codex named by a lex header that is not this codex's ("unknown codex" when the header names none).
 func foreignOutputOwner(codex string, data []byte) (string, bool) {
-	offset := frontMatterOffset(data)
+	offset := foreignHeaderLineOffset(data)
 	lineEnd := bytes.IndexByte(data[offset:], '\n')
 	line := data[offset:]
 	if lineEnd >= 0 {
 		line = line[:lineEnd]
 	}
-	value, ok := bytes.CutPrefix(line, lexMarker)
-	if !ok {
+	markerOffset := bytes.Index(line, lexMarker)
+	if markerOffset < 0 || markerOffset > 0 && !invisibleHeaderPrefix(line[:markerOffset]) {
 		return "", false
 	}
+	value := line[markerOffset+len(lexMarker):]
 	codex = resolvePath(codex)
 	owner := unknownCodex
 	if before, _, ok0 := bytes.Cut(value, []byte(".yaml. Правь фрагменты в ")); ok0 {
@@ -1259,6 +1260,28 @@ func foreignOutputOwner(codex string, data []byte) (string, bool) {
 		}
 	}
 	return owner, true
+}
+
+// foreignHeaderLineOffset is the offset of the line where a lex header stands: after the front matter,
+// also when an invisible prefix before the front matter fence hides it.
+func foreignHeaderLineOffset(data []byte) int {
+	offset := frontMatterOffset(data)
+	if offset > 0 {
+		return offset
+	}
+	first, _, _ := bytes.Cut(data, []byte{'\n'})
+	if index := bytes.Index(first, []byte("---")); index > 0 && invisibleHeaderPrefix(data[:index]) {
+		if matter := frontMatterOffset(data[index:]); matter > 0 {
+			return index + matter
+		}
+	}
+	return 0
+}
+
+// invisibleHeaderPrefix reports a prefix that hides a lex header: invisible bytes with at least one
+// that is not an ASCII space or tab. A prefix of spaces and tabs alone makes the marker document text (indented code).
+func invisibleHeaderPrefix(prefix []byte) bool {
+	return invisibleBytes(prefix) && bytes.IndexFunc(prefix, func(r rune) bool { return r != ' ' && r != '\t' }) >= 0
 }
 
 func withoutGeneratedHeader(data []byte, manifestPath string) []byte {
@@ -3859,7 +3882,7 @@ type outputCopy struct {
 
 // foreignHeaderAction tells how to fix a worktree copy, actual, that carries a foreign header: lex build writes only the manifest output, so the copy's header line itself is fixed.
 func (c *outputCopy) foreignHeaderAction(actual, want []byte, m manifest, manifestPath string) string {
-	offset := frontMatterOffset(actual)
+	offset := foreignHeaderLineOffset(actual)
 	end := len(actual)
 	if i := bytes.IndexByte(actual[offset:], '\n'); i >= 0 {
 		end = offset + i + 1

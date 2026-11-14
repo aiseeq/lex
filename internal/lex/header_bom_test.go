@@ -67,10 +67,9 @@ func TestBOMBeforeFrontMatterNamesMark(t *testing.T) {
 	}
 }
 
-// Any invisible bytes that hide a lex header - two byte order marks, a mark
-// before another codex's header or after front matter, a zero-width or plain
-// space - get the refusal naming them, so absorb never moves the header line
-// into a fragment and check never settles a file with two headers.
+// Invisible prefixes hide this codex's header, so absorb and check refuse
+// them rather than moving the header line into a fragment. A foreign header
+// behind a mark is still identified by its owner.
 func TestInvisiblePrefixBeforeHeaderRefused(t *testing.T) {
 	const fm = "---\nname: a\n---\n"
 	for _, tc := range []struct {
@@ -80,7 +79,7 @@ func TestInvisiblePrefixBeforeHeaderRefused(t *testing.T) {
 		{"two byte order marks", "# A\n\n- one\n", "2 byte order marks", func(data []byte, _ string) []byte {
 			return append([]byte("\xef\xbb\xbf\xef\xbb\xbf"), data...)
 		}},
-		{"mark before a foreign header", "# A\n\n- one\n", "a byte order mark", func(data []byte, codex string) []byte {
+		{"mark before a foreign header", "# A\n\n- one\n", "", func(data []byte, codex string) []byte {
 			return append([]byte("\xef\xbb\xbf"), bytes.Replace(data, []byte(filepath.Base(codex)+"/manifest/"), []byte("other/manifest/"), 1)...)
 		}},
 		{"mark after front matter", fm + "# A\n\n- one\n", "start of line 4", func(data []byte, _ string) []byte {
@@ -108,6 +107,17 @@ func TestInvisiblePrefixBeforeHeaderRefused(t *testing.T) {
 				"absorb": func() error { return Absorb(codex, out, AbsorbOptions{}) },
 				"check":  func() error { _, err := CheckWithWarnings(codex, CheckOptions{}); return err },
 			} {
+				if tc.name == "mark before a foreign header" {
+					err := run()
+					want := "output belongs to codex"
+					if name == "check" {
+						want = "the file carries the lex header of codex"
+					}
+					if err == nil || !strings.Contains(err.Error(), want) {
+						t.Fatalf("%s = %v, want refusal containing %q", name, err, want)
+					}
+					continue
+				}
 				if err := run(); err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "header is not recognised") {
 					t.Fatalf("%s = %v, want the refusal naming %q", name, err, tc.want)
 				}
