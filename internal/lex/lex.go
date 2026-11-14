@@ -967,6 +967,14 @@ func expandHeaderCodexPath(path string) string {
 }
 
 func rejectForeignOutput(codex, output string, data []byte) error {
+	if owner, foreign := foreignOutputOwner(codex, data); foreign {
+		return fmt.Errorf("%s: output belongs to codex %s, not codex %s", output, owner, resolvePath(codex))
+	}
+	return nil
+}
+
+// foreignOutputOwner reports the codex named by a lex header that is not this codex's ("unknown codex" when the header names none).
+func foreignOutputOwner(codex string, data []byte) (string, bool) {
 	marker := []byte("<!-- lex: собран из ")
 	lines := bytes.SplitAfter(data, []byte("\n"))
 	offset := 0
@@ -981,7 +989,7 @@ func rejectForeignOutput(codex, output string, data []byte) error {
 	}
 	value, ok := bytes.CutPrefix(line, marker)
 	if !ok {
-		return nil
+		return "", false
 	}
 	codex = resolvePath(codex)
 	owner := "unknown codex"
@@ -992,11 +1000,11 @@ func rejectForeignOutput(codex, output string, data []byte) error {
 			owner = expandHeaderCodexPath(ownerPath)
 			name := before[manifestIndex+len(manifestDir):]
 			if owner == codex && len(name) > 0 && !bytes.Contains(name, []byte("/")) {
-				return nil
+				return "", false
 			}
 		}
 	}
-	return fmt.Errorf("%s: output belongs to codex %s, not codex %s", output, owner, codex)
+	return owner, true
 }
 
 func withoutGeneratedHeader(data []byte, manifestPath string) []byte {
@@ -3095,6 +3103,8 @@ type StatusEntry struct {
 	ProblemFile bool
 	// Problem says why the file could not be compared; Command is empty then.
 	Problem string
+	// ForeignCodex names the codex whose lex header the file carries; Command then rebuilds the file from this codex.
+	ForeignCodex string
 }
 
 // statusFragmentProblem names the path of a failed file operation once.
@@ -3189,6 +3199,12 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 		return fmt.Errorf("%s: resolve source path: %w", m.out, err)
 	}
 	target := strconv.Quote(codex) + " " + strconv.Quote(filepath.Join(home, rel))
+	if owner, foreign := foreignOutputOwner(codex, actual); foreign {
+		// lex import and lex absorb refuse such a file; only build --force rebuilds it.
+		entry.ForeignCodex = owner
+		entry.Command = "lex build --force --codex " + target
+		return nil
+	}
 	entry.Command = "lex import --refresh --codex " + target
 	if fragmentsChanged {
 		entry.Command = "lex absorb --force --codex " + target

@@ -402,6 +402,10 @@ func statusLine(entry lex.StatusEntry) string {
 			return prefix + "cannot read the file: " + entry.Problem
 		}
 		return prefix + "cannot build from the fragments: " + entry.Problem
+	case entry.ForeignCodex != "":
+		return prefix + "the file carries the lex header of codex " + entry.ForeignCodex +
+			", so lex import and lex absorb refuse it; if this codex owns the file, run " + entry.Command +
+			" to rebuild it from the fragments (edits in the file are lost)"
 	case entry.KeepFragments != "":
 		summary := entry.ConflictSummary
 		if summary == "" {
