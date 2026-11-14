@@ -1099,13 +1099,17 @@ func generatedMarkerForms(manifestPath string) [][]byte {
 	return forms
 }
 
-func hasGeneratedHeader(data []byte) bool {
+func frontMatterOffset(data []byte) int {
 	lines := bytes.SplitAfter(data, []byte("\n"))
 	offset := 0
 	for _, line := range lines[:frontMatterLength(lines)] {
 		offset += len(line)
 	}
-	return bytes.HasPrefix(data[offset:], []byte("<!-- lex: собран из "))
+	return offset
+}
+
+func hasGeneratedHeader(data []byte) bool {
+	return bytes.HasPrefix(data[frontMatterOffset(data):], []byte("<!-- lex: собран из "))
 }
 
 func expandHeaderCodexPath(path string) string {
@@ -1141,12 +1145,7 @@ func ForeignHeaderPhrase(owner string) string {
 // foreignOutputOwner reports the codex named by a lex header that is not this codex's ("unknown codex" when the header names none).
 func foreignOutputOwner(codex string, data []byte) (string, bool) {
 	marker := []byte("<!-- lex: собран из ")
-	lines := bytes.SplitAfter(data, []byte("\n"))
-	offset := 0
-	count := frontMatterLength(lines)
-	for _, line := range lines[:count] {
-		offset += len(line)
-	}
+	offset := frontMatterOffset(data)
 	lineEnd := bytes.IndexByte(data[offset:], '\n')
 	line := data[offset:]
 	if lineEnd >= 0 {
@@ -1181,12 +1180,7 @@ func withoutGeneratedHeader(data []byte, manifestPath string) []byte {
 }
 
 func stripGeneratedHeader(data []byte, manifestPath string) ([]byte, bool) {
-	lines := bytes.SplitAfter(data, []byte("\n"))
-	count := frontMatterLength(lines)
-	offset := 0
-	for _, line := range lines[:count] {
-		offset += len(line)
-	}
+	offset := frontMatterOffset(data)
 	for _, marker := range generatedMarkerForms(manifestPath) {
 		if bytes.HasPrefix(data[offset:], marker) {
 			return append(append([]byte{}, data[:offset]...), data[offset+len(marker):]...), true
@@ -1318,17 +1312,13 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 	if err != nil {
 		return err
 	}
-	read := os.ReadFile
-	built, err := manifestBodyWithRead(codex, m, read)
-	if err != nil {
+	if err := rejectTextAboveHeader(file, selected, m, actual); err != nil {
 		return err
 	}
-	if m.header {
-		built = generatedHeader(selected, built)
-	}
-	fragmentsChanged := fragmentsChangedSinceBuild(codex, selected, m, built)
-	if fragmentsChanged && !outputMatchesGenerated(actual, built, m.header, selected) && !options.Force {
-		return forceRefusal(codex, target, selected, paths, built, actual, m)
+	read := os.ReadFile
+	built, err := absorbBuiltBody(codex, target, selected, paths, m, actual, options)
+	if err != nil {
+		return err
 	}
 	fileBytes := actual
 	if m.header {
@@ -1365,6 +1355,47 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 		}
 	}
 	return warnAfterAbsorb(absorbEditedFragment(codex, paths, selected, m, built, actual, fileBytes, options, purpose), target, warnSnapshot)
+}
+
+func absorbBuiltBody(codex, target, selected string, paths []string, m manifest, actual []byte, options AbsorbOptions) ([]byte, error) {
+	built, err := manifestBodyWithRead(codex, m, os.ReadFile)
+	if err != nil {
+		return nil, err
+	}
+	if m.header {
+		built = generatedHeader(selected, built)
+	}
+	if fragmentsChangedSinceBuild(codex, selected, m, built) && !outputMatchesGenerated(actual, built, m.header, selected) && !options.Force {
+		return nil, forceRefusal(codex, target, selected, paths, built, actual, m)
+	}
+	return built, nil
+}
+
+// rejectTextAboveHeader refuses a file whose lex header line, with either line ending, stands
+// below text other than front matter. A header in its place ends the check, so a copy of the
+// header quoted further down the file does not count.
+func rejectTextAboveHeader(file, selected string, m manifest, actual []byte) error {
+	if !m.header {
+		return nil
+	}
+	var forms [][]byte
+	for _, marker := range generatedMarkerForms(selected) {
+		for _, ending := range [][]byte{[]byte("\n"), []byte("\r\n")} {
+			forms = append(forms, append(append([]byte(nil), bytes.TrimSuffix(marker, []byte("\n"))...), ending...))
+		}
+	}
+	top := actual[frontMatterOffset(actual):]
+	for _, form := range forms {
+		if bytes.HasPrefix(top, form) {
+			return nil
+		}
+	}
+	for _, form := range forms {
+		if index := bytes.Index(actual, form); index > 0 && actual[index-1] == '\n' {
+			return fmt.Errorf("%s: text above lex header; move the text below the header", file)
+		}
+	}
+	return nil
 }
 
 func readPlainPartLayout(codex string, m manifest) (purposeLayout, error) {
