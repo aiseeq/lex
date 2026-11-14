@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/aiseeq/lex/internal/lex"
 )
@@ -328,34 +330,73 @@ func printCodexChangeHint(codex string, paths []string) {
 	for _, path := range paths {
 		fmt.Println(path)
 	}
-	home, err := os.UserHomeDir()
-	if err == nil {
-		home, err = filepath.Abs(home)
-		if err == nil {
-			printConfigAddCommand(home, codex, paths)
-		}
+	command, err := configAddCommand(codex, paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: no git add hint for the config repository: %v\n", err)
+		return
+	}
+	if command != "" {
+		fmt.Println(command)
 	}
 }
 
-func printConfigAddCommand(home, codex string, paths []string) {
+// configAddCommand returns the git add line for paths when the codex sits under ~/.claude
+// and ~/.claude-config.git exists; it is empty when there is no such repository or codex.
+func configAddCommand(codex string, paths []string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("find home: %w", err)
+	}
+	if home, err = filepath.Abs(home); err != nil {
+		return "", fmt.Errorf("resolve home: %w", err)
+	}
 	configRepo := filepath.Join(home, ".claude-config.git")
-	info, statErr := os.Stat(configRepo)
-	if statErr == nil && info.IsDir() {
-		codex, codexErr := filepath.Abs(codex)
-		if codexErr == nil {
-			if resolved, resolveErr := filepath.EvalSymlinks(codex); resolveErr == nil {
-				codex = resolved
-			}
-			if resolved, resolveErr := filepath.EvalSymlinks(home); resolveErr == nil {
-				home = resolved
-			}
-			rel, relErr := filepath.Rel(filepath.Join(home, ".claude"), codex)
-			if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
-				fmt.Printf("git --git-dir=%s --work-tree=%s add -- %s\n", configRepo, home, strings.Join(paths, " "))
-			}
+	info, err := os.Stat(configRepo)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("stat %s: %w", configRepo, err)
+	}
+	if !info.IsDir() {
+		return "", nil
+	}
+	if codex, err = filepath.Abs(codex); err != nil {
+		return "", fmt.Errorf("resolve codex: %w", err)
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(codex); resolveErr == nil {
+		codex = resolved
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(home); resolveErr == nil {
+		home = resolved
+	}
+	rel, err := filepath.Rel(filepath.Join(home, ".claude"), codex)
+	if err != nil {
+		return "", fmt.Errorf("place codex under home: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", nil
+	}
+	words := make([]string, len(paths))
+	for i, path := range paths {
+		words[i] = shellWord(path)
+	}
+	return fmt.Sprintf("git --git-dir=%s --work-tree=%s add -- %s", shellWord(configRepo), shellWord(home), strings.Join(words, " ")), nil
+}
+
+// shellWord prints a path bare when the shell reads it back unchanged, quoted otherwise.
+func shellWord(path string) string {
+	for _, r := range path {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && !strings.ContainsRune("_./%+,:=@-", r) {
+			return lex.ShellQuoteArg(path)
 		}
 	}
+	if path == "" {
+		return "''"
+	}
+	return path
 }
+
 func checkCommand(o cliOptions) error {
 	if o.source != "" || o.check || o.refresh {
 		return usage("usage: lex check --codex DIR [--staged] [--outputs-under PATH] [--tree TREE]")
