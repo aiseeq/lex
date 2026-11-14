@@ -2411,14 +2411,18 @@ func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map
 	}
 	staged, diskDiff, oerr := commit.output(m.out)
 	if oerr != nil {
-		return warnings, append(problems, oerr.Error()), nil
+		return warnings, append(problems, commit.labelProblem(oerr.Error(), m.out)), nil
 	}
 	if diskDiff {
-		problems = append(problems, m.out+": index and disk differ — stage the whole file (git add) or restore it")
+		problems = append(problems, commit.labelProblem(commit.treePath(m.out)+": index and disk differ — stage the whole file (git add) or restore it", m.out))
 	}
 	if !outputMatchesGenerated(staged, body, m.header, path) {
-		problems = append(problems, builtDiffers(m.out, codex, m, path, body, staged))
-		problems = append(problems, unstagedFragmentHints(fragPaths, indexed, m.out)...)
+		problems = append(problems, commit.labelProblem(builtDiffers(commit.treePath(m.out), codex, m, path, body, staged), m.out))
+		hints := unstagedFragmentHints(commit, fragPaths, indexed, m.out)
+		for i := range hints {
+			hints[i] = commit.labelProblem(hints[i], m.out)
+		}
+		problems = append(problems, hints...)
 	}
 	return warnings, problems, nil
 }
@@ -2461,21 +2465,22 @@ func stagedLinkIsRegularFile(link outputLink) error {
 }
 
 // unstagedFragmentHints - частая причина расхождения: фрагмент правлен и пересобран, но не добавлен в коммит.
-func unstagedFragmentHints(fragPaths []string, indexed map[string][]byte, out string) []string {
+func unstagedFragmentHints(commit *stagedPaths, fragPaths []string, indexed map[string][]byte, out string) []string {
 	var hints []string
 	for _, f := range fragPaths {
 		staged, ok := indexed[f]
 		if !ok {
 			continue // вне репозитория или не прочитан из индекса: последнее checkedManifestBody уже назвал
 		}
-		disk, err := os.ReadFile(f)
+		diskPath := commit.treePath(f)
+		disk, err := os.ReadFile(diskPath)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
-			hints = append(hints, f+": fragment deleted on disk but not staged — git add it together with "+out)
+			hints = append(hints, diskPath+": fragment deleted on disk but not staged — git add it together with "+commit.treePath(out))
 		case err != nil:
-			hints = append(hints, fmt.Sprintf("%s: read fragment from disk: %v", f, err))
+			hints = append(hints, fmt.Sprintf("%s: read fragment from disk: %v", diskPath, err))
 		case !bytes.Equal(staged, disk):
-			hints = append(hints, f+": fragment changed on disk but not staged — git add it together with "+out)
+			hints = append(hints, diskPath+": fragment changed on disk but not staged — git add it together with "+commit.treePath(out))
 		}
 	}
 	return hints
@@ -2584,11 +2589,12 @@ func checkedManifestBody(codex string, m manifest, referenced map[string]bool, r
 
 // stagedPaths - пути, входящие в коммит текущего репозитория (git diff --cached), от его корня.
 type stagedPaths struct {
-	root  string
-	paths map[string]bool
-	index map[string]string // путь от корня -> sha блоба в индексе
-	modes map[string]string
-	blobs map[string][]byte
+	root     string
+	mainRoot string
+	paths    map[string]bool
+	index    map[string]string // путь от корня -> sha блоба в индексе
+	modes    map[string]string
+	blobs    map[string][]byte
 }
 
 type stagedFragment struct{ abs, id string }
@@ -2603,6 +2609,30 @@ func readStagedPaths() (*stagedPaths, error) {
 		return nil, fmt.Errorf("git rev-parse current directory: %w", err)
 	}
 	root := resolvePath(strings.TrimSpace(string(rootBytes)))
+	gitDir, err := exec.Command("git", "-C", root, "rev-parse", "--path-format=absolute", "--git-dir").Output()
+	if err != nil {
+		return nil, fmt.Errorf("git rev-parse git-dir in %s: %w", root, err)
+	}
+	commonDir, err := exec.Command("git", "-C", root, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	if err != nil {
+		return nil, fmt.Errorf("git rev-parse git-common-dir in %s: %w", root, err)
+	}
+	var mainRoot string
+	if resolvePath(strings.TrimSpace(string(gitDir))) != resolvePath(strings.TrimSpace(string(commonDir))) {
+		porcelain, e := exec.Command("git", "-C", root, "worktree", "list", "--porcelain").Output()
+		if e != nil {
+			return nil, fmt.Errorf("git worktree list in %s: %w", root, e)
+		}
+		for line := range strings.SplitSeq(string(porcelain), "\n") {
+			if after, ok := strings.CutPrefix(line, "worktree "); ok {
+				mainRoot = resolvePath(after)
+				break
+			}
+		}
+		if mainRoot == "" {
+			return nil, fmt.Errorf("git worktree list in %s: no worktree found", root)
+		}
+	}
 	// --no-renames: при переименовании в коммит входят оба пути, старый тоже
 	names, err := exec.Command("git", "-C", root, "diff", "--cached", "--no-renames", "--name-only", "-z").Output()
 	if err != nil {
@@ -2630,7 +2660,7 @@ func readStagedPaths() (*stagedPaths, error) {
 			modes[name] = f[0]
 		}
 	}
-	return &stagedPaths{root: root, paths: set, index: index, modes: modes, blobs: map[string][]byte{}}, nil
+	return &stagedPaths{root: root, mainRoot: mainRoot, paths: set, index: index, modes: modes, blobs: map[string][]byte{}}, nil
 }
 
 // prefetch - блобы индекса для путей одним вызовом git cat-file --batch.
@@ -2766,17 +2796,42 @@ func (s *stagedPaths) rel(path string) string {
 		return ""
 	}
 	abs = filepath.Join(resolvePath(filepath.Dir(abs)), filepath.Base(abs))
-	rel, inside := strings.CutPrefix(abs, s.root+string(filepath.Separator))
+	base := s.root
+	rel, inside := strings.CutPrefix(abs, base+string(filepath.Separator))
+	if !inside && s.mainRoot != "" {
+		base = s.mainRoot
+		rel, inside = strings.CutPrefix(abs, base+string(filepath.Separator))
+	}
 	if !inside {
 		return ""
 	}
 	// вложенный репозиторий внутри work-tree содержит отдельный проект: его файлы не в этом индексе
-	for dir := filepath.Dir(abs); dir != s.root && strings.HasPrefix(dir, s.root+string(filepath.Separator)); dir = filepath.Dir(dir) {
+	for dir := filepath.Dir(abs); dir != base && strings.HasPrefix(dir, base+string(filepath.Separator)); dir = filepath.Dir(dir) {
 		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
 			return ""
 		}
 	}
 	return filepath.ToSlash(rel)
+}
+
+// treePath maps a path represented by the main checkout into this worktree for disk reads.
+func (s *stagedPaths) treePath(path string) string {
+	rel := s.rel(path)
+	if rel != "" {
+		return filepath.Join(s.root, filepath.FromSlash(rel))
+	}
+	return path
+}
+
+func (s *stagedPaths) labelProblem(problem, out string) string {
+	if s.treePath(out) == out {
+		return problem
+	}
+	annotation := " (built by the codex as " + out + ")"
+	if strings.Contains(problem, s.treePath(out)) {
+		return strings.Replace(problem, s.treePath(out), s.treePath(out)+annotation, 1)
+	}
+	return problem + annotation
 }
 
 func (s *stagedPaths) has(path string) bool {
@@ -2788,21 +2843,22 @@ func (s *stagedPaths) has(path string) bool {
 func (s *stagedPaths) read(path string) ([]byte, error) {
 	rel := s.rel(path)
 	if rel == "" {
-		return os.ReadFile(path)
+		return os.ReadFile(s.treePath(path))
 	}
+	displayPath := s.treePath(path)
 	sha, ok := s.index[rel]
 	if !ok {
 		if s.paths[rel] {
-			return nil, fmt.Errorf("%s: removed from the index in this commit — restore it or remove it from the codex too", path)
+			return nil, fmt.Errorf("%s: removed from the index in this commit — restore it or remove it from the codex too", displayPath)
 		}
-		return nil, fmt.Errorf("%s: not in the index — git add it", path)
+		return nil, fmt.Errorf("%s: not in the index — git add it", displayPath)
 	}
 	if err := s.prefetch([]string{path}); err != nil {
 		return nil, err
 	}
 	blob, ok := s.blobs[sha]
 	if !ok {
-		return nil, fmt.Errorf("%s: blob %s not read from the index", path, sha)
+		return nil, fmt.Errorf("%s: blob %s not read from the index", displayPath, sha)
 	}
 	return blob, nil
 }
@@ -2810,16 +2866,16 @@ func (s *stagedPaths) read(path string) ([]byte, error) {
 // output - собранный файл из индекса и признак расхождения индекса с диском.
 func (s *stagedPaths) output(path string) ([]byte, bool, error) {
 	if s.rel(path) == "" {
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(s.treePath(path))
 		return data, false, err
 	}
 	index, err := s.read(path)
 	if err != nil {
 		return nil, false, err
 	}
-	disk, err := os.ReadFile(path)
+	disk, err := os.ReadFile(s.treePath(path))
 	if err != nil {
-		return nil, false, fmt.Errorf("%s: %w", path, err)
+		return nil, false, fmt.Errorf("%s: %w", s.treePath(path), err)
 	}
 	return index, !bytes.Equal(index, disk), nil
 }
