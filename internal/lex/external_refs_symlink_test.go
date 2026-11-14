@@ -23,7 +23,7 @@ func TestExternalEntryThroughSymlinkIsCorpusFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	agent := filepath.Join(home, "agent.md")
-	if err := os.WriteFile(agent, []byte("- Расходы — раздел «Бюджет» в `~/tree/CLAUDE.md`.\n- Доходы — раздел «Деньги» в `~/tree/CLAUDE.md`.\n"), 0o644); err != nil {
+	if err := os.WriteFile(agent, []byte("- Расходы — раздел «Бюджет» в `~/link/CLAUDE.md`.\n- Доходы — раздел «Деньги» в `~/link/CLAUDE.md`.\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	tools := `{"text_refs":{"external":["~/link/CLAUDE.md","` + agent + `"]}}`
