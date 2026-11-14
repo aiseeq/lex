@@ -66,6 +66,9 @@ func TestStagedWorktreeChecksOutputOfCurrentTree(t *testing.T) {
 	if !strings.Contains(err.Error(), "lex absorb") || !strings.Contains(err.Error(), strconv.Quote(output)) || strings.Contains(err.Error(), "lex absorb --force --codex "+strconv.Quote(codex)+" "+strconv.Quote(wTO)) {
 		t.Fatalf("absorb hint must name manifest output %s, got %v", output, err)
 	}
+	if !strings.Contains(err.Error(), "carry the edit into "+strconv.Quote(output)) || strings.Contains(err.Error(), "fragments in the main checkout") {
+		t.Fatalf("advice for a codex outside the project must ask to carry the edit and must not say absorb changes the main checkout's fragments, got %v", err)
+	}
 }
 
 // codexInsideProjectWorktree commits a project with its codex inside and returns the main checkout, a new worktree, the codex and a git runner.
