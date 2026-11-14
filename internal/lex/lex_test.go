@@ -1832,35 +1832,40 @@ func TestAbsorbMergeAndMoveDoesNotMisnameUntouchedFragment(t *testing.T) {
 	if err := Build(codex, false); err != nil {
 		t.Fatal(err)
 	}
-	manifestPath := filepath.Join(codex, "manifest", codexKey("merge-move.md")+".yaml")
-	beforeManifest, err := os.ReadFile(manifestPath)
-	if err != nil {
+	edited := []byte("third\n\nfirst second\n")
+	mustWrite(t, out, edited)
+	if err := Absorb(codex, out, AbsorbOptions{DraftDir: codex}); err != nil {
+		t.Fatalf("absorb of a merge and a move refused: %v", err)
+	}
+	if err := Build(codex, false); err != nil {
 		t.Fatal(err)
 	}
-	beforeFragments := treeBytes(t, filepath.Join(codex, "frag"))
-	mustWrite(t, out, []byte("third\n\nfirst second\n"))
-	edited := []byte("third\n\nfirst second\n")
-	err = Absorb(codex, out, AbsorbOptions{DraftDir: codex})
-	fragment := filepath.Join(codex, "frag")
-	if err == nil {
-		if err := Build(codex, false); err != nil {
-			t.Fatal(err)
-		}
-		got, err := os.ReadFile(out)
-		if err != nil || !bytes.Equal(got, edited) {
-			t.Fatalf("rebuilt output = %q, want %q (read error: %v)", got, edited, err)
-		}
-	} else {
-		if !strings.Contains(err.Error(), fragment) || !strings.Contains(err.Error(), "fragment") {
-			t.Fatalf("expected diagnostic to name affected fragment, got %v", err)
-		}
-		afterManifest, readErr := os.ReadFile(manifestPath)
-		if readErr != nil || !bytes.Equal(beforeManifest, afterManifest) {
-			t.Fatalf("manifest changed after refusal: %v", readErr)
-		}
-		if !bytes.Equal(beforeFragments, treeBytes(t, filepath.Join(codex, "frag"))) {
-			t.Fatal("fragments changed after refusal")
-		}
+	got, err := os.ReadFile(out)
+	if err != nil || !bytes.Equal(got, edited) {
+		t.Fatalf("rebuilt output = %q, want %q (read error: %v)", got, edited, err)
+	}
+}
+
+func TestAbsorbDeleteAndTwoInsertsKeepRenderedOrder(t *testing.T) {
+	codex, out := t.TempDir(), filepath.Join(t.TempDir(), "delete-two-inserts.md")
+	original := []byte("first\n\nsecond\n\nthird\n\nfourth\n")
+	if err := importData(codex, out, "delete-two-inserts.md", original, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	edited := []byte("new-top\n\nfirst\n\nthird\n\nnew-middle\n\nfourth\n")
+	mustWrite(t, out, edited)
+	if err := Absorb(codex, out, AbsorbOptions{DraftDir: codex}); err != nil {
+		t.Fatalf("absorb of a deletion and two insertions refused: %v", err)
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil || !bytes.Equal(got, edited) {
+		t.Fatalf("rebuilt output = %q, want %q (read error: %v)", got, edited, err)
 	}
 }
 

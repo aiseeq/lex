@@ -707,6 +707,133 @@ func buildManifests(codex string, paths []string, options BuildOptions) ([]strin
 	return differences, manualEdits, nil
 }
 
+type editWarningSnapshot struct {
+	mtime    string
+	fileGit  string
+	partsGit string
+}
+
+// gitLocalEnv lists the variables of `git rev-parse --local-env-vars`: inherited from a hook or another repository, they would make git report the state of the wrong repository.
+var gitLocalEnv = map[string]bool{"GIT_ALTERNATE_OBJECT_DIRECTORIES": true, "GIT_CONFIG": true, "GIT_CONFIG_PARAMETERS": true, "GIT_CONFIG_COUNT": true, "GIT_OBJECT_DIRECTORY": true, "GIT_DIR": true, "GIT_WORK_TREE": true, "GIT_IMPLICIT_WORK_TREE": true, "GIT_GRAFT_FILE": true, "GIT_INDEX_FILE": true, "GIT_NO_REPLACE_OBJECTS": true, "GIT_REPLACE_REF_BASE": true, "GIT_PREFIX": true, "GIT_SHALLOW_FILE": true, "GIT_COMMON_DIR": true}
+
+// gitStatusEnv runs git for the warning in the repository around the path, with English messages and without taking the index lock another session may need.
+func gitStatusEnv() []string {
+	env := []string{"LC_ALL=C", "GIT_OPTIONAL_LOCKS=0"}
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if !gitLocalEnv[key] && key != "LC_ALL" && key != "GIT_OPTIONAL_LOCKS" {
+			env = append(env, entry)
+		}
+	}
+	return env
+}
+
+func gitStatus(cwd string, paths ...string) (string, string, error) {
+	git, err := exec.LookPath("git")
+	if errors.Is(err, exec.ErrNotFound) {
+		return "", "", errors.New("git not found")
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("find git: %w", err)
+	}
+	args := append([]string{"--literal-pathspecs", "-C", cwd, "status", "--porcelain=v1", "--untracked-files=all", "--ignored", "--"}, paths...)
+	cmd := exec.Command(git, args...)
+	cmd.Env = gitStatusEnv()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err == nil {
+		return string(output), "", nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 128 && strings.Contains(strings.ToLower(stderr.String()), "not a git repository") {
+		return "", "not in a git repository", nil
+	}
+	reason := strings.TrimSpace(stderr.String())
+	if reason == "" {
+		reason = err.Error()
+	}
+	reason = strings.NewReplacer("\r", " ", "\n", " ").Replace(reason)
+	return "", "", errors.New(reason)
+}
+
+func fileGitState(path string) string {
+	dir, base := filepath.Dir(path), filepath.Base(path)
+	output, absentRepo, err := gitStatus(dir, base)
+	if absentRepo != "" {
+		return absentRepo
+	}
+	if err != nil {
+		return "unknown (" + err.Error() + ")"
+	}
+	if output == "" {
+		return "committed"
+	}
+	line := strings.TrimRight(output, "\n")
+	if strings.HasPrefix(line, "??") {
+		return "untracked"
+	}
+	if strings.HasPrefix(line, "!!") {
+		return "ignored"
+	}
+	x, y := line[0], line[1]
+	if x != ' ' && y != ' ' {
+		return "staged and modified"
+	}
+	if x != ' ' {
+		return "staged"
+	}
+	if y != ' ' {
+		return "modified"
+	}
+	return "committed"
+}
+
+func fragmentsGitState(codex string, m manifest, manifestPath string) string {
+	paths := make([]string, 0, len(m.parts)+1)
+	for _, id := range m.parts {
+		paths = append(paths, filepath.Join(codex, "frag", filepath.FromSlash(id)+".md"))
+	}
+	paths = append(paths, manifestPath)
+	output, absentRepo, err := gitStatus(codex, paths...)
+	if absentRepo != "" {
+		return absentRepo
+	}
+	if err != nil {
+		return "unknown (" + err.Error() + ")"
+	}
+	if output == "" {
+		return "committed"
+	}
+	if files := strings.Count(strings.TrimSuffix(output, "\n"), "\n") + 1; files > 1 {
+		return fmt.Sprintf("uncommitted changes in %d files", files)
+	}
+	return "uncommitted changes in 1 file"
+}
+
+func snapshotEditWarning(output, codex, manifestPath string, m manifest) *editWarningSnapshot {
+	info, err := os.Stat(output)
+	mtime := ""
+	if err != nil {
+		mtime = "unknown (" + err.Error() + ")"
+	} else {
+		mtime = info.ModTime().In(time.Local).Format("2006-01-02 15:04:05 MST")
+	}
+	return &editWarningSnapshot{
+		mtime:    mtime,
+		fileGit:  fileGitState(output),
+		partsGit: fragmentsGitState(codex, m, manifestPath),
+	}
+}
+
+func printEditWarning(kind, output string, s *editWarningSnapshot) {
+	if kind == "build" {
+		fmt.Fprintf(os.Stderr, "warning: %s: --force replaced an edit that was not in the fragments (file changed %s; git: %s; fragments: %s); if you did not make that edit, another session may have been working on this file\n", output, s.mtime, s.fileGit, s.partsGit)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: %s: absorb moved an edit into the fragments (file changed %s; git: %s; fragments: %s); if you did not make that edit, another session may still be working on this file — let it finish before you commit\n", output, s.mtime, s.fileGit, s.partsGit)
+}
+
 func buildManifest(codex, path string, options BuildOptions) (string, error) {
 	m, err := readManifest(path)
 	if err != nil {
@@ -731,6 +858,10 @@ func buildManifest(codex, path string, options BuildOptions) (string, error) {
 	if m.builtHash == "" && !options.Force {
 		return "", fmt.Errorf("%s: manifest has no built_sha256; use lex absorb or --force", path)
 	}
+	var warnSnapshot *editWarningSnapshot
+	if options.Force && outputHasManualEdits(e, actual, out, m, path, false) {
+		warnSnapshot = snapshotEditWarning(m.out, codex, path, m)
+	}
 	if outputHasManualEdits(e, actual, out, m, path, options.Force) {
 		return "", fmt.Errorf("%s: %w", m.out, errManualOutputEdits)
 	}
@@ -745,6 +876,9 @@ func buildManifest(codex, path string, options BuildOptions) (string, error) {
 	}
 	if e = updateManifestField(path, "built_sha256", sha(out)); e != nil {
 		return "", fmt.Errorf("%s: update manifest: %w", path, e)
+	}
+	if warnSnapshot != nil {
+		printEditWarning("build", m.out, warnSnapshot)
 	}
 	return "", nil
 }
@@ -1170,6 +1304,7 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 	if bytes.Equal(actual, built) {
 		return nil
 	}
+	warnSnapshot := snapshotAbsorbEditWarning(target, codex, selected, m, fileBytes)
 	purposeEnabled, err := readPurposeSetting(codex, read)
 	if err != nil {
 		return err
@@ -1192,8 +1327,24 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 			return err
 		}
 	}
-	return absorbEditedFragment(codex, paths, selected, m, built, actual, fileBytes, options, purpose)
+	return warnAfterAbsorb(absorbEditedFragment(codex, paths, selected, m, built, actual, fileBytes, options, purpose), target, warnSnapshot)
 }
+
+// warnAfterAbsorb prints the edit warning only when the absorb succeeded.
+func warnAfterAbsorb(err error, target string, warning *editWarningSnapshot) error {
+	if err == nil && warning != nil {
+		printEditWarning("absorb", target, warning)
+	}
+	return err
+}
+
+func snapshotAbsorbEditWarning(target, codex, selected string, m manifest, fileBytes []byte) *editWarningSnapshot {
+	if !statusFileChanged(fileBytes, selected, m) {
+		return nil
+	}
+	return snapshotEditWarning(target, codex, selected, m)
+}
+
 func findOutputManifest(paths []string, target string) (string, manifest, error) {
 	for _, path := range paths {
 		m, err := readManifest(path)
@@ -1268,19 +1419,6 @@ func planAbsorbEdits(codex string, paths []string, selected string, m manifest, 
 	}
 	edits, err := prepareFragmentEdits(codex, m.parts, bounds, owners, deltas, newLines, additions, printedPurpose)
 	if err != nil {
-		return nil, nil, err
-	}
-	remaining := append([]string(nil), m.parts...)
-	for _, edit := range edits {
-		body, err := fragmentBody(edit.updated)
-		if err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", edit.path, err)
-		}
-		if len(body) == 0 {
-			remaining = slices.DeleteFunc(remaining, func(id string) bool { return id == edit.part })
-		}
-	}
-	if err := validateAbsorbedInsertionBounds(codex, m.out, bounds, additions, remaining, m.parts); err != nil {
 		return nil, nil, err
 	}
 	editable, err := nonemptyEditedOwners(owners, m.parts, edits)
@@ -1603,22 +1741,6 @@ func applyAbsorbedEdits(paths []string, m manifest, edits []preparedFragmentEdit
 	}
 	updated.builtHash = sha(fileBytes)
 	return updated, removePaths, nil
-}
-
-func validateAbsorbedInsertionBounds(codex, output string, bounds [][2]int, additions map[int][]lineHunk, remainingParts, originalParts []string) error {
-	positions := slices.Sorted(maps.Keys(additions))
-	for _, position := range positions {
-		at := survivingInsertionIndex(position, bounds, originalParts, remainingParts)
-		if at > len(remainingParts) {
-			fragment := "unknown fragment"
-			if len(originalParts) > 0 {
-				partAt := min(at, len(originalParts)-1)
-				fragment = filepath.Join(codex, "frag", filepath.FromSlash(originalParts[partAt])+".md")
-			}
-			return fmt.Errorf("%s: fragment %s was not updated: invalid edited fragment line bounds for insertion at line %d", output, fragment, position+1)
-		}
-	}
-	return nil
 }
 
 // survivingInsertionIndex translates a boundary in the original rendered line
@@ -2465,7 +2587,7 @@ func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map
 	raw, rerr := commit.read(path)
 	if rerr != nil {
 		if commit.has(path) {
-			problems = append(problems, rerr.Error())
+			problems = append(problems, commit.treeProblem(rerr.Error(), path))
 		}
 		return nil, problems, nil // манифест вне коммита и вне индекса - чужая работа на диске
 	}
@@ -2522,14 +2644,18 @@ func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map
 	}
 	staged, diskDiff, oerr := commit.output(m.out)
 	if oerr != nil {
-		return warnings, append(problems, oerr.Error()), nil
+		return warnings, append(problems, commit.labelProblem(oerr.Error(), m.out)), nil
 	}
 	if diskDiff {
-		problems = append(problems, m.out+": index and disk differ — stage the whole file (git add) or restore it")
+		problems = append(problems, commit.labelProblem(m.out+": index and disk differ — stage the whole file (git add) or restore it", m.out))
 	}
 	if !outputMatchesGenerated(staged, body, m.header, path) {
-		problems = append(problems, builtDiffers(m.out, codex, m, path, body, staged))
-		problems = append(problems, unstagedFragmentHints(fragPaths, indexed, m.out)...)
+		problems = append(problems, commit.labelProblem(builtDiffers(m.out, codex, m, path, body, staged), m.out))
+		hints := unstagedFragmentHints(commit, fragPaths, indexed, m.out)
+		for i := range hints {
+			hints[i] = commit.labelProblem(hints[i], m.out)
+		}
+		problems = append(problems, hints...)
 	}
 	return warnings, problems, nil
 }
@@ -2541,13 +2667,15 @@ func stagedLinkProblems(commit *stagedPaths, links []outputLink) []string {
 			continue
 		}
 		rel := commit.rel(link.path)
+		current := link
+		current.path = commit.treePath(link.path)
 		sha, exists := commit.index[rel]
 		if !exists {
-			problems = append(problems, linkMismatch(link, "removed from the index in this commit").Error())
+			problems = append(problems, linkMismatch(current, "removed from the index in this commit").Error())
 			continue
 		}
 		if commit.modes[rel] != "120000" {
-			problems = append(problems, stagedLinkIsRegularFile(link).Error())
+			problems = append(problems, stagedLinkIsRegularFile(current).Error())
 			continue
 		}
 		if err := commit.prefetch([]string{link.path}); err != nil {
@@ -2560,7 +2688,7 @@ func stagedLinkProblems(commit *stagedPaths, links []outputLink) []string {
 			if exists {
 				actual = strconv.Quote(string(target))
 			}
-			problems = append(problems, linkMismatch(link, "has index target "+actual).Error())
+			problems = append(problems, linkMismatch(current, "has index target "+actual).Error())
 		}
 	}
 	return problems
@@ -2572,21 +2700,22 @@ func stagedLinkIsRegularFile(link outputLink) error {
 }
 
 // unstagedFragmentHints - частая причина расхождения: фрагмент правлен и пересобран, но не добавлен в коммит.
-func unstagedFragmentHints(fragPaths []string, indexed map[string][]byte, out string) []string {
+func unstagedFragmentHints(commit *stagedPaths, fragPaths []string, indexed map[string][]byte, out string) []string {
 	var hints []string
 	for _, f := range fragPaths {
 		staged, ok := indexed[f]
 		if !ok {
 			continue // вне репозитория или не прочитан из индекса: последнее checkedManifestBody уже назвал
 		}
-		disk, err := os.ReadFile(f)
+		diskPath := commit.treePath(f)
+		disk, err := os.ReadFile(diskPath)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
-			hints = append(hints, f+": fragment deleted on disk but not staged — git add it together with "+out)
+			hints = append(hints, diskPath+": fragment deleted on disk but not staged — git add it together with "+commit.treePath(out))
 		case err != nil:
-			hints = append(hints, fmt.Sprintf("%s: read fragment from disk: %v", f, err))
+			hints = append(hints, fmt.Sprintf("%s: read fragment from disk: %v", diskPath, err))
 		case !bytes.Equal(staged, disk):
-			hints = append(hints, f+": fragment changed on disk but not staged — git add it together with "+out)
+			hints = append(hints, diskPath+": fragment changed on disk but not staged — git add it together with "+commit.treePath(out))
 		}
 	}
 	return hints
@@ -2695,11 +2824,12 @@ func checkedManifestBody(codex string, m manifest, referenced map[string]bool, r
 
 // stagedPaths - пути, входящие в коммит текущего репозитория (git diff --cached), от его корня.
 type stagedPaths struct {
-	root  string
-	paths map[string]bool
-	index map[string]string // путь от корня -> sha блоба в индексе
-	modes map[string]string
-	blobs map[string][]byte
+	root     string
+	mainRoot string
+	paths    map[string]bool
+	index    map[string]string // путь от корня -> sha блоба в индексе
+	modes    map[string]string
+	blobs    map[string][]byte
 }
 
 type stagedFragment struct{ abs, id string }
@@ -2714,6 +2844,30 @@ func readStagedPaths() (*stagedPaths, error) {
 		return nil, fmt.Errorf("git rev-parse current directory: %w", err)
 	}
 	root := resolvePath(strings.TrimSpace(string(rootBytes)))
+	gitDir, err := exec.Command("git", "-C", root, "rev-parse", "--path-format=absolute", "--git-dir").Output()
+	if err != nil {
+		return nil, fmt.Errorf("git rev-parse git-dir in %s: %w", root, err)
+	}
+	commonDir, err := exec.Command("git", "-C", root, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	if err != nil {
+		return nil, fmt.Errorf("git rev-parse git-common-dir in %s: %w", root, err)
+	}
+	var mainRoot string
+	if resolvePath(strings.TrimSpace(string(gitDir))) != resolvePath(strings.TrimSpace(string(commonDir))) {
+		porcelain, e := exec.Command("git", "-C", root, "worktree", "list", "--porcelain").Output()
+		if e != nil {
+			return nil, fmt.Errorf("git worktree list in %s: %w", root, e)
+		}
+		for line := range strings.SplitSeq(string(porcelain), "\n") {
+			if after, ok := strings.CutPrefix(line, "worktree "); ok {
+				mainRoot = resolvePath(after)
+				break
+			}
+		}
+		if mainRoot == "" {
+			return nil, fmt.Errorf("git worktree list in %s: no worktree found", root)
+		}
+	}
 	// --no-renames: при переименовании в коммит входят оба пути, старый тоже
 	names, err := exec.Command("git", "-C", root, "diff", "--cached", "--no-renames", "--name-only", "-z").Output()
 	if err != nil {
@@ -2741,7 +2895,7 @@ func readStagedPaths() (*stagedPaths, error) {
 			modes[name] = f[0]
 		}
 	}
-	return &stagedPaths{root: root, paths: set, index: index, modes: modes, blobs: map[string][]byte{}}, nil
+	return &stagedPaths{root: root, mainRoot: mainRoot, paths: set, index: index, modes: modes, blobs: map[string][]byte{}}, nil
 }
 
 // prefetch - блобы индекса для путей одним вызовом git cat-file --batch.
@@ -2797,7 +2951,7 @@ func (s *stagedPaths) indexedUnder(dir, ext string) []string {
 	var out []string
 	for rel := range s.index {
 		if strings.HasPrefix(rel, base+"/") && !strings.Contains(strings.TrimPrefix(rel, base+"/"), "/") && strings.HasSuffix(rel, ext) {
-			out = append(out, filepath.Join(s.root, filepath.FromSlash(rel)))
+			out = append(out, filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(rel, base+"/"))))
 		}
 	}
 	sort.Strings(out)
@@ -2877,17 +3031,50 @@ func (s *stagedPaths) rel(path string) string {
 		return ""
 	}
 	abs = filepath.Join(resolvePath(filepath.Dir(abs)), filepath.Base(abs))
-	rel, inside := strings.CutPrefix(abs, s.root+string(filepath.Separator))
+	base := s.root
+	rel, inside := strings.CutPrefix(abs, base+string(filepath.Separator))
+	if !inside && s.mainRoot != "" {
+		base = s.mainRoot
+		rel, inside = strings.CutPrefix(abs, base+string(filepath.Separator))
+	}
 	if !inside {
 		return ""
 	}
 	// вложенный репозиторий внутри work-tree содержит отдельный проект: его файлы не в этом индексе
-	for dir := filepath.Dir(abs); dir != s.root && strings.HasPrefix(dir, s.root+string(filepath.Separator)); dir = filepath.Dir(dir) {
+	for dir := filepath.Dir(abs); dir != base && strings.HasPrefix(dir, base+string(filepath.Separator)); dir = filepath.Dir(dir) {
 		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
 			return ""
 		}
 	}
 	return filepath.ToSlash(rel)
+}
+
+// treePath maps a path represented by the main checkout into this worktree for disk reads.
+func (s *stagedPaths) treePath(path string) string {
+	rel := s.rel(path)
+	if rel != "" {
+		return filepath.Join(s.root, filepath.FromSlash(rel))
+	}
+	return path
+}
+
+func (s *stagedPaths) labelProblem(problem, out string) string {
+	if s.treePath(out) == out {
+		return problem
+	}
+	prefix := out + ": "
+	if after, ok := strings.CutPrefix(problem, prefix); ok {
+		return s.treePath(out) + " (built by the codex as " + out + "): " + after
+	}
+	return problem
+}
+
+// treeProblem names the worktree copy of a codex file at the start of a problem.
+func (s *stagedPaths) treeProblem(problem, path string) string {
+	if after, ok := strings.CutPrefix(problem, path+": "); ok {
+		return s.treePath(path) + ": " + after
+	}
+	return problem
 }
 
 func (s *stagedPaths) has(path string) bool {
@@ -2899,7 +3086,7 @@ func (s *stagedPaths) has(path string) bool {
 func (s *stagedPaths) read(path string) ([]byte, error) {
 	rel := s.rel(path)
 	if rel == "" {
-		return os.ReadFile(path)
+		return os.ReadFile(s.treePath(path))
 	}
 	sha, ok := s.index[rel]
 	if !ok {
@@ -2921,14 +3108,14 @@ func (s *stagedPaths) read(path string) ([]byte, error) {
 // output - собранный файл из индекса и признак расхождения индекса с диском.
 func (s *stagedPaths) output(path string) ([]byte, bool, error) {
 	if s.rel(path) == "" {
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(s.treePath(path))
 		return data, false, err
 	}
 	index, err := s.read(path)
 	if err != nil {
 		return nil, false, err
 	}
-	disk, err := os.ReadFile(path)
+	disk, err := os.ReadFile(s.treePath(path))
 	if err != nil {
 		return nil, false, fmt.Errorf("%s: %w", path, err)
 	}
