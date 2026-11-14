@@ -615,14 +615,15 @@ func BuildCheckOptions(codex string, options BuildCheckOptionsValue) error {
 		return fmt.Errorf("list manifests: %w", err)
 	}
 	sort.Strings(paths)
-	paths, err = selectBuildOutput(paths, options.Output)
+	catalog := newManifestCatalog(paths)
+	paths, err = selectBuildOutput(catalog, options.Output)
 	if err != nil {
 		return err
 	}
 	var linkProblems []string
 	manifests := make([]manifest, 0, len(paths))
 	for _, path := range paths {
-		m, err := readManifest(path)
+		m, err := catalog.read(path)
 		if err != nil {
 			return err
 		}
@@ -682,16 +683,17 @@ func buildWithCanonicalCodex(codex string, options BuildOptions) error {
 		return fmt.Errorf("%s: list manifests: %w", codex, err)
 	}
 	sort.Strings(paths)
-	paths, err = selectBuildOutput(paths, options.Output)
+	catalog := newManifestCatalog(paths)
+	paths, err = selectBuildOutput(catalog, options.Output)
 	if err != nil {
 		return err
 	}
 	if !options.Check && !options.Force {
-		if err := guardForeignBuildOutputs(codex, paths); err != nil {
+		if err := guardForeignBuildOutputs(codex, catalog, paths); err != nil {
 			return err
 		}
 	}
-	if err := prepareBuildLinks(paths, options.Check); err != nil {
+	if err := prepareBuildLinks(catalog, paths, options.Check); err != nil {
 		return err
 	}
 	differences, manualEdits, err := buildManifests(codex, paths, options)
@@ -708,25 +710,26 @@ func buildWithCanonicalCodex(codex string, options BuildOptions) error {
 	return nil
 }
 
-func selectBuildOutput(paths []string, output string) ([]string, error) {
+// selectBuildOutput returns the catalog's manifest paths, or only the one that builds output when output is set.
+func selectBuildOutput(catalog *manifestCatalog, output string) ([]string, error) {
 	if output == "" {
-		return paths, nil
+		return catalog.paths, nil
 	}
 	target, err := filepath.Abs(output)
 	if err != nil {
 		return nil, fmt.Errorf("resolve output path: %w", err)
 	}
-	selected, _, err := findOutputManifest(paths, target)
+	selected, _, err := catalog.findOutputManifest(target)
 	if err != nil {
 		return nil, err
 	}
 	return []string{selected}, nil
 }
 
-func prepareBuildLinks(paths []string, check bool) error {
+func prepareBuildLinks(catalog *manifestCatalog, paths []string, check bool) error {
 	var linkProblems []string
 	for _, path := range paths {
-		m, err := readManifest(path)
+		m, err := catalog.read(path)
 		if err != nil {
 			return err
 		}
@@ -742,9 +745,9 @@ func prepareBuildLinks(paths []string, check bool) error {
 	return nil
 }
 
-func guardForeignBuildOutputs(codex string, paths []string) error {
+func guardForeignBuildOutputs(codex string, catalog *manifestCatalog, paths []string) error {
 	for _, path := range paths {
-		m, err := readManifest(path)
+		m, err := catalog.read(path)
 		if err != nil {
 			return err
 		}
@@ -906,6 +909,8 @@ func printEditWarning(kind, output string, s *editWarningSnapshot) {
 	fmt.Fprintf(os.Stderr, "warning: %s: absorb moved an edit into the fragments (file changed %s; git: %s; fragments: %s); if you did not make that edit, another session may still be working on this file — let it finish before you commit\n", output, s.mtime, s.fileGit, s.partsGit)
 }
 
+// buildManifest reads its manifest afresh, not from the catalog: it writes the built hash into the manifest,
+// and a later path linked to the same file must see that write.
 func buildManifest(codex, path string, options BuildOptions) (string, error) {
 	m, err := readManifest(path)
 	if err != nil {
@@ -1579,10 +1584,6 @@ func snapshotAbsorbEditWarning(target, codex, selected string, m manifest, fileB
 		return nil
 	}
 	return snapshotEditWarning(target, codex, selected, m)
-}
-
-func findOutputManifest(paths []string, target string) (string, manifest, error) {
-	return newManifestCatalog(paths).findOutputManifest(target)
 }
 
 type lineHunk struct {
