@@ -1383,8 +1383,9 @@ func absorbBuiltBody(codex, target, selected string, paths []string, m manifest,
 	return built, nil
 }
 
-// textAboveHeaderAdvice is the refusal absorb, check and status give for text above the lex header.
-const textAboveHeaderAdvice = "text above lex header; move the text below the header"
+// textAboveHeaderAdvice is the refusal absorb, check and status give for text above the lex header;
+// a deleted header with a copy quoted further down looks the same, so the advice names both fixes.
+const textAboveHeaderAdvice = "text above lex header; move the text below the header, or if the header line was deleted, restore it as the first line"
 
 // rejectTextAboveHeader refuses a file whose lex header line, with either line ending, stands
 // below text other than front matter. A header in its place ends the check, so a copy of the
