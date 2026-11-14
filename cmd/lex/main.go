@@ -438,6 +438,9 @@ func statusCommand(o cliOptions) error {
 }
 
 func statusLine(entry *lex.StatusEntry) string {
+	if entry.Message != "" {
+		return entry.Message
+	}
 	prefix := entry.Manifest + ": " + entry.Output + "; "
 	switch {
 	case entry.Problem != "":
