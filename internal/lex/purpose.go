@@ -273,11 +273,12 @@ func (p purposeLayout) ruleTextPresent(span purposeSpan, oldLines, newLines [][]
 	if p.existingRuleText(span, oldLines, newLines, matches) {
 		return true
 	}
-	matchedNew := make(map[int]bool)
+	matchedNew, matchedOld := make(map[int]bool), make(map[int]bool)
 	beforeOld, beforeNew := -1, -1
 	afterOld, afterNew := len(oldLines), len(newLines)
 	for _, pair := range matches {
 		matchedNew[pair[1]] = true
+		matchedOld[pair[0]] = true
 		if pair[0] < span.start && pair[0] > beforeOld {
 			beforeOld, beforeNew = pair[0], pair[1]
 		}
@@ -286,7 +287,7 @@ func (p purposeLayout) ruleTextPresent(span purposeSpan, oldLines, newLines [][]
 		}
 	}
 	start, end := beforeNew+1, afterNew
-	if p.editedRuleInWindow(span, oldLines, newLines, matchedNew, start, end) {
+	if p.editedRuleInWindow(span, oldLines, newLines, matchedNew, matchedOld, start, end) {
 		return true
 	}
 	for _, pair := range matches {
@@ -319,17 +320,30 @@ func (p purposeLayout) existingRuleText(span purposeSpan, oldLines, newLines [][
 }
 
 // A changed rule can remain after its goal was moved above it. Only unmatched
-// lines within this rule's anchors can represent that edit.
-func (p purposeLayout) editedRuleInWindow(span purposeSpan, oldLines, newLines [][]byte, matchedNew map[int]bool, start, end int) bool {
+// lines within this rule's anchors can represent that edit, and only when the
+// rule's text is longer than any other changed rule's text the line starts
+// with: a line that extends a neighbour's text at least as long is taken as
+// the neighbour's edit. A neighbour line still present unchanged is no rival.
+func (p purposeLayout) editedRuleInWindow(span purposeSpan, oldLines, newLines [][]byte, matchedNew, matchedOld map[int]bool, start, end int) bool {
 	for index := start; index < end; index++ {
 		if matchedNew[index] {
 			continue
 		}
 		text := bytes.TrimSpace(newLines[index])
-		for oldIndex := span.start; oldIndex < span.end; oldIndex++ {
-			if p.isRuleText(oldIndex, oldLines) && bytes.HasPrefix(text, bytes.TrimSpace(oldLines[oldIndex])) {
-				return true
+		own, other := -1, -1
+		for oldIndex := range oldLines {
+			rule := bytes.TrimSpace(oldLines[oldIndex])
+			if !p.isRuleText(oldIndex, oldLines) || !bytes.HasPrefix(text, rule) {
+				continue
 			}
+			if p.spanAt(oldIndex) == span {
+				own = max(own, len(rule))
+			} else if !matchedOld[oldIndex] {
+				other = max(other, len(rule))
+			}
+		}
+		if own >= 0 && own > other {
+			return true
 		}
 	}
 	return false
@@ -418,7 +432,7 @@ func (p purposeLayout) refuseRemovedGoals(oldLines, newLines [][]byte, failed []
 				}
 				candidate, newToOld := purposeMatchesWithCandidate(matches, index, i)
 				if moved, err := p.checkMovedGoals(oldLines, candidate, normalized, newToOld, map[int]bool{index: true}); moved {
-					return fmt.Errorf("purpose line has CRLF line endings; restore its line ending; %w", err)
+					return fmt.Errorf("%w; the line has CRLF line endings, restore its line ending", err)
 				}
 			}
 		}
