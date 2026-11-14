@@ -1210,6 +1210,9 @@ func restoreDeletedHeader(manifestPath string, m manifest, fileBytes, body []byt
 	if err := os.WriteFile(m.out, full, fileMode); err != nil {
 		return fmt.Errorf("%s: %w", m.out, err)
 	}
+	if err := updateManifestField(manifestPath, "built_sha256", sha(full)); err != nil {
+		return fmt.Errorf("%s: update manifest: %w", manifestPath, err)
+	}
 	fmt.Fprintf(os.Stderr, "%s: restored the lex header line; the text already matched the fragments\n", m.out)
 	return nil
 }

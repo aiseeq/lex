@@ -65,8 +65,12 @@ func TestCheckHintRestoresDeletedHeader(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "lex absorb") {
 		t.Fatalf("check of a file without its header should name lex absorb: %v", err)
 	}
-	if _, err = captureRun(t, "absorb", "--codex", codex, output); err != nil {
+	_, stderr, err := captureStreams(t, func() error { return run([]string{"absorb", "--codex", codex, output}) })
+	if err != nil {
 		t.Fatalf("absorb: %v", err)
+	}
+	if want := output + ": restored the lex header line; the text already matched the fragments\n"; stderr != want {
+		t.Errorf("absorb stderr = %q, want %q", stderr, want)
 	}
 	got, err := os.ReadFile(output)
 	if err != nil {
@@ -80,6 +84,55 @@ func TestCheckHintRestoresDeletedHeader(t *testing.T) {
 	}
 	if stdout, err := captureRun(t, "status", "--codex", codex); err != nil {
 		t.Errorf("status after absorb: %q, %v", stdout, err)
+	}
+}
+
+// After a restore the manifest knows the file lex wrote, so the next fragment edit builds without --force.
+func TestRestoredHeaderRecordsBuiltHash(t *testing.T) {
+	codex, output, built := headerFixture(t)
+	fragments, err := filepath.Glob(filepath.Join(codex, "frag", "*", "*.md"))
+	if err != nil || len(fragments) == 0 {
+		t.Fatalf("find fragments: %v, %v", fragments, err)
+	}
+	var fragment string
+	for _, path := range fragments {
+		if data, readErr := os.ReadFile(path); readErr == nil && strings.Contains(string(data), "Water the beds at dawn.") {
+			fragment = path
+		}
+	}
+	if fragment == "" {
+		t.Fatalf("no fragment holds the rule among %v", fragments)
+	}
+	replaceIn := func(path, old, new string) {
+		t.Helper()
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !strings.Contains(string(data), old) {
+			t.Fatalf("%s has no %q", path, old)
+		}
+		if writeErr := os.WriteFile(path, []byte(strings.Replace(string(data), old, new, 1)), 0644); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	replaceIn(fragment, "at dawn.", "at noon.")
+	if err = os.WriteFile(output, []byte(strings.Replace(string(withoutFirstLine(t, built)), "at dawn.", "at noon.", 1)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = captureRun(t, "absorb", "--codex", codex, "--force", output); err != nil {
+		t.Fatalf("absorb --force: %v", err)
+	}
+	replaceIn(fragment, "at noon.", "at dusk.")
+	if _, err = captureRun(t, "build", "--codex", codex); err != nil {
+		t.Fatalf("build after a fragment edit refused the file lex restored: %v", err)
+	}
+	got, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "Water the beds at dusk.") || !strings.HasPrefix(string(got), "<!-- lex: ") {
+		t.Errorf("build did not write the new fragment with the header: %q", got)
 	}
 }
 
