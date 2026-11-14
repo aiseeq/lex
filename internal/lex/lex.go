@@ -1099,6 +1099,18 @@ func generatedMarkerForms(manifestPath string) [][]byte {
 	return forms
 }
 
+// headerLineForms lists each generated marker line ending in LF and in CRLF: an editor may rewrite the header line's ending.
+func headerLineForms(manifestPath string) [][]byte {
+	var forms [][]byte
+	for _, marker := range generatedMarkerForms(manifestPath) {
+		line := bytes.TrimSuffix(marker, []byte("\n"))
+		for _, ending := range []string{"\n", "\r\n"} {
+			forms = append(forms, append(append([]byte(nil), line...), ending...))
+		}
+	}
+	return forms
+}
+
 func frontMatterOffset(data []byte) int {
 	lines := bytes.SplitAfter(data, []byte("\n"))
 	offset := 0
@@ -1181,7 +1193,7 @@ func withoutGeneratedHeader(data []byte, manifestPath string) []byte {
 
 func stripGeneratedHeader(data []byte, manifestPath string) ([]byte, bool) {
 	offset := frontMatterOffset(data)
-	for _, marker := range generatedMarkerForms(manifestPath) {
+	for _, marker := range headerLineForms(manifestPath) {
 		if bytes.HasPrefix(data[offset:], marker) {
 			return append(append([]byte{}, data[:offset]...), data[offset+len(marker):]...), true
 		}
@@ -1371,6 +1383,9 @@ func absorbBuiltBody(codex, target, selected string, paths []string, m manifest,
 	return built, nil
 }
 
+// textAboveHeaderAdvice is the refusal absorb, check and status give for text above the lex header.
+const textAboveHeaderAdvice = "text above lex header; move the text below the header"
+
 // rejectTextAboveHeader refuses a file whose lex header line, with either line ending, stands
 // below text other than front matter. A header in its place ends the check, so a copy of the
 // header quoted further down the file does not count.
@@ -1378,12 +1393,7 @@ func rejectTextAboveHeader(file, selected string, m manifest, actual []byte) err
 	if !m.header {
 		return nil
 	}
-	var forms [][]byte
-	for _, marker := range generatedMarkerForms(selected) {
-		for _, ending := range [][]byte{[]byte("\n"), []byte("\r\n")} {
-			forms = append(forms, append(append([]byte(nil), bytes.TrimSuffix(marker, []byte("\n"))...), ending...))
-		}
-	}
+	forms := headerLineForms(selected)
 	top := actual[frontMatterOffset(actual):]
 	for _, form := range forms {
 		if bytes.HasPrefix(top, form) {
@@ -1392,7 +1402,7 @@ func rejectTextAboveHeader(file, selected string, m manifest, actual []byte) err
 	}
 	for _, form := range forms {
 		if index := bytes.Index(actual, form); index > 0 && actual[index-1] == '\n' {
-			return fmt.Errorf("%s: text above lex header; move the text below the header", file)
+			return fmt.Errorf("%s: %s", file, textAboveHeaderAdvice)
 		}
 	}
 	return nil
@@ -3338,6 +3348,9 @@ func builtDiffers(out, codex string, m manifest, manifestPath string, want, actu
 	if owner, foreign := foreignOutputOwner(codex, actual); foreign {
 		return fmt.Sprintf("%s: the file carries %s, so lex import and lex absorb refuse it — if this codex owns the file, run `lex build --force --codex %s %s` to rebuild it from the fragments (edits in the file are lost)", out, ForeignHeaderPhrase(owner), codexArg, fileArg), false
 	}
+	if err := rejectTextAboveHeader(out, manifestPath, m, actual); err != nil {
+		return err.Error(), false
+	}
 	fragmentsChanged := fragmentsChangedSinceBuild(codex, manifestPath, m, want)
 	fileChanged := statusFileChanged(actual, manifestPath, m)
 	if fragmentsChanged && !fileChanged {
@@ -3880,6 +3893,8 @@ type StatusEntry struct {
 	ProblemFile bool
 	// Problem says why the file could not be compared; Command is empty then.
 	Problem string
+	// Refusal says why lex absorb refuses the file and what to change in it; Command is empty then.
+	Refusal string
 	// ForeignCodex names the codex whose lex header the file carries; Command then rebuilds the file from this codex.
 	ForeignCodex string
 }
@@ -3980,6 +3995,11 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 		// lex import and lex absorb refuse such a file; only build --force rebuilds it.
 		entry.ForeignCodex = owner
 		entry.Command = "lex build --force --codex " + target
+		return nil
+	}
+	if rejectTextAboveHeader(m.out, manifestPath, m, actual) != nil {
+		// lex absorb refuses such a file the same way; no command settles it before the text moves.
+		entry.Refusal = textAboveHeaderAdvice
 		return nil
 	}
 	entry.Command = "lex import --refresh --codex " + target
