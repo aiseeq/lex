@@ -4,39 +4,71 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
 
-func findPartWithBody(t *testing.T, codex string, m manifest, want []byte) string {
+func runRefreshTestGit(t *testing.T, root string, args ...string) {
 	t.Helper()
-	for _, id := range m.parts {
-		raw, err := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(id)+".md"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		body, err := fragmentBody(raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if bytes.Equal(body, want) {
-			return id
-		}
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %s: %v", args, output, err)
 	}
-	t.Fatalf("no fragment with body %q in %v", want, m.parts)
-	return ""
+}
+
+func addSharedOverrideForRefreshTest(t *testing.T, codex, manifestPath, shared string) {
+	t.Helper()
+	m, err := readManifest(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range m.parts {
+		if id == shared {
+			continue
+		}
+		path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw = bytes.Replace(raw, []byte("цель: \n"), []byte("цель: g\n"), 1)
+		raw = bytes.Replace(raw, []byte("основание: \n"), []byte("основание: o\n"), 1)
+		at := bytes.Index(raw, []byte("\n---\n"))
+		if at < 0 {
+			t.Fatalf("fragment %s has no closing header", id)
+		}
+		fields := []byte("\nпереопределяет: " + shared + "\nпереопределяет_sha256: " + sha(fragmentBodyMust(t, codex, shared)))
+		raw = append(append(append([]byte(nil), raw[:at]...), fields...), raw[at:]...)
+		mustWrite(t, path, raw)
+		m.fragmentHashes[id] = sha(raw)
+		if err := writeManifest(manifestPath, m, m.links); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	t.Fatal("no private fragment available for override")
+}
+
+func fragmentBodyMust(t *testing.T, codex, id string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(id)+".md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := fragmentBody(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
 }
 
 func TestRefreshKeepsSharedFragmentAbsorbCannotTake(t *testing.T) {
-	treeAdvice := treeOutputAdvice("out.md: differs — run `lex import --refresh --codex c out.md`", "out.md", "tree/out.md", false)
-	if !strings.Contains(treeAdvice, "before running `lex import --refresh --codex c out.md`") {
-		t.Fatalf("tree refresh advice = %q", treeAdvice)
-	}
 	for _, tc := range []struct {
-		name, content, second  string
-		absorb, header, detach bool
+		name, content, second                    string
+		absorb, header, detach, override, staged bool
 	}{
 		{name: "whole", content: "x\n", second: "z\n", detach: true},
 		{name: "refresh after moving shared", content: "x\n", second: "x\n\nshared para!\n", detach: true},
@@ -46,6 +78,8 @@ func TestRefreshKeepsSharedFragmentAbsorbCannotTake(t *testing.T) {
 		{name: "unshare", content: "x\nshared para EDITED\n", detach: true},
 		{name: "slug shift", content: "# a\n\nshared para!\n\nshared para\n", absorb: true},
 		{name: "generated header", content: "x\n", header: true, detach: true},
+		{name: "override preserved", content: "x\n", detach: true, override: true},
+		{name: "staged same-topic refresh", content: "x\n", detach: true, staged: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, codex, a, b := sharedEditFixture(t)
@@ -70,7 +104,7 @@ func TestRefreshKeepsSharedFragmentAbsorbCannotTake(t *testing.T) {
 				t.Fatal(err)
 			}
 			shared := ""
-			var sharedBody, sharedRaw []byte
+			var sharedRaw []byte
 			for _, id := range ma.parts {
 				raw, err := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(id)+".md"))
 				if err != nil {
@@ -82,7 +116,6 @@ func TestRefreshKeepsSharedFragmentAbsorbCannotTake(t *testing.T) {
 				}
 				if strings.Contains(string(body), "shared para") {
 					shared = id
-					sharedBody = append([]byte(nil), body...)
 					sharedRaw = append([]byte(nil), raw...)
 				}
 			}
@@ -111,6 +144,17 @@ func TestRefreshKeepsSharedFragmentAbsorbCannotTake(t *testing.T) {
 			}
 			if err := writeManifest(mcPath, mc, mc.links); err != nil {
 				t.Fatal(err)
+			}
+			if tc.override {
+				addSharedOverrideForRefreshTest(t, codex, mcPath, shared)
+				if err := BuildWithOptions(codex, BuildOptions{Force: true}); err != nil {
+					t.Fatalf("build override fixture: %v", err)
+				}
+			}
+			if tc.staged {
+				runRefreshTestGit(t, root, "init", "-q")
+				runRefreshTestGit(t, root, "add", "-A")
+				runRefreshTestGit(t, root, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "initial")
 			}
 			beforeB, _ := os.ReadFile(b)
 			beforeC, _ := os.ReadFile(c)
@@ -186,6 +230,31 @@ func TestRefreshKeepsSharedFragmentAbsorbCannotTake(t *testing.T) {
 			if _, err := CheckWithWarnings(codex, CheckOptions{}); err != nil {
 				t.Fatalf("check: %v", err)
 			}
+			if tc.staged {
+				runRefreshTestGit(t, root, "add", "-A", "--", "docs/a.md", filepath.Join("codex", "manifest", filepath.Base(maPath)), filepath.Join("codex", "frag", codexKey("docs/a.md")))
+				t.Chdir(root)
+				if _, err := CheckWithWarnings(codex, CheckOptions{Staged: true}); err != nil {
+					t.Fatalf("staged check after a-only refresh: %v", err)
+				}
+			}
+			if tc.override {
+				debt, err := CodeDebt(codex)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, item := range debt {
+					if strings.Contains(item, "lost during refresh") {
+						t.Fatalf("code debt = %v", debt)
+					}
+				}
+				raw, err := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(codexKey("docs/c.md")), "c-1.md"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Contains(raw, []byte("переопределяет: "+shared)) {
+					t.Fatalf("override header lost: %q", raw)
+				}
+			}
 			if got, _ := os.ReadFile(b); !bytes.Equal(got, beforeB) {
 				t.Fatal("b changed")
 			}
@@ -197,54 +266,33 @@ func TestRefreshKeepsSharedFragmentAbsorbCannotTake(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tc.absorb {
-				if got, _ := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(shared)+".md")); !bytes.Equal(got, sharedRaw) {
-					t.Fatal("absorb changed shared fragment")
-				}
-				if got, _ := os.ReadFile(mbPath); !bytes.Equal(got, mbBefore) {
-					t.Fatal("absorb changed b manifest")
-				}
-				if got, _ := os.ReadFile(mcPath); !bytes.Equal(got, mcBefore) {
-					t.Fatal("absorb changed c manifest")
-				}
-			} else {
-				movedB, err := readManifest(mbPath)
-				if err != nil {
-					t.Fatal(err)
-				}
-				movedC, err := readManifest(mcPath)
-				if err != nil {
-					t.Fatal(err)
-				}
-				moved := findPartWithBody(t, codex, movedB, sharedBody)
-				if moved == shared || !strings.HasPrefix(moved, codexKey("docs/b.md")+"/") {
-					t.Fatalf("shared ID = %q, want relocated to b topic", moved)
-				}
-				if !slices.Contains(movedC.parts, moved) {
-					t.Fatalf("c parts %v omit relocated %s", movedC.parts, moved)
-				}
-				raw, err := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(moved)+".md"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				body, err := fragmentBody(raw)
-				if err != nil || !bytes.Equal(body, sharedBody) {
-					t.Fatalf("relocated shared body = %q, %v", body, err)
-				}
-				if movedB.fragmentHashes[moved] != sha(raw) || movedC.fragmentHashes[moved] != sha(raw) {
-					t.Fatal("relocated shared fragment hashes are incorrect")
-				}
+			manifestBytes, err := os.ReadFile(maPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(manifestBytes, []byte("refresh_detached_shared")) {
+				t.Fatal("manifest retained a historical detach flag")
+			}
+			if !tc.absorb {
 				for _, id := range refreshed.parts {
-					if id == moved {
-						t.Fatalf("a still lists relocated shared fragment %s", moved)
-					}
-					if !strings.HasPrefix(id, codexKey("docs/a.md")+"/") {
-						t.Fatalf("a part %q is outside its topic", id)
+					if id == shared {
+						t.Fatalf("a still lists shared fragment %s", shared)
 					}
 				}
-				if _, err := os.Stat(filepath.Join(codex, "frag", filepath.FromSlash(shared)+".md")); !os.IsNotExist(err) {
-					t.Fatalf("old shared fragment remains: %v", err)
+			}
+			for _, id := range refreshed.parts {
+				if !strings.HasPrefix(id, codexKey("docs/a.md")+"/") {
+					t.Fatalf("a part %q is outside its topic", id)
 				}
+			}
+			if got, _ := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(shared)+".md")); !bytes.Equal(got, sharedRaw) {
+				t.Fatal("refresh or absorb changed the retained shared fragment")
+			}
+			if got, _ := os.ReadFile(mbPath); !bytes.Equal(got, mbBefore) {
+				t.Fatal("b manifest changed")
+			}
+			if got, _ := os.ReadFile(mcPath); !bytes.Equal(got, mcBefore) {
+				t.Fatal("c manifest changed")
 			}
 			if got, _ := os.ReadFile(a); !bytes.Equal(got, sourceWant) {
 				t.Fatalf("a changed: %q", got)
@@ -262,6 +310,9 @@ func TestRefreshKeepsSharedFragmentAbsorbCannotTake(t *testing.T) {
 						if !strings.HasPrefix(entry.Command, "lex import --refresh ") {
 							t.Fatalf("second status command = %q", entry.Command)
 						}
+						if strings.Contains(entry.SharedHint, "remains used by  ") {
+							t.Fatalf("second status hint has empty owner list: %#v", entry)
+						}
 					}
 				}
 				if !found {
@@ -270,6 +321,9 @@ func TestRefreshKeepsSharedFragmentAbsorbCannotTake(t *testing.T) {
 				_, advice := CheckWithWarnings(codex, CheckOptions{})
 				if advice == nil || !strings.Contains(advice.Error(), "lex import --refresh") {
 					t.Fatalf("second check advice = %v", advice)
+				}
+				if strings.Contains(advice.Error(), "remains used by  —") || strings.Contains(advice.Error(), "used by  —") {
+					t.Fatalf("second check advice has empty owner list: %v", advice)
 				}
 				if err := ImportWithOptions(codex, a, ImportOptions{Refresh: true, Home: root}); err != nil {
 					t.Fatalf("second refresh: %v", err)
@@ -282,6 +336,20 @@ func TestRefreshKeepsSharedFragmentAbsorbCannotTake(t *testing.T) {
 				}
 				if got, _ := os.ReadFile(c); !bytes.Equal(got, beforeC) {
 					t.Fatal("second refresh changed c")
+				}
+				if tc.name == "refresh after moving shared" {
+					m, err := readManifest(maPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, id := range m.parts {
+						if id == shared {
+							t.Fatalf("new a fragment reused shared ID %s", shared)
+						}
+					}
+					if got, _ := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(shared)+".md")); !bytes.Equal(got, sharedRaw) {
+						t.Fatal("second refresh overwrote the shared fragment")
+					}
 				}
 			}
 		})
