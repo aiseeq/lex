@@ -3448,9 +3448,12 @@ func checkSelectedOutputs(codex, tree string, codexInMain bool, selected []*sele
 			}
 			return b, err
 		}
-		body, missing, draftWarnings := checkedManifestBody(codex, entry.m, referenced, read, purposeEnabled)
+		body, missing, draftWarnings := checkedManifestBody(codex, entry.path, entry.m, referenced, read, purposeEnabled)
 		warnings = append(warnings, draftWarnings...)
 		problems = append(problems, missing...)
+		if len(missing) > 0 {
+			continue
+		}
 		if entry.m.header {
 			body = generatedHeader(entry.path, body)
 		}
@@ -3502,7 +3505,7 @@ func checkDisk(codex string) ([]string, error) {
 			continue
 		}
 		problems = append(problems, diskLinkProblems(m.links)...)
-		body, missing, draftWarnings := checkedManifestBody(codex, m, referenced, os.ReadFile, purposeEnabled)
+		body, missing, draftWarnings := checkedManifestBody(codex, path, m, referenced, os.ReadFile, purposeEnabled)
 		warnings = append(warnings, draftWarnings...)
 		problems = append(problems, missing...)
 		if len(missing) > 0 {
@@ -3665,11 +3668,11 @@ func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map
 		}
 		return b, err
 	}
-	body, missing, draftWarnings := checkedManifestBody(codex, m, referenced, read, checker.purpose)
+	body, missing, draftWarnings := checkedManifestBody(codex, path, m, referenced, read, checker.purpose)
 	warnings = append(warnings, draftWarnings...)
 	problems = append(problems, missing...)
 	if len(missing) == 0 {
-		diskMissing := stagedDiskMissingFragments(commit, fragPaths, path)
+		diskMissing := stagedDiskMissingFragments(commit, fragPaths, m.parts, path)
 		missing = append(missing, diskMissing...)
 		problems = append(problems, diskMissing...)
 	}
@@ -3876,8 +3879,59 @@ func finishCheck(warnings, problems []string) ([]string, error) {
 	return warnings, nil
 }
 
+func restorePathCommand(path string) (string, error) {
+	rootBytes, err := exec.Command("git", "-C", filepath.Dir(path), "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return "", nil
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return "", nil
+		}
+		return "", fmt.Errorf("find git root for %s: %w", path, err)
+	}
+	root := strings.TrimSpace(string(rootBytes))
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return "", fmt.Errorf("make %s relative to git root %s: %w", path, root, err)
+	}
+	rel = filepath.ToSlash(rel)
+	prefix := "git -C " + ShellQuoteArg(root) + " checkout "
+	indexErr := exec.Command("git", "-C", root, "ls-files", "--error-unmatch", "--", rel).Run()
+	if indexErr == nil {
+		return prefix + "-- " + ShellQuoteArg(rel), nil
+	}
+	if errors.Is(indexErr, exec.ErrNotFound) {
+		return "", nil
+	}
+	var indexExitErr *exec.ExitError
+	if !errors.As(indexErr, &indexExitErr) {
+		return "", fmt.Errorf("check indexed path %s: %w", rel, indexErr)
+	}
+	headErr := exec.Command("git", "-C", root, "cat-file", "-e", "HEAD:"+rel).Run()
+	if headErr == nil {
+		return prefix + "HEAD -- " + ShellQuoteArg(rel), nil
+	}
+	if errors.Is(headErr, exec.ErrNotFound) {
+		return "", nil
+	}
+	var headExitErr *exec.ExitError
+	if !errors.As(headErr, &headExitErr) {
+		return "", fmt.Errorf("check HEAD path %s: %w", rel, headErr)
+	}
+	return "", nil
+}
+
 func missingFragmentAdvice(path, id, manifestPath string) string {
-	return fmt.Sprintf("%s: missing fragment %s; restore it with `git checkout -- %s` or remove %q from manifest %s", path, id, ShellQuoteArg(path), id, manifestPath)
+	command, commandErr := restorePathCommand(path)
+	if commandErr != nil {
+		return fmt.Sprintf("%s: missing fragment %s; restore it manually or remove %q from manifest %s (could not determine git restore command: %v)", path, id, id, manifestPath, commandErr)
+	}
+	if command != "" {
+		return fmt.Sprintf("%s: missing fragment %s; restore it with `%s` or remove %q from manifest %s", path, id, command, id, manifestPath)
+	}
+	return fmt.Sprintf("%s: missing fragment %s; restore it from a backup or remove %q from manifest %s", path, id, id, manifestPath)
 }
 
 func missingFragmentReadProblem(path, id, manifestPath string, err error) string {
@@ -3887,13 +3941,13 @@ func missingFragmentReadProblem(path, id, manifestPath string, err error) string
 	return fmt.Sprintf("%s: missing fragment: %v", path, err)
 }
 
-func stagedDiskMissingFragments(commit *stagedPaths, paths []string, manifestPath string) (missing []string) {
-	for _, path := range paths {
+func stagedDiskMissingFragments(commit *stagedPaths, paths, ids []string, manifestPath string) (missing []string) {
+	for i, path := range paths {
 		diskPath := commit.treePath(path)
 		if _, err := os.Stat(diskPath); err == nil {
 			continue
 		} else if errors.Is(err, fs.ErrNotExist) {
-			id := strings.TrimSuffix(filepath.ToSlash(filepath.Base(path)), ".md")
+			id := ids[i]
 			missing = append(missing, missingFragmentAdvice(path, id, manifestPath))
 		} else {
 			missing = append(missing, fmt.Sprintf("%s: stat fragment on disk: %v", diskPath, err))
@@ -3902,7 +3956,7 @@ func stagedDiskMissingFragments(commit *stagedPaths, paths []string, manifestPat
 	return missing
 }
 
-func checkedManifestBody(codex string, m manifest, referenced map[string]bool, read func(string) ([]byte, error), purposeEnabled bool) ([]byte, []string, []string) {
+func checkedManifestBody(codex, manifestPath string, m manifest, referenced map[string]bool, read func(string) ([]byte, error), purposeEnabled bool) ([]byte, []string, []string) {
 	var body []byte
 	var problems, warnings []string
 	for _, id := range m.parts {
@@ -3910,7 +3964,7 @@ func checkedManifestBody(codex string, m manifest, referenced map[string]bool, r
 		path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
 		raw, err := read(path)
 		if err != nil {
-			problems = append(problems, missingFragmentReadProblem(path, id, m.out, err))
+			problems = append(problems, missingFragmentReadProblem(path, id, manifestPath, err))
 			continue
 		}
 		if fragmentIsDraft(raw) {
@@ -4375,7 +4429,7 @@ func missingOnDiskManifestProblems(codex string, referenced map[string]bool) ([]
 	rootBytes, err := exec.Command("git", "-C", codex, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if errors.As(err, &exitErr) || errors.Is(err, exec.ErrNotFound) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("find git root for %s: %w", codex, err)
@@ -4385,7 +4439,7 @@ func missingOnDiskManifestProblems(codex string, referenced map[string]bool) ([]
 	if err != nil {
 		return nil, fmt.Errorf("resolve manifest directory: %w", err)
 	}
-	listing, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
+	listing, err := exec.Command("git", "-C", root, "ls-files", "-z", "--", filepath.ToSlash(manifestDir)).Output()
 	if err != nil {
 		return nil, fmt.Errorf("list indexed files in %s: %w", root, err)
 	}
@@ -4424,9 +4478,15 @@ func missingOnDiskManifestProblems(codex string, referenced map[string]bool) ([]
 			}
 		}
 		if len(orphaned) > 0 {
-			problems = append(problems, fmt.Sprintf("%s: manifest is missing on disk; restore it with `git checkout -- %s`; if it was deleted intentionally, remove its unreferenced fragments from the codex: %s", path, ShellQuoteArg(path), strings.Join(orphaned, ", ")))
-		} else {
-			problems = append(problems, fmt.Sprintf("%s: manifest is missing on disk; restore it with `git checkout -- %s`; if it was deleted intentionally, remove fragments no longer referenced by another manifest", path, ShellQuoteArg(path)))
+			command, commandErr := restorePathCommand(path)
+			if commandErr != nil {
+				return nil, commandErr
+			}
+			restore := "restore it from a backup"
+			if command != "" {
+				restore = "restore it with `" + command + "`"
+			}
+			problems = append(problems, fmt.Sprintf("%s: manifest is missing on disk; %s; if it was deleted intentionally, remove its unreferenced fragments from the codex: %s", path, restore, strings.Join(orphaned, ", ")))
 		}
 	}
 	return problems, nil
