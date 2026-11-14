@@ -51,36 +51,6 @@ func TestStagedWorktreeAdviceNamesMainCheckout(t *testing.T) {
 	}
 }
 
-func TestBuiltDiffersOtherTreeUsesSharedHint(t *testing.T) {
-	root := t.TempDir()
-	codex := filepath.Join(root, "codex")
-	manifestDir := filepath.Join(codex, "manifest")
-	if err := os.MkdirAll(manifestDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	mainOutput := filepath.Join(root, "main", "CLAUDE.md")
-	otherOutput := filepath.Join(root, "other", "CLAUDE.md")
-	worktreeOutput := filepath.Join(root, "worktree", "CLAUDE.md")
-	part := "shared/instruction"
-	m := manifest{
-		out: mainOutput, hash: sha([]byte("source")), builtHash: "stale",
-		parts: []string{part}, fragmentHashes: map[string]string{part: "fragment-hash"},
-	}
-	mainManifest := filepath.Join(manifestDir, "main.yaml")
-	if err := writeManifest(mainManifest, m, nil); err != nil {
-		t.Fatal(err)
-	}
-	other := m
-	other.out = otherOutput
-	if err := writeManifest(filepath.Join(manifestDir, "other.yaml"), other, nil); err != nil {
-		t.Fatal(err)
-	}
-	problem, fileEdited := builtDiffers(worktreeOutput, codex, m, mainManifest, []byte("built text\n"), []byte("manual text\n"))
-	if !fileEdited || !strings.Contains(problem, "lex absorb --force --shared") || !strings.Contains(problem, otherOutput) {
-		t.Fatalf("other-tree advice = %q, fileEdited = %t", problem, fileEdited)
-	}
-}
-
 func TestStagedWorktreeInvalidManifestNamesTreeCopy(t *testing.T) {
 	main, worktree, codex, git := codexInsideProjectWorktree(t)
 	manifest, err := filepath.Glob(filepath.Join(main, "codex", "manifest", "*.yaml"))

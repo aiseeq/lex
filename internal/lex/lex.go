@@ -2540,28 +2540,6 @@ func sharedHintPlanRefusal(err error) bool {
 	return errors.As(err, &draftErr) && draftErr.reason == "boundary conflict" || errors.Is(err, errInvalidEditedFragmentLineBounds)
 }
 
-func sharedForceHintForParts(paths []string, selected string, parts []string) (string, string, error) {
-	var others []string
-	seen := make(map[string]bool)
-	for _, part := range parts {
-		outputs, err := manifestsUsing(paths, part)
-		if err != nil {
-			return "", "", err
-		}
-		for _, output := range outputs {
-			if output != selected && !seen[output] {
-				seen[output] = true
-				others = append(others, output)
-			}
-		}
-	}
-	sort.Strings(others)
-	if len(others) == 0 {
-		return "", "", nil
-	}
-	return " --shared", "; --shared lets this file replace the fragments shared with " + strings.Join(others, ", ") + ": their edits there that are not in this file are lost", nil
-}
-
 // sharedForceHint returns shared advice only when the edits would change a shared part.
 func sharedForceHint(paths []string, codex, selected string, parts []string, built, actual []byte) (string, string, error) {
 	manifestPath, manifest, err := findOutputManifest(paths, selected)
@@ -2950,7 +2928,29 @@ func checkDiskUnder(codex, under, tree string) ([]string, error) {
 	for _, entry := range selected {
 		problems = append(problems, diskLinkProblems(entry.links, tree != "")...)
 	}
-	return checkSelectedOutputs(codex, tree, selected, warnings, problems)
+	codexInMain, err := codexInMainTree(codex, under, tree)
+	if err != nil {
+		return nil, err
+	}
+	return checkSelectedOutputs(codex, tree, codexInMain, selected, warnings, problems)
+}
+
+// codexInMainTree reports a codex under the checked main tree and outside the --tree copy: lex absorb then changes the main tree's fragments.
+func codexInMainTree(codex, under, tree string) (bool, error) {
+	if tree == "" {
+		return false, nil
+	}
+	abs, err := filepath.Abs(codex)
+	if err != nil {
+		return false, fmt.Errorf("%s: resolve codex path: %w", codex, err)
+	}
+	path := resolvePath(abs)
+	inMain, err := pathUnder(path, under)
+	if err != nil || !inMain {
+		return false, err
+	}
+	inTree, err := pathUnder(path, tree)
+	return !inTree, err
 }
 
 func selectManifestsUnder(paths []string, underText, under, tree string) ([]*selectedManifestUnder, []string, []string, error) {
@@ -3004,7 +3004,7 @@ func selectManifestsUnder(paths []string, underText, under, tree string) ([]*sel
 	return selected, warnings, problems, nil
 }
 
-func checkSelectedOutputs(codex, tree string, selected []*selectedManifestUnder, warnings, problems []string) ([]string, error) {
+func checkSelectedOutputs(codex, tree string, codexInMain bool, selected []*selectedManifestUnder, warnings, problems []string) ([]string, error) {
 	hasOutput := false
 	for _, entry := range selected {
 		hasOutput = hasOutput || entry.output
@@ -3048,11 +3048,11 @@ func checkSelectedOutputs(codex, tree string, selected []*selectedManifestUnder,
 			continue
 		}
 		if !outputMatchesGenerated(data, body, entry.m.header, entry.path) {
-			problem, fileEdited := builtDiffers(entry.m.out, codex, entry.m, entry.path, body, data)
+			problem, fileEdited := builtDiffers(codex, entry.m, entry.path, body, data)
 			if tree != "" {
 				problem = labelTreeOutputProblem(problem, entry.m.out, out)
 				if fileEdited {
-					problem = treeOutputAdvice(problem, entry.m.out, out, false)
+					problem = treeOutputAdvice(problem, entry.m.out, out, codexInMain)
 				}
 			}
 			problems = append(problems, problem)
@@ -3098,7 +3098,7 @@ func checkDisk(codex string) ([]string, error) {
 			continue
 		}
 		if !outputMatchesGenerated(data, body, m.header, path) {
-			problem, _ := builtDiffers(m.out, codex, m, path, body, data)
+			problem, _ := builtDiffers(codex, m, path, body, data)
 			problems = append(problems, problem)
 		}
 	}
@@ -3348,8 +3348,9 @@ func stagedOrphans(commit *stagedPaths, codex string, referenced map[string]bool
 	return problems, warnings, nil
 }
 
-// builtDiffers explains why out differs from its fragments; fileEdited reports advice that keeps an edit made in the file with lex absorb.
-func builtDiffers(out, codex string, m manifest, manifestPath string, want, actual []byte) (problem string, fileEdited bool) {
+// builtDiffers explains why the manifest output m.out differs from its fragments; fileEdited reports advice that keeps an edit made in the file with lex absorb.
+func builtDiffers(codex string, m manifest, manifestPath string, want, actual []byte) (problem string, fileEdited bool) {
+	out := m.out
 	codexArg, fileArg := ShellQuoteArg(codex), ShellQuoteArg(out)
 	if owner, foreign := foreignOutputOwner(codex, actual); foreign {
 		return fmt.Sprintf("%s: the file carries %s, so lex import and lex absorb refuse it — if this codex owns the file, run `lex build --force --codex %s %s` to rebuild it from the fragments (edits in the file are lost)", out, ForeignHeaderPhrase(owner), codexArg, fileArg), false
@@ -3363,18 +3364,7 @@ func builtDiffers(out, codex string, m manifest, manifestPath string, want, actu
 		return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`", out, codexArg), false
 	}
 	if fragmentsChanged && fileChanged {
-		var sharedFlag, sharedHint string
-		var err error
-		if filepath.Clean(out) == filepath.Clean(m.out) {
-			sharedFlag, sharedHint, err = codexSharedForceHint(codex, m, want, actual)
-		} else {
-			paths, globErr := filepath.Glob(filepath.Join(codex, "manifest", "*.yaml"))
-			if globErr != nil {
-				return fmt.Sprintf("%s: list manifests: %v", out, globErr), false
-			}
-			sort.Strings(paths)
-			sharedFlag, sharedHint, err = sharedForceHintForParts(paths, m.out, m.parts)
-		}
+		sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual)
 		if err != nil {
 			return fmt.Sprintf("%s: %v", out, err), false
 		}
@@ -3681,7 +3671,7 @@ func (s *stagedPaths) treePath(path string) string {
 
 // stagedDiffers explains why the staged m.out differs from its fragments, naming the tree it was read from and, for a file edit, what a worktree changes.
 func (s *stagedPaths) stagedDiffers(codex string, m manifest, manifestPath string, want, staged []byte) string {
-	problem, fileEdited := builtDiffers(m.out, codex, m, manifestPath, want, staged)
+	problem, fileEdited := builtDiffers(codex, m, manifestPath, want, staged)
 	problem = s.labelProblem(problem, m.out)
 	if fileEdited {
 		problem = s.stagedOutputAdvice(problem, codex, m.out)
