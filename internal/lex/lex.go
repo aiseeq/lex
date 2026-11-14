@@ -1383,9 +1383,14 @@ func absorbBuiltBody(codex, target, selected string, paths []string, m manifest,
 	return built, nil
 }
 
-// textAboveHeaderAdvice is the refusal absorb, check and status give for text above the lex header;
-// a deleted header with a copy quoted further down looks the same, so the advice names both fixes.
-const textAboveHeaderAdvice = "text above lex header; move the text below the header, or if the header line was deleted, restore it as the first line"
+// textAboveHeaderAdvice builds the shared refusal shown by absorb, check and status.
+func textAboveHeaderAdvice(line int, hasFrontMatter bool) string {
+	advice := fmt.Sprintf("text above lex header (found at line %d); move the text below the header, or if the header line was deleted, restore it ", line)
+	if hasFrontMatter {
+		return advice + "immediately after the front matter"
+	}
+	return advice + "as the first line"
+}
 
 // rejectTextAboveHeader refuses a file whose lex header line, with either line ending, stands
 // below text other than front matter. A header in its place ends the check, so a copy of the
@@ -1403,7 +1408,8 @@ func rejectTextAboveHeader(file, selected string, m manifest, actual []byte) err
 	}
 	for _, form := range forms {
 		if index := bytes.Index(actual, form); index > 0 && actual[index-1] == '\n' {
-			return fmt.Errorf("%s: %s", file, textAboveHeaderAdvice)
+			line := bytes.Count(actual[:index], []byte{'\n'}) + 1
+			return fmt.Errorf("%s: %s", file, textAboveHeaderAdvice(line, frontMatterOffset(actual) > 0))
 		}
 	}
 	return nil
@@ -4119,9 +4125,9 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 		entry.Command = "lex build --force --codex " + target
 		return nil
 	}
-	if rejectTextAboveHeader(m.out, manifestPath, m, actual) != nil {
+	if refusal := rejectTextAboveHeader(m.out, manifestPath, m, actual); refusal != nil {
 		// lex absorb refuses such a file the same way; no command settles it before the text moves.
-		entry.Refusal = textAboveHeaderAdvice
+		entry.Refusal = strings.TrimPrefix(refusal.Error(), m.out+": ")
 		return nil
 	}
 	entry.Command = "lex import --refresh --codex " + target
