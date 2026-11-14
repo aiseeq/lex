@@ -181,6 +181,24 @@ func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byt
 		purposeEnabled: purposeEnabled,
 		noChange:       sha(sourceData) == m.hash,
 	}
+	if !assessment.noChange {
+		var layout purposeLayout
+		if purposeEnabled {
+			layout, err = readPurposeLayout(codex, m)
+		} else {
+			layout, err = readPlainPartLayout(codex, m)
+		}
+		if err != nil {
+			return assessment, err
+		}
+		sharedFlag, sharedHint, hintErr := codexSharedForceHint(codex, m, layout.rendered, sourceData)
+		if hintErr != nil {
+			return assessment, hintErr
+		}
+		if sharedFlag != "" {
+			return assessment, fmt.Errorf("%s: refresh would edit a shared fragment%s; run `lex absorb%s --codex %s %s`", m.out, sharedHint, sharedFlag, ShellQuoteArg(codex), ShellQuoteArg(m.out))
+		}
+	}
 	if !assessment.noChange && validationErr != nil {
 		return assessment, validationErr
 	}
@@ -3482,7 +3500,16 @@ func builtDiffers(codex string, m manifest, manifestPath string, want, actual []
 		}
 		return fmt.Sprintf("%s: built output differs from its fragments — run `lex absorb --force%s --codex %s %s` to keep the file, or `lex build --force --codex %s %s` to keep the fragments%s", out, sharedFlag, codexArg, fileArg, codexArg, fileArg, sharedHint), true
 	}
-	return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`, or keep this edit with `lex absorb --codex %s %s`", out, codexArg, codexArg, fileArg), true
+	var sharedFlag, sharedHint string
+	if _, err := os.Stat(manifestPath); err == nil {
+		sharedFlag, sharedHint, err = codexSharedForceHint(codex, m, want, actual)
+		if err != nil {
+			return fmt.Sprintf("%s: %v", out, err), false
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Sprintf("%s: %v", out, err), false
+	}
+	return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`, or keep this edit with `lex absorb%s --codex %s %s`%s", out, codexArg, sharedFlag, codexArg, fileArg, sharedHint), true
 }
 
 func finishCheck(warnings, problems []string) ([]string, error) {
@@ -4140,6 +4167,14 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 	}
 	if m.header || refreshErr != nil || assessment.noChange {
 		entry.Command = "lex absorb --codex " + target
+	}
+	sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual)
+	if err != nil {
+		return err
+	}
+	if sharedFlag != "" {
+		entry.Command = "lex absorb" + sharedFlag + " --codex " + target
+		entry.SharedHint = sharedHint
 	}
 	return nil
 }

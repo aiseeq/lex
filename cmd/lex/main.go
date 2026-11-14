@@ -460,6 +460,6 @@ func statusLine(entry *lex.StatusEntry) string {
 			" to keep the file's text and drop the fragment text edits that are not in the file, or " + entry.KeepFragments +
 			" to keep the fragments and drop the file's edits" + entry.SharedHint
 	default:
-		return prefix + "run " + entry.Command
+		return prefix + "run " + entry.Command + entry.SharedHint
 	}
 }
