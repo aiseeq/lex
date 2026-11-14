@@ -2556,7 +2556,8 @@ func checkSelectedOutputs(codex, tree string, selected []*selectedManifestUnder,
 			continue
 		}
 		if !outputMatchesGenerated(data, body, entry.m.header, entry.path) {
-			problems = append(problems, builtDiffers(out, codex, entry.m, entry.path, body, data))
+			problem, _ := builtDiffers(out, codex, entry.m, entry.path, body, data)
+			problems = append(problems, problem)
 		}
 	}
 	return finishCheck(warnings, problems)
@@ -2599,7 +2600,8 @@ func checkDisk(codex string) ([]string, error) {
 			continue
 		}
 		if !outputMatchesGenerated(data, body, m.header, path) {
-			problems = append(problems, builtDiffers(m.out, codex, m, path, body, data))
+			problem, _ := builtDiffers(m.out, codex, m, path, body, data)
+			problems = append(problems, problem)
 		}
 	}
 	if err := appendOrphanProblem(codex, referenced); err != nil {
@@ -2749,9 +2751,7 @@ func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map
 		problems = append(problems, commit.labelProblem(m.out+": index and disk differ — stage the whole file (git add) or restore it", m.out))
 	}
 	if !outputMatchesGenerated(staged, body, m.header, path) {
-		problem := commit.labelProblem(builtDiffers(m.out, codex, m, path, body, staged), m.out)
-		problem = commit.stagedOutputAdvice(problem, codex, m.out)
-		problems = append(problems, problem)
+		problems = append(problems, commit.stagedDiffers(codex, m, path, body, staged))
 		hints := unstagedFragmentHints(commit, fragPaths, indexed, m.out)
 		for i := range hints {
 			hints[i] = commit.labelProblem(hints[i], m.out)
@@ -2850,24 +2850,25 @@ func stagedOrphans(commit *stagedPaths, codex string, referenced map[string]bool
 	return problems, warnings, nil
 }
 
-func builtDiffers(out, codex string, m manifest, manifestPath string, want, actual []byte) string {
+// builtDiffers explains why out differs from its fragments; fileEdited reports advice that keeps an edit made in the file with lex absorb.
+func builtDiffers(out, codex string, m manifest, manifestPath string, want, actual []byte) (problem string, fileEdited bool) {
 	codexArg, fileArg := strconv.Quote(codex), strconv.Quote(out)
 	if owner, foreign := foreignOutputOwner(codex, actual); foreign {
-		return fmt.Sprintf("%s: the file carries %s, so lex import and lex absorb refuse it — if this codex owns the file, run `lex build --force --codex %s %s` to rebuild it from the fragments (edits in the file are lost)", out, ForeignHeaderPhrase(owner), codexArg, fileArg)
+		return fmt.Sprintf("%s: the file carries %s, so lex import and lex absorb refuse it — if this codex owns the file, run `lex build --force --codex %s %s` to rebuild it from the fragments (edits in the file are lost)", out, ForeignHeaderPhrase(owner), codexArg, fileArg), false
 	}
 	fragmentsChanged := fragmentsChangedSinceBuild(codex, manifestPath, m, want)
 	fileChanged := statusFileChanged(actual, manifestPath, m)
 	if fragmentsChanged && !fileChanged {
-		return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`", out, codexArg)
+		return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`", out, codexArg), false
 	}
 	if fragmentsChanged && fileChanged {
 		sharedFlag, sharedHint, err := codexSharedForceHint(codex, m)
 		if err != nil {
-			return fmt.Sprintf("%s: %v", out, err)
+			return fmt.Sprintf("%s: %v", out, err), false
 		}
-		return fmt.Sprintf("%s: built output differs from its fragments — run `lex absorb --force%s --codex %s %s` to keep the file, or `lex build --force --codex %s %s` to keep the fragments%s", out, sharedFlag, codexArg, fileArg, codexArg, fileArg, sharedHint)
+		return fmt.Sprintf("%s: built output differs from its fragments — run `lex absorb --force%s --codex %s %s` to keep the file, or `lex build --force --codex %s %s` to keep the fragments%s", out, sharedFlag, codexArg, fileArg, codexArg, fileArg, sharedHint), true
 	}
-	return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`, or keep this edit with `lex absorb --codex %s %s`", out, codexArg, codexArg, fileArg)
+	return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`, or keep this edit with `lex absorb --codex %s %s`", out, codexArg, codexArg, fileArg), true
 }
 
 func finishCheck(warnings, problems []string) ([]string, error) {
@@ -3166,22 +3167,28 @@ func (s *stagedPaths) treePath(path string) string {
 	return path
 }
 
+// stagedDiffers explains why the staged m.out differs from its fragments, naming the tree it was read from and, for a file edit, what a worktree changes.
+func (s *stagedPaths) stagedDiffers(codex string, m manifest, manifestPath string, want, staged []byte) string {
+	problem, fileEdited := builtDiffers(m.out, codex, m, manifestPath, want, staged)
+	problem = s.labelProblem(problem, m.out)
+	if fileEdited {
+		problem = s.stagedOutputAdvice(problem, codex, m.out)
+	}
+	return problem
+}
+
+// stagedOutputAdvice adds to advice that keeps a file edit what a worktree changes: lex absorb reads and lex build rewrites the main checkout's copy of out.
 func (s *stagedPaths) stagedOutputAdvice(problem, codex, out string) string {
 	tree := s.treePath(out)
 	if tree == out {
 		return problem
 	}
 	mainOut, treeOut := strconv.Quote(out), strconv.Quote(tree)
-	if strings.Contains(problem, "lex absorb") {
-		problem += "; lex builds " + mainOut + " and the edit is in " + treeOut + ": carry the edit into " + mainOut + " before running `lex absorb`"
-		if s.rel(codex) != "" {
-			problem += ", which changes the fragments in the main checkout"
-		}
+	problem += "; lex builds " + mainOut + " and the edit is in " + treeOut + ": carry the edit into " + mainOut + " before running `lex absorb`"
+	if abs, err := filepath.Abs(codex); err == nil && s.mainRoot != "" && strings.HasPrefix(resolvePath(abs), s.mainRoot+string(filepath.Separator)) {
+		problem += ", which changes the fragments in the main checkout"
 	}
-	if strings.Contains(problem, "lex build") {
-		problem += "; `lex build` rewrites " + mainOut + ", not " + treeOut
-	}
-	return problem
+	return problem + "; `lex build` rewrites " + mainOut + ", not " + treeOut
 }
 
 func (s *stagedPaths) labelProblem(problem, out string) string {

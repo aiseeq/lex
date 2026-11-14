@@ -128,7 +128,8 @@ func checkTextRefs(codex string, options CheckOptions) ([]string, error) {
 			continue
 		}
 		finding := f
-		if staged != nil {
+		if staged != nil && !externalPaths[f.path] {
+			// an external file is read from disk where its path points; a corpus file is read from this worktree's index
 			finding.path = staged.treePath(f.path)
 		}
 		if f.kind == 1 && !externalPaths[f.path] {

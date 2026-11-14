@@ -16,25 +16,10 @@ func TestStagedWorktreeAdviceNamesMainCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(worktreeOutput, []byte(strings.Replace(string(data), "Original instruction.", "Manual instruction.", 1)), 0o644); err != nil {
+	if err = os.WriteFile(worktreeOutput, []byte(manualInstruction(string(data))), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fragDir := filepath.Join(worktree, "codex", "frag")
-	var fragment string
-	if err = filepath.WalkDir(fragDir, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if !entry.IsDir() && strings.HasSuffix(path, ".md") {
-			fragment = path
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if fragment == "" {
-		t.Fatal("no fragment found")
-	}
+	fragment := worktreeFragment(t, worktree)
 	fragData, err := os.ReadFile(fragment)
 	if err != nil {
 		t.Fatal(err)
@@ -143,4 +128,96 @@ func TestStagedWorktreeRefsOnlyNamesTreePaths(t *testing.T) {
 	if !strings.Contains(joined, "kind 3") || !strings.Contains(joined, "missing.md") {
 		t.Fatalf("expected missing-link warning, got %v", warnings)
 	}
+}
+
+func TestStagedWorktreeAdviceByBranch(t *testing.T) {
+	const carry, rewrites, mainFragments = "carry the edit into ", "`lex build` rewrites ", "fragments in the main checkout"
+	cases := []struct {
+		name        string
+		codexInTree bool
+		editFile    func(old string) string
+		editFrag    bool
+		want, avoid []string
+	}{
+		{name: "file only", editFile: manualInstruction, want: []string{carry, rewrites, mainFragments}},
+		{name: "file only, codex in the worktree", codexInTree: true, editFile: manualInstruction, want: []string{carry, rewrites}, avoid: []string{mainFragments}},
+		{name: "fragments only", editFrag: true, want: []string{"edit the fragment and run `lex build"}, avoid: []string{carry, rewrites, mainFragments}},
+		{name: "foreign header", editFile: func(old string) string {
+			return "<!-- lex: собран из /elsewhere/codex/manifest/CLAUDE.md.yaml. Правь фрагменты в /elsewhere/codex/frag -->\n" + old
+		}, want: []string{"lex absorb refuse it"}, avoid: []string{carry, rewrites, mainFragments}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, worktree, codex, git := codexInsideProjectWorktree(t)
+			if tc.codexInTree {
+				codex = filepath.Join(worktree, "codex")
+			}
+			var staged []string
+			if tc.editFile != nil {
+				path := filepath.Join(worktree, "CLAUDE.md")
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = os.WriteFile(path, []byte(tc.editFile(string(data))), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				staged = append(staged, "CLAUDE.md")
+			}
+			if tc.editFrag {
+				fragment := worktreeFragment(t, worktree)
+				data, err := os.ReadFile(fragment)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = os.WriteFile(fragment, append(data, []byte("\nFragment update.\n")...), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				staged = append(staged, filepath.ToSlash(strings.TrimPrefix(fragment, worktree+string(filepath.Separator))))
+			}
+			if err := git(worktree, append([]string{"add"}, staged...)...); err != nil {
+				t.Fatal(err)
+			}
+			err := checkIn(t, worktree, codex)
+			if err == nil {
+				t.Fatal("expected staged output mismatch")
+			}
+			for _, text := range tc.want {
+				if !strings.Contains(err.Error(), text) {
+					t.Errorf("advice lacks %q: %v", text, err)
+				}
+			}
+			for _, text := range tc.avoid {
+				if strings.Contains(err.Error(), text) {
+					t.Errorf("advice must not contain %q: %v", text, err)
+				}
+			}
+		})
+	}
+}
+
+func manualInstruction(old string) string {
+	return strings.Replace(old, "Original instruction.", "Manual instruction.", 1)
+}
+
+// worktreeFragment returns a fragment file of the codex committed into worktree.
+func worktreeFragment(t *testing.T, worktree string) string {
+	t.Helper()
+	var fragment string
+	err := filepath.WalkDir(filepath.Join(worktree, "codex", "frag"), func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() && strings.HasSuffix(path, ".md") {
+			fragment = path
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fragment == "" {
+		t.Fatal("no fragment found")
+	}
+	return fragment
 }
