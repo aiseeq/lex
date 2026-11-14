@@ -2354,7 +2354,7 @@ func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map
 	raw, rerr := commit.read(path)
 	if rerr != nil {
 		if commit.has(path) {
-			problems = append(problems, rerr.Error())
+			problems = append(problems, commit.treeProblem(rerr.Error(), path))
 		}
 		return nil, problems, nil // манифест вне коммита и вне индекса - чужая работа на диске
 	}
@@ -2414,10 +2414,10 @@ func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map
 		return warnings, append(problems, commit.labelProblem(oerr.Error(), m.out)), nil
 	}
 	if diskDiff {
-		problems = append(problems, commit.labelProblem(commit.treePath(m.out)+": index and disk differ — stage the whole file (git add) or restore it", m.out))
+		problems = append(problems, commit.labelProblem(m.out+": index and disk differ — stage the whole file (git add) or restore it", m.out))
 	}
 	if !outputMatchesGenerated(staged, body, m.header, path) {
-		problems = append(problems, commit.labelProblem(builtDiffers(commit.treePath(m.out), codex, m, path, body, staged), m.out))
+		problems = append(problems, commit.labelProblem(builtDiffers(m.out, codex, m, path, body, staged), m.out))
 		hints := unstagedFragmentHints(commit, fragPaths, indexed, m.out)
 		for i := range hints {
 			hints[i] = commit.labelProblem(hints[i], m.out)
@@ -2434,13 +2434,15 @@ func stagedLinkProblems(commit *stagedPaths, links []outputLink) []string {
 			continue
 		}
 		rel := commit.rel(link.path)
+		current := link
+		current.path = commit.treePath(link.path)
 		sha, exists := commit.index[rel]
 		if !exists {
-			problems = append(problems, linkMismatch(link, "removed from the index in this commit").Error())
+			problems = append(problems, linkMismatch(current, "removed from the index in this commit").Error())
 			continue
 		}
 		if commit.modes[rel] != "120000" {
-			problems = append(problems, stagedLinkIsRegularFile(link).Error())
+			problems = append(problems, stagedLinkIsRegularFile(current).Error())
 			continue
 		}
 		if err := commit.prefetch([]string{link.path}); err != nil {
@@ -2453,7 +2455,7 @@ func stagedLinkProblems(commit *stagedPaths, links []outputLink) []string {
 			if exists {
 				actual = strconv.Quote(string(target))
 			}
-			problems = append(problems, linkMismatch(link, "has index target "+actual).Error())
+			problems = append(problems, linkMismatch(current, "has index target "+actual).Error())
 		}
 	}
 	return problems
@@ -2476,11 +2478,11 @@ func unstagedFragmentHints(commit *stagedPaths, fragPaths []string, indexed map[
 		disk, err := os.ReadFile(diskPath)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
-			hints = append(hints, diskPath+": fragment deleted on disk but not staged — git add it together with "+commit.treePath(out))
+			hints = append(hints, diskPath+": fragment deleted on disk but not staged — git add it together with "+out)
 		case err != nil:
 			hints = append(hints, fmt.Sprintf("%s: read fragment from disk: %v", diskPath, err))
 		case !bytes.Equal(staged, disk):
-			hints = append(hints, diskPath+": fragment changed on disk but not staged — git add it together with "+commit.treePath(out))
+			hints = append(hints, diskPath+": fragment changed on disk but not staged — git add it together with "+out)
 		}
 	}
 	return hints
@@ -2716,7 +2718,7 @@ func (s *stagedPaths) indexedUnder(dir, ext string) []string {
 	var out []string
 	for rel := range s.index {
 		if strings.HasPrefix(rel, base+"/") && !strings.Contains(strings.TrimPrefix(rel, base+"/"), "/") && strings.HasSuffix(rel, ext) {
-			out = append(out, filepath.Join(s.root, filepath.FromSlash(rel)))
+			out = append(out, filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(rel, base+"/"))))
 		}
 	}
 	sort.Strings(out)
@@ -2827,11 +2829,19 @@ func (s *stagedPaths) labelProblem(problem, out string) string {
 	if s.treePath(out) == out {
 		return problem
 	}
-	annotation := " (built by the codex as " + out + ")"
-	if strings.Contains(problem, s.treePath(out)) {
-		return strings.Replace(problem, s.treePath(out), s.treePath(out)+annotation, 1)
+	prefix := out + ": "
+	if after, ok := strings.CutPrefix(problem, prefix); ok {
+		return s.treePath(out) + " (built by the codex as " + out + "): " + after
 	}
-	return problem + annotation
+	return problem
+}
+
+// treeProblem names the worktree copy of a codex file at the start of a problem.
+func (s *stagedPaths) treeProblem(problem, path string) string {
+	if after, ok := strings.CutPrefix(problem, path+": "); ok {
+		return s.treePath(path) + ": " + after
+	}
+	return problem
 }
 
 func (s *stagedPaths) has(path string) bool {
@@ -2845,20 +2855,19 @@ func (s *stagedPaths) read(path string) ([]byte, error) {
 	if rel == "" {
 		return os.ReadFile(s.treePath(path))
 	}
-	displayPath := s.treePath(path)
 	sha, ok := s.index[rel]
 	if !ok {
 		if s.paths[rel] {
-			return nil, fmt.Errorf("%s: removed from the index in this commit — restore it or remove it from the codex too", displayPath)
+			return nil, fmt.Errorf("%s: removed from the index in this commit — restore it or remove it from the codex too", path)
 		}
-		return nil, fmt.Errorf("%s: not in the index — git add it", displayPath)
+		return nil, fmt.Errorf("%s: not in the index — git add it", path)
 	}
 	if err := s.prefetch([]string{path}); err != nil {
 		return nil, err
 	}
 	blob, ok := s.blobs[sha]
 	if !ok {
-		return nil, fmt.Errorf("%s: blob %s not read from the index", displayPath, sha)
+		return nil, fmt.Errorf("%s: blob %s not read from the index", path, sha)
 	}
 	return blob, nil
 }
@@ -2875,7 +2884,7 @@ func (s *stagedPaths) output(path string) ([]byte, bool, error) {
 	}
 	disk, err := os.ReadFile(s.treePath(path))
 	if err != nil {
-		return nil, false, fmt.Errorf("%s: %w", s.treePath(path), err)
+		return nil, false, fmt.Errorf("%s: %w", path, err)
 	}
 	return index, !bytes.Equal(index, disk), nil
 }

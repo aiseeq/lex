@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -59,8 +60,132 @@ func TestStagedWorktreeChecksOutputOfCurrentTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = checkIn(t, worktree, codex)
-	if err == nil || !strings.Contains(err.Error(), wTO) {
+	if err == nil || !strings.Contains(err.Error(), wTO+" (built by the codex as "+output+")") {
 		t.Fatalf("expected staged output error naming worktree file %s, got %v", wTO, err)
+	}
+	if !strings.Contains(err.Error(), "lex absorb") || !strings.Contains(err.Error(), strconv.Quote(output)) || strings.Contains(err.Error(), "lex absorb --force --codex "+strconv.Quote(codex)+" "+strconv.Quote(wTO)) {
+		t.Fatalf("absorb hint must name manifest output %s, got %v", output, err)
+	}
+}
+
+func TestStagedWorktreeCodexInsideProjectReportsOnce(t *testing.T) {
+	base := t.TempDir()
+	main, worktree := filepath.Join(base, "main"), filepath.Join(base, "worktree")
+	codex := filepath.Join(main, "codex")
+	if err := os.MkdirAll(main, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(main, "CLAUDE.md")
+	if err := importData(codex, output, "CLAUDE.md", []byte("# Guide\n\nOriginal instruction.\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	git := func(dir string, args ...string) error {
+		all := append([]string{"-c", "user.name=Test", "-c", "user.email=test@example.invalid"}, args...)
+		cmd := exec.Command("git", all...)
+		cmd.Dir = dir
+		if data, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("git %v: %s: %w", args, data, err)
+		}
+		return nil
+	}
+	for _, args := range [][]string{{"init", "-q"}, {"add", "."}, {"commit", "-q", "-m", "initial"}} {
+		if err := git(main, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := git(main, "worktree", "add", "-q", "-b", "test-worktree", worktree); err != nil {
+		t.Fatal(err)
+	}
+	wTO := filepath.Join(worktree, filepath.Base(output))
+	data, err := os.ReadFile(wTO)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(wTO, []byte(strings.Replace(string(data), "Original instruction.", "Manual instruction.", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err = git(worktree, "add", filepath.Base(output)); err != nil {
+		t.Fatal(err)
+	}
+	err = checkIn(t, worktree, codex)
+	if err == nil {
+		t.Fatal("expected output mismatch")
+	}
+	seen := map[string]bool{}
+	for line := range strings.SplitSeq(err.Error(), "\n") {
+		if seen[line] {
+			t.Fatalf("duplicate problem line %q in %v", line, err)
+		}
+		seen[line] = true
+	}
+}
+
+func TestStagedWorktreeLinkHintNamesWorktree(t *testing.T) {
+	base := t.TempDir()
+	main, worktree := filepath.Join(base, "main"), filepath.Join(base, "worktree")
+	codex := filepath.Join(base, "codex")
+	if err := os.MkdirAll(main, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(main, "CLAUDE.md")
+	if err := importData(codex, output, "CLAUDE.md", []byte("# Guide\n\nInstruction.\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := filepath.Glob(filepath.Join(codex, "manifest", "CLAUDE.md*.yaml"))
+	if err != nil || len(manifest) != 1 {
+		t.Fatalf("find manifest: %v %v", manifest, err)
+	}
+	link := filepath.Join(main, "AGENTS.md")
+	if err = os.Symlink("CLAUDE.md", link); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(manifest[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkYAML := "links:\n  - path: " + strconv.Quote(link) + "\n    target: \"CLAUDE.md\"\n"
+	if !strings.Contains(string(raw), "parts:\n") {
+		t.Fatal("manifest has no parts section")
+	}
+	if err = os.WriteFile(manifest[0], []byte(strings.Replace(string(raw), "parts:\n", linkYAML+"parts:\n", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err = Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	git := func(dir string, args ...string) error {
+		all := append([]string{"-c", "user.name=Test", "-c", "user.email=test@example.invalid"}, args...)
+		cmd := exec.Command("git", all...)
+		cmd.Dir = dir
+		if data, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("git %v: %s: %w", args, data, err)
+		}
+		return nil
+	}
+	for _, args := range [][]string{{"init", "-q"}, {"add", "."}, {"commit", "-q", "-m", "initial"}} {
+		if err = git(main, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = git(main, "worktree", "add", "-q", "-b", "test-worktree", worktree); err != nil {
+		t.Fatal(err)
+	}
+	wLink := filepath.Join(worktree, "AGENTS.md")
+	if err = os.Remove(wLink); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(wLink, []byte("regular file\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err = git(worktree, "add", "AGENTS.md"); err != nil {
+		t.Fatal(err)
+	}
+	err = checkIn(t, worktree, codex)
+	if err == nil || !strings.Contains(err.Error(), wLink) || !strings.Contains(err.Error(), "ln -sfn \"CLAUDE.md\" \""+wLink+"\"") {
+		t.Fatalf("staged link problem should give worktree path and repair command, got %v", err)
 	}
 }
 
