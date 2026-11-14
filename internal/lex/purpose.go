@@ -268,13 +268,11 @@ func (p purposeLayout) checkMovedGoals(oldLines [][]byte, matches [][2]int, newL
 }
 
 func (p purposeLayout) checkRemovedGoals(oldLines, newLines [][]byte, matchedOld map[int]bool) error {
-	hunks := splitPurposeHunks(p.spans, p.owners, oldLines, changedLineHunks(oldLines, newLines))
+	hunks := splitPurposeHunks(p.spans, p.owners, oldLines, newLines, changedLineHunks(oldLines, newLines))
+	failed, failedHunk := []int{}, map[int]int{}
 	for index := range oldLines {
 		id, isGoal := p.owners[index]
-		if !isGoal {
-			continue
-		}
-		if matchedOld[index] {
+		if !isGoal || matchedOld[index] {
 			continue
 		}
 		span := p.span(id)
@@ -284,16 +282,33 @@ func (p purposeLayout) checkRemovedGoals(oldLines, newLines [][]byte, matchedOld
 				removed = false
 			}
 		}
-		for _, h := range hunks {
+		hunkIndex := -1
+		for hi, h := range hunks {
 			if h.oldStart <= index && index < h.oldEnd && h.newStart != h.newEnd {
 				removed = false
+				hunkIndex = hi
 			}
 		}
 		if !removed {
-			return fmt.Errorf("%s: missing or edited цель; put the line %q back under its rule or delete the rule together with it", id, strings.TrimRight(string(oldLines[index]), "\r\n"))
+			failed = append(failed, index)
+			failedHunk[index] = hunkIndex
 		}
 	}
-	return nil
+	if len(failed) == 0 {
+		return nil
+	}
+	first := failed[0]
+	id := p.owners[first]
+	quoted := []string{fmt.Sprintf("%q", strings.TrimRight(string(oldLines[first]), "\r\n"))}
+	for _, index := range failed[1:] {
+		if failedHunk[index] == failedHunk[first] {
+			quoted = append(quoted, fmt.Sprintf("%q", strings.TrimRight(string(oldLines[index]), "\r\n")))
+		}
+	}
+	if len(quoted) == 1 {
+		return fmt.Errorf("%s: missing or edited цель; put the line %s back under its rule or delete the rule together with it", id, quoted[0])
+	}
+	return fmt.Errorf("%s: missing or edited цель; put each of the lines %s back under its rule or delete that rule together with it", id, strings.Join(quoted, ", "))
 }
 
 func (p purposeLayout) ownerBefore(matches [][2]int, line int, fallback string) string {

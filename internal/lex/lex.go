@@ -1235,7 +1235,7 @@ func absorbEditedFragment(codex string, paths []string, selected string, m manif
 	}
 	hunks := absorbHunks(oldLines, newLines, bounds)
 	if purpose != nil {
-		hunks = splitPurposeHunks(purpose.spans, purpose.owners, oldLines, hunks)
+		hunks = splitPurposeHunks(purpose.spans, purpose.owners, oldLines, newLines, hunks)
 	}
 	edits, additions, err := planAbsorbEdits(codex, paths, selected, m, bounds, oldLines, newLines, hunks, actual, options, purpose != nil)
 	if err != nil {
@@ -1374,15 +1374,15 @@ func writeAbsorbPlan(selected string, plan absorbPlan) error {
 	return removeAbsorbedFragments(plan.removePaths)
 }
 
-func splitPurposeHunks(spans []purposeSpan, owners map[int]string, oldLines [][]byte, hunks []lineHunk) []lineHunk {
+func splitPurposeHunks(spans []purposeSpan, owners map[int]string, oldLines, newLines [][]byte, hunks []lineHunk) []lineHunk {
 	result := make([]lineHunk, 0, len(hunks))
 	for _, hunk := range hunks {
-		result = append(result, splitPurposeHunk(spans, owners, oldLines, hunk)...)
+		result = append(result, splitPurposeHunk(spans, owners, oldLines, newLines, hunk)...)
 	}
 	return result
 }
 
-func splitPurposeHunk(spans []purposeSpan, owners map[int]string, oldLines [][]byte, hunk lineHunk) []lineHunk {
+func splitPurposeHunk(spans []purposeSpan, owners map[int]string, oldLines, newLines [][]byte, hunk lineHunk) []lineHunk {
 	start, end := hunk.oldStart, hunk.oldEnd
 	for _, span := range spans {
 		if span.end <= start || span.start >= end {
@@ -1406,7 +1406,7 @@ func splitPurposeHunk(spans []purposeSpan, owners map[int]string, oldLines [][]b
 		}
 		end = max(start, span.start)
 	}
-	if start == hunk.oldStart && end == hunk.oldEnd || start >= end || !onePurposeSpan(spans, start, end) {
+	if start == hunk.oldStart && end == hunk.oldEnd || start >= end || !onePurposeSpan(spans, start, end) || len(split(bytes.Join(newLines[hunk.newStart:hunk.newEnd], nil))) > len(split(bytes.Join(oldLines[start:end], nil))) {
 		return []lineHunk{hunk}
 	}
 	result := make([]lineHunk, 0, 3)

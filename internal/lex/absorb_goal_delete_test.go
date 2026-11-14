@@ -212,3 +212,69 @@ func TestAbsorbRefusesRuleReplacedTogetherWithPurposeLine(t *testing.T) {
 		return bytes.Replace(data, []byte("- rule one\n  Зачем: one\n"), []byte("- replacement\n"), 1)
 	}, "missing or edited цель")
 }
+
+func TestAbsorbDeletedRuleAndRuleBelowRewrittenInTwoLines(t *testing.T) {
+	codex, out, manifestPath, m := goalDeleteFixture(t, "- rule four text\n- rule five text\n", []string{"reason four", "reason five"})
+	deleted, edited := m.parts[0], m.parts[1]
+	got, updated := goalDeleteAbsorb(t, codex, out, manifestPath, func(data []byte) []byte {
+		data = bytes.Replace(data, []byte("- rule four text\n  Зачем: reason four\n"), nil, 1)
+		return bytes.Replace(data, []byte("- rule five text"), []byte("- rule five edited\n  continued line"), 1)
+	})
+	assertGoalDeleteResult(t, codex, out, got, updated, deleted, edited, "- rule five edited\n  continued line\n")
+}
+
+func TestAbsorbPurposeRefusalNamesEveryMissingLineOfHunk(t *testing.T) {
+	codex, out, manifestPath, _ := goalDeleteFixture(t, "- rule four text\n- rule five text\n", []string{"reason four", "reason five"})
+	beforeFragments := treeBytes(t, filepath.Join(codex, "frag"))
+	beforeManifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = bytes.Replace(data, []byte("- rule four text\n  Зачем: reason four\n"), nil, 1)
+	data = bytes.Replace(data, []byte("- rule five text\n"), []byte("- rule five text EDITED\n"), 1)
+	data = bytes.Replace(data, []byte("  Зачем: reason five\n"), nil, 1)
+	mustWrite(t, out, data)
+	err = Absorb(codex, out, AbsorbOptions{DraftDir: codex})
+	if err == nil || !strings.Contains(err.Error(), "missing or edited цель") || !strings.Contains(err.Error(), `"  Зачем: reason four"`) || !strings.Contains(err.Error(), `"  Зачем: reason five"`) || strings.Contains(err.Error(), "run lex build") {
+		t.Fatalf("unexpected refusal: %v", err)
+	}
+	if after := treeBytes(t, filepath.Join(codex, "frag")); !bytes.Equal(beforeFragments, after) {
+		t.Fatal("refused absorb changed fragments")
+	}
+	afterManifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeManifest, afterManifest) {
+		t.Fatal("refused absorb changed manifest")
+	}
+}
+
+func TestAbsorbRefusesEditedRuleWithoutPurposeLineNextToEditedRule(t *testing.T) {
+	codex, out, manifestPath, _ := goalDeleteFixture(t, "- rule four text\n- rule five text\n", []string{"reason four", "reason five"})
+	refuseGoalDelete(t, codex, out, manifestPath, func(data []byte) []byte {
+		data = bytes.Replace(data, []byte("- rule four text\n"), []byte("- rule four text typo\n"), 1)
+		data = bytes.Replace(data, []byte("  Зачем: reason four\n"), nil, 1)
+		return bytes.Replace(data, []byte("- rule five text"), []byte("- rule five text EDITED"), 1)
+	}, "missing or edited цель")
+}
+
+func TestAbsorbRefusesEditBelowDeletedHeadingAndRule(t *testing.T) {
+	codex, out, manifestPath, _ := goalDeleteFixture(t, "## Alpha\n- rule one text\n## Beta\n", []string{"", "reason one", ""})
+	refuseGoalDelete(t, codex, out, manifestPath, func(data []byte) []byte {
+		data = bytes.Replace(data, []byte("## Alpha\n- rule one text\n  Зачем: reason one\n"), nil, 1)
+		return bytes.Replace(data, []byte("## Beta\n"), []byte("## Beta EDITED\n"), 1)
+	}, "missing or edited цель")
+}
+
+func TestAbsorbPurposeRefusalNamesOnlyLinesOfFirstHunk(t *testing.T) {
+	codex, out, manifestPath, _ := goalDeleteFixture(t, "- rule one text\n- rule two text\n- rule three text\n", []string{"reason one", "reason two", "reason three"})
+	refuseGoalDelete(t, codex, out, manifestPath, func(data []byte) []byte {
+		data = bytes.Replace(data, []byte("- rule one text\n  Зачем: reason one\n"), []byte("- rule one text typo\n"), 1)
+		return bytes.Replace(data, []byte("  Зачем: reason three\n"), nil, 1)
+	}, `put the line "  Зачем: reason one" back`)
+}
