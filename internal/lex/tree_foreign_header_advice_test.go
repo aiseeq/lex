@@ -1,9 +1,9 @@
 package lex
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -13,37 +13,75 @@ func foreignMarker(codex string) []byte {
 	return generatedMarkerForCodex("x", filepath.Join(filepath.Dir(codex), "other"))
 }
 
-// copyOverNote is the advice for a worktree copy with a foreign header when the manifest output matches the fragments.
-func copyOverNote(mainOutput string) string {
-	return "copy " + strconv.Quote(mainOutput) + " over this worktree copy"
+// A worktree copy that carries a foreign header is fixed in its own header
+// line: the advice never rebuilds the manifest output, whose own edits
+// build --force would erase, and following it leaves check clean.
+func TestCheckTreeForeignHeaderAdviceFixesCopy(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mainEdit bool
+		header   bool
+		want     string
+	}{
+		{name: "copy of the build", want: "delete line 1, the foreign header, from this worktree copy"},
+		{name: "manifest output has its own edit", mainEdit: true, want: "delete line 1, the foreign header, from this worktree copy"},
+		{name: "foreign header in place of the codex header", header: true, want: "replace line 1, the foreign header, in this worktree copy with \"<!-- lex: "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newTreeOutputFixture(t, false)
+			if tc.header {
+				manifestPath := manifestOf(t, fx.codex, "guide.md")
+				raw, err := os.ReadFile(manifestPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mustWrite(t, manifestPath, bytes.Replace(raw, []byte("header: false\n"), []byte("header: true\n"), 1))
+				if err := BuildWithOptions(fx.codex, BuildOptions{Force: true}); err != nil {
+					t.Fatal(err)
+				}
+				built, err := os.ReadFile(fx.mainOutput)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fx.built = built
+			}
+			if tc.mainEdit {
+				mustWrite(t, fx.mainOutput, []byte(strings.Replace(string(fx.built), "- one", "- ONE (main edit)", 1)))
+			}
+			copied := append(foreignMarker(fx.codex), fx.built...)
+			if tc.header {
+				copied = append(foreignMarker(fx.codex), fx.built[bytes.IndexByte(fx.built, '\n')+1:]...)
+			}
+			mustWrite(t, fx.treeOutput, copied)
+			mainBefore, err := os.ReadFile(fx.mainOutput)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = CheckWithWarnings(fx.codex, fx.opts)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "lex build --force") || strings.Contains(err.Error(), "other edits") {
+				t.Fatalf("check = %v, want advice %q without lex build --force", err, tc.want)
+			}
+			mustWrite(t, fx.treeOutput, fx.built)
+			if _, err := CheckWithWarnings(fx.codex, fx.opts); err != nil {
+				t.Fatalf("check after the advice = %v", err)
+			}
+			mainAfter, err := os.ReadFile(fx.mainOutput)
+			if err != nil || !bytes.Equal(mainAfter, mainBefore) {
+				t.Fatalf("check changed the manifest output: %q, %v", mainAfter, err)
+			}
+		})
+	}
 }
 
-// A worktree copy that carries a foreign header is replaced by copying the
-// manifest output when that matches the fragments; the advice never rebuilds
-// the manifest output, whose own edits build --force would erase.
-func TestCheckTreeForeignHeaderAdviceKeepsManifestOutput(t *testing.T) {
-	t.Run("output matches the fragments", func(t *testing.T) {
-		fx := newTreeOutputFixture(t, false)
-		mustWrite(t, fx.treeOutput, append(foreignMarker(fx.codex), fx.built...))
-		_, err := CheckWithWarnings(fx.codex, fx.opts)
-		if err == nil || !strings.Contains(err.Error(), "the file carries") || !strings.Contains(err.Error(), copyOverNote(fx.mainOutput)) || strings.Contains(err.Error(), "lex build --force") {
-			t.Fatalf("check = %v, want the foreign header advice to %s without lex build --force", err, copyOverNote(fx.mainOutput))
-		}
-		mustWrite(t, fx.treeOutput, fx.built)
-		if _, err := CheckWithWarnings(fx.codex, fx.opts); err != nil {
-			t.Fatalf("check after the advice = %v", err)
-		}
-	})
-	t.Run("output has its own edit", func(t *testing.T) {
-		fx := newTreeOutputFixture(t, false)
-		mainEdit := []byte(strings.Replace(string(fx.built), "- one", "- ONE (main edit)", 1))
-		mustWrite(t, fx.mainOutput, mainEdit)
-		mustWrite(t, fx.treeOutput, append(foreignMarker(fx.codex), fx.built...))
-		_, err := CheckWithWarnings(fx.codex, fx.opts)
-		if err == nil || !strings.Contains(err.Error(), "settle "+strconv.Quote(fx.mainOutput)+" first") || strings.Contains(err.Error(), "lex build --force") || strings.Contains(err.Error(), copyOverNote(fx.mainOutput)) {
-			t.Fatalf("check = %v, want advice to settle the edited manifest output first, without lex build --force", err)
-		}
-	})
+// A copy that differs beyond its foreign header is told to run the check
+// again after the header line is fixed.
+func TestCheckTreeForeignHeaderAdviceNamesOtherEdits(t *testing.T) {
+	fx := newTreeOutputFixture(t, false)
+	mustWrite(t, fx.treeOutput, append(foreignMarker(fx.codex), strings.Replace(string(fx.built), "- two", "- TWO", 1)...))
+	_, err := CheckWithWarnings(fx.codex, fx.opts)
+	if err == nil || !strings.Contains(err.Error(), "delete line 1, the foreign header") || !strings.Contains(err.Error(), "run the check again") {
+		t.Fatalf("check = %v, want the header fix and a second check for the other edits", err)
+	}
 }
 
 // The same advice for a staged worktree copy also stages the copy again, and
@@ -60,14 +98,10 @@ func TestStagedWorktreeForeignHeaderAdviceStagesCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = checkIn(t, worktree, codex)
-	if err == nil || !strings.Contains(err.Error(), copyOverNote(output)) || !strings.Contains(err.Error(), "then git add the copy") || strings.Contains(err.Error(), "lex build --force") {
-		t.Fatalf("staged check = %v, want advice to %s and git add it", err, copyOverNote(output))
+	if err == nil || !strings.Contains(err.Error(), "delete line 1, the foreign header, from this worktree copy") || !strings.Contains(err.Error(), "then git add the copy") || strings.Contains(err.Error(), "lex build --force") {
+		t.Fatalf("staged check = %v, want advice to delete the header line and git add the copy", err)
 	}
-	built, err := os.ReadFile(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustWrite(t, wTO, built)
+	mustWrite(t, wTO, data)
 	if err := git(worktree, "add", filepath.Base(output)); err != nil {
 		t.Fatal(err)
 	}
