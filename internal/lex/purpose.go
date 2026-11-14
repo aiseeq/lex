@@ -261,7 +261,7 @@ func (p purposeLayout) checkMovedGoals(oldLines [][]byte, matches [][2]int, newL
 		if oldIndex, ok := newToOld[previous]; ok {
 			span := p.spanAt(pair[0])
 			if oldIndex < span.start || oldIndex >= span.end {
-				if !p.ruleTextPresent(span, oldLines, newLines) {
+				if !p.ruleTextPresent(span, oldLines, newLines, pair[1]) {
 					return fmt.Errorf("%s: цель line %q has no rule text; delete the line or restore its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n"))
 				}
 				return fmt.Errorf("%s: цель moved to another fragment; put the line %q back under its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n"))
@@ -271,15 +271,28 @@ func (p purposeLayout) checkMovedGoals(oldLines [][]byte, matches [][2]int, newL
 	return nil
 }
 
-func (p purposeLayout) ruleTextPresent(span purposeSpan, oldLines, newLines [][]byte) bool {
+func (p purposeLayout) ruleTextPresent(span purposeSpan, oldLines, newLines [][]byte, movedGoal int) bool {
 	for index := span.start; index < span.end; index++ {
 		if _, isGoal := p.owners[index]; isGoal || strings.TrimSpace(string(oldLines[index])) == "" {
 			continue
 		}
 		for _, line := range newLines {
-			if bytes.Equal(oldLines[index], line) {
+			if bytes.Equal(bytes.TrimRight(oldLines[index], "\r\n"), bytes.TrimRight(line, "\r\n")) {
 				return true
 			}
+		}
+	}
+	matchedNew := make(map[int]bool)
+	for _, pair := range myersLineMatches(absorbLines(p.rendered), newLines) {
+		matchedNew[pair[1]] = true
+	}
+	for _, direction := range []int{-1, 1} {
+		neighbor := movedGoal + direction
+		for neighbor >= 0 && neighbor < len(newLines) && strings.TrimSpace(string(newLines[neighbor])) == "" {
+			neighbor += direction
+		}
+		if neighbor >= 0 && neighbor < len(newLines) && !matchedNew[neighbor] && !strings.HasPrefix(string(newLines[neighbor]), purposeMarker) {
+			return true
 		}
 	}
 	return false
@@ -344,7 +357,7 @@ func (p purposeLayout) refuseRemovedGoals(oldLines, newLines [][]byte, failed []
 }
 
 func (p purposeLayout) missingFinalPurposeNewline(oldLines, newLines [][]byte, failed []int) bool {
-	if len(newLines) == 0 || len(newLines[len(newLines)-1]) == 0 || bytes.HasSuffix(newLines[len(newLines)-1], []byte("\n")) {
+	if len(failed) != 1 || len(newLines) == 0 || len(newLines[len(newLines)-1]) == 0 || bytes.HasSuffix(newLines[len(newLines)-1], []byte("\n")) {
 		return false
 	}
 	lastPurpose := -1
@@ -366,13 +379,32 @@ func hasCRLFPurposeCounterpart(oldLines, newLines [][]byte, failed []int) bool {
 			continue
 		}
 		withCRLF := append(append([]byte(nil), bytes.TrimSuffix(oldLines[index], []byte("\n"))...), '\r', '\n')
+		found := false
 		for _, line := range newLines {
 			if bytes.Equal(line, withCRLF) {
-				return true
+				found = true
+				break
 			}
 		}
+		if !found {
+			return allLinesCRLF(newLines)
+		}
 	}
-	return false
+	return len(failed) > 0
+}
+
+func allLinesCRLF(lines [][]byte) bool {
+	seen := false
+	for _, line := range lines {
+		if bytes.HasSuffix(line, []byte("\r\n")) {
+			seen = true
+			continue
+		}
+		if bytes.HasSuffix(line, []byte("\n")) {
+			return false
+		}
+	}
+	return seen
 }
 
 func (p purposeLayout) ownerBefore(matches [][2]int, line int, fallback string) string {
