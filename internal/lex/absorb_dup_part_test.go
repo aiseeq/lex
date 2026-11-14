@@ -20,26 +20,10 @@ func TestAbsorbSameEditOfRepeatedPart(t *testing.T) {
 		{name: "force with newer fragments", staleParts: true, force: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			codex := t.TempDir()
-			out := filepath.Join(t.TempDir(), "guide.md")
-			original := []byte("# T\n\n- one\n\n- two\n\n")
-			if err := importData(codex, out, "guide.md", original, false); err != nil {
-				t.Fatal(err)
-			}
+			codex, out := setupRepeatedPartAdviceFixture(t, []byte("# T\n\n- one\n\n- two\n\n"))
 			manifestPath := filepath.Join(codex, "manifest", "guide.md.yaml")
 			m, err := readManifest(manifestPath)
 			if err != nil {
-				t.Fatal(err)
-			}
-			if len(m.parts) < 3 {
-				t.Fatalf("imported %d parts, want at least 3", len(m.parts))
-			}
-			repeated := m.parts[1]
-			m.parts = append(m.parts, repeated)
-			if err := writeManifest(manifestPath, m, m.links); err != nil {
-				t.Fatal(err)
-			}
-			if err := Build(codex, false); err != nil {
 				t.Fatal(err)
 			}
 
