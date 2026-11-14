@@ -135,12 +135,14 @@ func TestStagedWorktreeAdviceByBranch(t *testing.T) {
 	cases := []struct {
 		name        string
 		codexInTree bool
+		nestedTree  bool
 		editFile    func(old string) string
 		editFrag    bool
 		want, avoid []string
 	}{
 		{name: "file only", editFile: manualInstruction, want: []string{carry, rewrites, mainFragments}},
 		{name: "file only, codex in the worktree", codexInTree: true, editFile: manualInstruction, want: []string{carry, rewrites}, avoid: []string{mainFragments}},
+		{name: "file only, codex in a worktree inside the main checkout", codexInTree: true, nestedTree: true, editFile: manualInstruction, want: []string{carry, rewrites}, avoid: []string{mainFragments}},
 		{name: "fragments only", editFrag: true, want: []string{"edit the fragment and run `lex build"}, avoid: []string{carry, rewrites, mainFragments}},
 		{name: "foreign header", editFile: func(old string) string {
 			return "<!-- lex: собран из /elsewhere/codex/manifest/CLAUDE.md.yaml. Правь фрагменты в /elsewhere/codex/frag -->\n" + old
@@ -148,7 +150,13 @@ func TestStagedWorktreeAdviceByBranch(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, worktree, codex, git := codexInsideProjectWorktree(t)
+			main, worktree, codex, git := codexInsideProjectWorktree(t)
+			if tc.nestedTree {
+				worktree = filepath.Join(main, "trees", "nested")
+				if err := git(main, "worktree", "add", "-q", "-b", "nested-worktree", worktree); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tc.codexInTree {
 				codex = filepath.Join(worktree, "codex")
 			}

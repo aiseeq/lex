@@ -3177,6 +3177,12 @@ func (s *stagedPaths) stagedDiffers(codex string, m manifest, manifestPath strin
 	return problem
 }
 
+// inMainCheckout reports a path under the main checkout and outside this worktree, which may itself lie under the main checkout.
+func (s *stagedPaths) inMainCheckout(path string) bool {
+	sep := string(filepath.Separator)
+	return s.mainRoot != "" && strings.HasPrefix(path, s.mainRoot+sep) && path != s.root && !strings.HasPrefix(path, s.root+sep)
+}
+
 // stagedOutputAdvice adds to advice that keeps a file edit what a worktree changes: lex absorb reads and lex build rewrites the main checkout's copy of out.
 func (s *stagedPaths) stagedOutputAdvice(problem, codex, out string) string {
 	tree := s.treePath(out)
@@ -3185,7 +3191,7 @@ func (s *stagedPaths) stagedOutputAdvice(problem, codex, out string) string {
 	}
 	mainOut, treeOut := strconv.Quote(out), strconv.Quote(tree)
 	problem += "; lex builds " + mainOut + " and the edit is in " + treeOut + ": carry the edit into " + mainOut + " before running `lex absorb`"
-	if abs, err := filepath.Abs(codex); err == nil && s.mainRoot != "" && strings.HasPrefix(resolvePath(abs), s.mainRoot+string(filepath.Separator)) {
+	if abs, err := filepath.Abs(codex); err == nil && s.inMainCheckout(resolvePath(abs)) {
 		problem += ", which changes the fragments in the main checkout"
 	}
 	return problem + "; `lex build` rewrites " + mainOut + ", not " + treeOut
