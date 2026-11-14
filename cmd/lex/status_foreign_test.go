@@ -79,3 +79,25 @@ func TestForeignHeaderRefreshStillRefuses(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckForeignHeaderNamesNoRefusedCommand(t *testing.T) {
+	codex, _ := foreignHeaderFixture(t)
+	_, err := captureRun(t, "check", "--codex", codex)
+	if err == nil {
+		t.Fatal("check of a file with another codex's header should fail")
+	}
+	if strings.Contains(err.Error(), "`lex absorb") || !strings.Contains(err.Error(), "`lex build --force") || !strings.Contains(err.Error(), "header of codex "+filepath.Join(filepath.Dir(codex), "other")) {
+		t.Errorf("check should name the header's codex and lex build --force, not lex absorb: %v", err)
+	}
+}
+
+func TestStatusHeaderWithoutCodexReadsNaturally(t *testing.T) {
+	codex, output := foreignHeaderFixture(t)
+	if err := os.WriteFile(output, []byte("<!-- lex: собран из чего-то. -->\n# Notes\n\nKeep the seeds dry.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _ := captureRun(t, "status", "--codex", codex)
+	if !strings.Contains(stdout, "a lex header that names no codex") || strings.Contains(stdout, "codex unknown codex") {
+		t.Errorf("status line for a header without a codex: %q", stdout)
+	}
+}
