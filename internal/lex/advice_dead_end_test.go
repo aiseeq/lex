@@ -104,6 +104,7 @@ func TestCheckStagedAdviceNamesManifestMissingOnDisk(t *testing.T) {
 	if err := os.Remove(manifestPath); err != nil {
 		t.Fatal(err)
 	}
+	t.Chdir(main)
 	_, err = CheckWithWarnings(codex, CheckOptions{Staged: true})
 	if err == nil || !strings.Contains(err.Error(), manifestPath) || !strings.Contains(strings.ToLower(err.Error()), "restore") || strings.Contains(err.Error(), "lex absorb") {
 		t.Fatalf("staged advice should name and restore missing-on-disk manifest %s, got %v", manifestPath, err)

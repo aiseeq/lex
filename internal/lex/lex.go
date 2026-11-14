@@ -2940,13 +2940,13 @@ func sharedHintPlanRefusal(err error) bool {
 	return errors.As(err, &draftErr) && draftErr.reason == "boundary conflict" || errors.Is(err, errInvalidEditedFragmentLineBounds)
 }
 
-type sharedPurposeAdviceRefusal struct{ err error }
+type purposeAdviceRefusal struct{ err error }
 
-func (e *sharedPurposeAdviceRefusal) Error() string { return e.err.Error() }
-func (e *sharedPurposeAdviceRefusal) Unwrap() error { return e.err }
+func (e *purposeAdviceRefusal) Error() string { return e.err.Error() }
+func (e *purposeAdviceRefusal) Unwrap() error { return e.err }
 
-func sharedAdvicePurposeRefusal(err error) bool {
-	var refusal *sharedPurposeAdviceRefusal
+func isPurposeAdviceRefusal(err error) bool {
+	var refusal *purposeAdviceRefusal
 	return errors.As(err, &refusal)
 }
 
@@ -3011,7 +3011,7 @@ func codexSharedForceHint(codex string, m manifest, built, actual []byte, catalo
 	}
 	if purpose != nil {
 		if _, err := purpose.strip(actual, selected); err != nil {
-			return "", "", &sharedPurposeAdviceRefusal{err: err}
+			return "", "", &purposeAdviceRefusal{err: err}
 		}
 	}
 	return " --shared", "; --shared lets this file replace the fragments shared with " + strings.Join(others, ", ") + ": their edits there that are not in this file are lost", nil
@@ -3527,7 +3527,7 @@ func checkStaged(codex string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	commit, err := readStagedPaths(codex)
+	commit, err := readStagedPaths()
 	if err != nil {
 		return nil, err
 	}
@@ -3857,15 +3857,16 @@ type stagedPaths struct {
 
 type stagedFragment struct{ abs, id string }
 
-func readStagedPaths(codex string) (*stagedPaths, error) {
+func readStagedPaths() (*stagedPaths, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("get current directory: %w", err)
 	}
-	root, err := stagedRepositoryRoot(cwd, codex)
+	rootBytes, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("git rev-parse current directory: %w", err)
 	}
+	root := resolvePath(strings.TrimSpace(string(rootBytes)))
 	gitDir, err := exec.Command("git", "-C", root, "rev-parse", "--path-format=absolute", "--git-dir").Output()
 	if err != nil {
 		return nil, fmt.Errorf("git rev-parse git-dir in %s: %w", root, err)
@@ -3918,56 +3919,6 @@ func readStagedPaths(codex string) (*stagedPaths, error) {
 		}
 	}
 	return &stagedPaths{root: root, mainRoot: mainRoot, paths: set, index: index, modes: modes, blobs: map[string][]byte{}}, nil
-}
-
-func stagedRepositoryRoot(cwd, codex string) (string, error) {
-	root, err := gitTopLevel(cwd)
-	if err != nil {
-		return "", fmt.Errorf("git rev-parse current directory: %w", err)
-	}
-	codexAbs, err := filepath.Abs(codex)
-	if err != nil {
-		return "", fmt.Errorf("resolve codex path: %w", err)
-	}
-	codexRoot, err := gitTopLevel(codexAbs)
-	if err != nil {
-		return "", err
-	}
-	if codexRoot == "" {
-		return root, nil
-	}
-	currentCommon, err := gitCommonDir(root)
-	if err != nil {
-		return "", err
-	}
-	codexCommon, err := gitCommonDir(codexRoot)
-	if err != nil {
-		return "", err
-	}
-	if currentCommon != codexCommon {
-		return codexRoot, nil
-	}
-	return root, nil
-}
-
-func gitTopLevel(path string) (string, error) {
-	data, err := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel").Output()
-	if err == nil {
-		return resolvePath(strings.TrimSpace(string(data))), nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 128 {
-		return "", nil
-	}
-	return "", fmt.Errorf("git rev-parse --show-toplevel in %s: %w", path, err)
-}
-
-func gitCommonDir(root string) (string, error) {
-	data, err := exec.Command("git", "-C", root, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
-	if err != nil {
-		return "", fmt.Errorf("git rev-parse git-common-dir in %s: %w", root, err)
-	}
-	return resolvePath(strings.TrimSpace(string(data))), nil
 }
 
 // prefetch - блобы индекса для путей одним вызовом git cat-file --batch.
@@ -4475,7 +4426,7 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 		entry.KeepFragments = "lex build --force --codex " + target
 		sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual, catalog)
 		if err != nil {
-			if sharedAdvicePurposeRefusal(err) {
+			if isPurposeAdviceRefusal(err) {
 				entry.Command = ""
 				entry.Refusal = err.Error()
 				return nil
@@ -4496,7 +4447,7 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 	}
 	sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual, catalog)
 	if err != nil {
-		if sharedAdvicePurposeRefusal(err) {
+		if isPurposeAdviceRefusal(err) {
 			entry.Command = ""
 			entry.Refusal = err.Error()
 			return nil
