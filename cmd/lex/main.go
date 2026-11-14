@@ -349,7 +349,7 @@ func printConfigAddCommand(home, codex string, paths []string) {
 			if resolved, resolveErr := filepath.EvalSymlinks(home); resolveErr == nil {
 				home = resolved
 			}
-			rel, relErr := filepath.Rel(home, codex)
+			rel, relErr := filepath.Rel(filepath.Join(home, ".claude"), codex)
 			if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
 				fmt.Printf("git --git-dir=%s --work-tree=%s add -- %s\n", configRepo, home, strings.Join(paths, " "))
 			}

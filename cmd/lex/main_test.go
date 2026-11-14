@@ -885,8 +885,10 @@ func TestAbsorbPrintsChangedCodexPathsAndConfigCommand(t *testing.T) {
 		name       string
 		configRepo bool
 		changed    bool
+		outside    bool
 	}{
 		{name: "with config repository", configRepo: true, changed: true},
+		{name: "codex outside the config directory", configRepo: true, changed: true, outside: true},
 		{name: "without config repository", changed: true},
 		{name: "without changes", configRepo: true},
 	} {
@@ -898,7 +900,10 @@ func TestAbsorbPrintsChangedCodexPathsAndConfigCommand(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			codex := filepath.Join(root, "codex")
+			codex := filepath.Join(root, ".claude", "codex")
+			if test.outside {
+				codex = filepath.Join(root, ".cache", "codex")
+			}
 			output := filepath.Join(root, "project", "instructions.md")
 			if err := os.MkdirAll(filepath.Dir(output), 0755); err != nil {
 				t.Fatal(err)
@@ -956,10 +961,10 @@ func TestAbsorbPrintsChangedCodexPathsAndConfigCommand(t *testing.T) {
 			}
 			manifest := filepath.Join(codex, "manifest", "project-instructions.md.yaml")
 			command := "git --git-dir=" + filepath.Join(root, ".claude-config.git") + " --work-tree=" + root + " add -- " + newFragment + " " + manifest + "\n"
-			if test.configRepo && test.changed && !strings.Contains(got, command) {
+			if test.configRepo && test.changed && !test.outside && !strings.Contains(got, command) {
 				t.Fatalf("absorb output %q does not contain command %q", got, command)
 			}
-			if (!test.configRepo || !test.changed) && strings.Contains(got, "git --git-dir=") {
+			if (!test.configRepo || !test.changed || test.outside) && strings.Contains(got, "git --git-dir=") {
 				t.Fatalf("absorb unexpectedly printed config command: %q", got)
 			}
 		})
