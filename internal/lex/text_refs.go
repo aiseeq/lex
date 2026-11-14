@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
@@ -83,7 +84,7 @@ func checkTextRefs(codex string, options CheckOptions) ([]string, error) {
 		return nil, err
 	}
 	findings, unused := applyTextRefExceptions(corpus, findTextRefsWithSkills(corpus, journal, skills), exceptions, filepath.Dir(codex))
-	externalCorpus, externalPaths, missingExternal, err := loadExternalTextCorpus(codex, options.OutputsUnder)
+	externalCorpus, externalPaths, missingExternal, err := loadExternalTextCorpus(codex, options.OutputsUnder, corpus)
 	if err != nil {
 		return nil, err
 	}
@@ -128,30 +129,54 @@ func checkTextRefs(codex string, options CheckOptions) ([]string, error) {
 	return finishCheck(warnings, problems)
 }
 
-func loadExternalTextCorpus(codex, outputsUnder string) (textCorpus, map[string]bool, []string, error) {
+// loadExternalTextCorpus reads the files listed in text_refs.external. A file
+// that is already in the corpus stays a corpus file, and a file that cannot be
+// read is a warning: neither changes the exit code of lex check.
+func loadExternalTextCorpus(codex, outputsUnder string, corpus textCorpus) (textCorpus, map[string]bool, []string, error) {
 	external := textCorpus{}
 	paths := map[string]bool{}
-	var missing []string
+	var warnings []string
 	if outputsUnder != "" {
-		return external, paths, missing, nil
+		return external, paths, warnings, nil
 	}
 	settings, err := (&corpusReader{}).textRefSettings(codex)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	warned := map[string]bool{}
+	warn := func(line string) {
+		if !warned[line] {
+			warned[line] = true
+			warnings = append(warnings, line)
+		}
+	}
 	for _, configured := range settings.TextRefs.External {
+		if strings.HasPrefix(configured, "~/") {
+			if _, homeErr := os.UserHomeDir(); homeErr != nil {
+				warn(configured + ": external file for text references not read: " + homeErr.Error())
+				continue
+			}
+		}
 		path := resolveRefTarget(codex, configured)
+		if _, inCorpus := corpus[path]; inCorpus || paths[path] {
+			continue
+		}
 		data, err := os.ReadFile(path)
 		if errors.Is(err, os.ErrNotExist) {
-			missing = append(missing, path+": external file for text references not found")
+			warn(path + ": external file for text references not found")
 			continue
 		}
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("read %s: %w", path, err)
+			var pathErr *fs.PathError
+			if errors.As(err, &pathErr) {
+				err = pathErr.Err
+			}
+			warn(path + ": external file for text references not read: " + err.Error())
+			continue
 		}
 		external[path], paths[path] = data, true
 	}
-	return external, paths, missing, nil
+	return external, paths, warnings, nil
 }
 
 type textRefKey struct {
@@ -1007,12 +1032,18 @@ func orphanSkillFinding(path, skill string, data []byte) textRefFinding {
 func sectionExists(body, title, referenceLine string) bool {
 	norm := func(s string) string { return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(s), "ё", "е")) }
 	title = norm(title)
+	inFence := false
 	for line := range strings.SplitSeq(body, "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~") {
+			inFence = !inFence
+		}
 		if line == referenceLine {
 			continue
 		}
-		t := strings.TrimSpace(line)
-		if norm(t) == title || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "-") || listItem.MatchString(t) {
+		// A plain line equal to the title is a heading without # (the shared CLAUDE.md form), not a line of a code block.
+		plainHeading := !inFence && norm(t) == title
+		if plainHeading || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "-") || listItem.MatchString(t) {
 			if strings.Contains(norm(t), title) {
 				return true
 			}

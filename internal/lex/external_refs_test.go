@@ -81,8 +81,8 @@ func TestPlainLineHeadingCountsAsSection(t *testing.T) {
 	source := filepath.Join(dir, "source.md")
 	target := filepath.Join(dir, "x.md")
 	corpus := textCorpus{
-		source: []byte("Ссылка: раздел «Факты и время» в `x.md`.\n"),
-		target: []byte("Факты и время\n"),
+		source: []byte("Ссылка: раздел «Сроки и вёдра» в `x.md`.\n"),
+		target: []byte("Сроки и вёдра\n"),
 	}
 	if findings := findTextRefs(corpus, filepath.Join(dir, "decisions.md")); len(findings) != 0 {
 		t.Errorf("plain line heading should resolve the section: %v", findings)
@@ -175,5 +175,111 @@ func TestExternalFilesDoNotProvideSteps(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("step numbered only in another external file should be missing: %v", warnings)
+	}
+}
+
+// ~/ is the home directory, not the directory of the file that holds the reference.
+func TestHomeRefResolvesFromHomeNotFromFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	corpus := textCorpus{
+		filepath.Join(home, "barn.md"):         []byte("# Солома\n"),
+		filepath.Join(home, "yard", "barn.md"): []byte("# Сено\n"),
+		filepath.Join(home, "yard", "note.md"): []byte("Ссылка: раздел «Солома» в `~/barn.md`.\n"),
+	}
+	if findings := findTextRefs(corpus, filepath.Join(home, "decisions.md")); len(findings) != 0 {
+		t.Errorf("~/barn.md should resolve to the home directory, where the section is: %v", findings)
+	}
+}
+
+// externalCheck builds a codex with CLAUDE.md and a decision journal, writes the
+// external files and lists them in tools.json, and returns the check warnings.
+func externalCheck(t *testing.T, files map[string]string, listed ...string) (string, []string, error) {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	codex := filepath.Join(root, "codex")
+	externalRefsImport(t, codex, filepath.Join(root, "CLAUDE.md"), "CLAUDE.md", "# Бюджет\n")
+	externalRefsImport(t, codex, filepath.Join(root, "decisions.md"), "decisions.md", "# Решения\n")
+	for name, body := range files {
+		if strings.HasSuffix(name, "/") {
+			if err := os.Mkdir(filepath.Join(root, name), 0755); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quoted := make([]string, 0, len(listed))
+	for _, name := range listed {
+		quoted = append(quoted, `"`+filepath.Join(root, name)+`"`)
+	}
+	data := `{"text_refs":{"external":[` + strings.Join(quoted, ",") + `]}}`
+	if err := os.WriteFile(filepath.Join(codex, "tools.json"), []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatalf("build corpus: %v", err)
+	}
+	warnings, err := CheckWithWarnings(codex, CheckOptions{})
+	return root, warnings, err
+}
+
+// A missing decision entry is an error in the corpus but only a warning in an external file.
+func TestExternalMissingDecisionIsWarning(t *testing.T) {
+	root, warnings, err := externalCheck(t, map[string]string{"agent.md": "- По decisions.md: no-such-crate-entry.\n"}, "agent.md")
+	if err != nil {
+		t.Fatalf("a missing decision entry in an external file failed check: %v", err)
+	}
+	if countWarningsContaining(warnings, filepath.Join(root, "agent.md")+":1: kind 1:") != 1 {
+		t.Errorf("expected one kind 1 warning for the external file: %v", warnings)
+	}
+}
+
+// Listing a corpus file in text_refs.external keeps it a corpus file: its kind 1 stays an error, printed once.
+func TestExternalListingOfCorpusFileKeepsItsErrors(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	codex := filepath.Join(root, "codex")
+	output := filepath.Join(root, "CLAUDE.md")
+	externalRefsImport(t, codex, output, "CLAUDE.md", "# Бюджет\n\n- По decisions.md: no-such-crate-entry.\n")
+	externalRefsImport(t, codex, filepath.Join(root, "decisions.md"), "decisions.md", "# Решения\n")
+	externalRefsTools(t, codex, output)
+	if err := Build(codex, false); err != nil {
+		t.Fatalf("build corpus: %v", err)
+	}
+	_, err := CheckWithWarnings(codex, CheckOptions{})
+	if err == nil || strings.Count(err.Error(), ": kind 1: ") != 1 {
+		t.Errorf("corpus file listed as external should keep one kind 1 error: %v", err)
+	}
+}
+
+// An external path that is a directory is a warning, said once; the other external files are still checked.
+func TestUnreadableExternalFileIsWarning(t *testing.T) {
+	root, warnings, err := externalCheck(t, map[string]string{"shed/": "", "agent.md": "Ссылка: раздел «Деньги» в `CLAUDE.md`.\n"}, "shed", "shed", "agent.md")
+	if err != nil {
+		t.Fatalf("a directory in text_refs.external failed check: %v", err)
+	}
+	shed := filepath.Join(root, "shed")
+	if countWarningsContaining(warnings, shed+": external file for text references not read: is a directory") != 1 {
+		t.Errorf("expected one warning naming the directory: %v", warnings)
+	}
+	if countWarningsContaining(warnings, filepath.Join(root, "agent.md")+":1: kind 2:") != 1 {
+		t.Errorf("the other external file should still be checked: %v", warnings)
+	}
+}
+
+// A line of a code block equal to the title is not a section.
+func TestPlainLineInCodeBlockIsNotSection(t *testing.T) {
+	dir := t.TempDir()
+	corpus := textCorpus{
+		filepath.Join(dir, "source.md"): []byte("Ссылка: раздел «Носорог» в `x.md`.\n"),
+		filepath.Join(dir, "x.md"):      []byte("# Звери\n\n```\nНосорог\n```\n"),
+	}
+	findings := findTextRefs(corpus, filepath.Join(dir, "decisions.md"))
+	if len(findings) != 1 || findings[0].kind != 2 {
+		t.Errorf("a code block line should not count as the section: %v", findings)
 	}
 }
