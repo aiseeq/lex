@@ -159,6 +159,10 @@ func TestStatusLineForms(t *testing.T) {
 	if got := statusLine(&fileProblem); got != "m.yaml: out.md; cannot read the file: frag/a.md: no such file" {
 		t.Errorf("file problem line = %q", got)
 	}
+	refusal := lex.StatusEntry{Manifest: "m.yaml", Output: "out.md", Refusal: "text above lex header; move the text below the header"}
+	if got := statusLine(&refusal); got != "m.yaml: out.md; text above lex header; move the text below the header" {
+		t.Errorf("refusal line = %q", got)
+	}
 }
 
 func TestStatusDescriptionAndError(t *testing.T) {

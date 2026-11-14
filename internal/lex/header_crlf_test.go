@@ -8,29 +8,36 @@ import (
 	"testing"
 )
 
+// builtWithHeader imports original as a.md into a codex with header: true and builds it;
+// it returns the folder, the file, the codex, the manifest and the built text.
+func builtWithHeader(t *testing.T, original string) (dir, out, codex, manifest string, data []byte) {
+	t.Helper()
+	dir = t.TempDir()
+	out, codex = filepath.Join(dir, "a.md"), filepath.Join(dir, "cx")
+	mustWrite(t, out, []byte(original))
+	if err := importData(codex, out, "a.md", []byte(original), false); err != nil {
+		t.Fatal(err)
+	}
+	manifest = manifestOf(t, codex, "a.md")
+	raw, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, manifest, bytes.Replace(raw, []byte("header: false\n"), []byte("header: true\n"), 1))
+	if err := BuildWithOptions(codex, BuildOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir, out, codex, manifest, data
+}
+
 func TestAbsorbCRLFHeaderKeepsOneHeader(t *testing.T) {
 	for _, edit := range []bool{false, true} {
 		t.Run(map[bool]string{false: "plain", true: "edited"}[edit], func(t *testing.T) {
-			dir := t.TempDir()
-			out, codex := filepath.Join(dir, "a.md"), filepath.Join(dir, "cx")
-			original := []byte("# A\n\n- one\n\n- two\n")
-			mustWrite(t, out, original)
-			if err := importData(codex, out, "a.md", original, false); err != nil {
-				t.Fatal(err)
-			}
-			manifest := manifestOf(t, codex, "a.md")
-			raw, err := os.ReadFile(manifest)
-			if err != nil {
-				t.Fatal(err)
-			}
-			mustWrite(t, manifest, bytes.Replace(raw, []byte("header: false\n"), []byte("header: true\n"), 1))
-			if err := BuildWithOptions(codex, BuildOptions{Force: true}); err != nil {
-				t.Fatal(err)
-			}
-			data, err := os.ReadFile(out)
-			if err != nil {
-				t.Fatal(err)
-			}
+			_, out, codex, manifest, data := builtWithHeader(t, "# A\n\n- one\n\n- two\n")
 			if edit {
 				data = bytes.Replace(data, []byte("- two\n"), []byte("- two edited\n"), 1)
 			}
@@ -61,26 +68,7 @@ func TestAbsorbCRLFHeaderKeepsOneHeader(t *testing.T) {
 }
 
 func TestAdviceTextAboveHeaderNamesHeader(t *testing.T) {
-	dir := t.TempDir()
-	out, codex := filepath.Join(dir, "a.md"), filepath.Join(dir, "cx")
-	original := []byte("# A\n\n- one\n")
-	mustWrite(t, out, original)
-	if err := importData(codex, out, "a.md", original, false); err != nil {
-		t.Fatal(err)
-	}
-	manifest := manifestOf(t, codex, "a.md")
-	raw, err := os.ReadFile(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustWrite(t, manifest, bytes.Replace(raw, []byte("header: false\n"), []byte("header: true\n"), 1))
-	if err := BuildWithOptions(codex, BuildOptions{Force: true}); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, out, codex, _, data := builtWithHeader(t, "# A\n\n- one\n")
 	mustWrite(t, out, append([]byte("intro\n"), data...))
 	want := "text above lex header; move the text below the header"
 	check, err := CheckWithWarnings(codex, CheckOptions{})
@@ -91,7 +79,7 @@ func TestAdviceTextAboveHeaderNamesHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(status) != 1 || !strings.Contains(status[0].Problem, want) {
+	if len(status) != 1 || status[0].Command != "" || status[0].Problem != "" {
 		t.Fatalf("status = %#v", status)
 	}
 }

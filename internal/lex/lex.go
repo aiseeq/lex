@@ -1383,6 +1383,9 @@ func absorbBuiltBody(codex, target, selected string, paths []string, m manifest,
 	return built, nil
 }
 
+// textAboveHeaderAdvice is the refusal absorb, check and status give for text above the lex header.
+const textAboveHeaderAdvice = "text above lex header; move the text below the header"
+
 // rejectTextAboveHeader refuses a file whose lex header line, with either line ending, stands
 // below text other than front matter. A header in its place ends the check, so a copy of the
 // header quoted further down the file does not count.
@@ -1399,7 +1402,7 @@ func rejectTextAboveHeader(file, selected string, m manifest, actual []byte) err
 	}
 	for _, form := range forms {
 		if index := bytes.Index(actual, form); index > 0 && actual[index-1] == '\n' {
-			return fmt.Errorf("%s: text above lex header; move the text below the header", file)
+			return fmt.Errorf("%s: %s", file, textAboveHeaderAdvice)
 		}
 	}
 	return nil
@@ -3342,11 +3345,11 @@ func stagedOrphans(commit *stagedPaths, codex string, referenced map[string]bool
 // builtDiffers explains why out differs from its fragments; fileEdited reports advice that keeps an edit made in the file with lex absorb.
 func builtDiffers(out, codex string, m manifest, manifestPath string, want, actual []byte) (problem string, fileEdited bool) {
 	codexArg, fileArg := ShellQuoteArg(codex), ShellQuoteArg(out)
-	if err := rejectTextAboveHeader(out, manifestPath, m, actual); err != nil {
-		return err.Error(), false
-	}
 	if owner, foreign := foreignOutputOwner(codex, actual); foreign {
 		return fmt.Sprintf("%s: the file carries %s, so lex import and lex absorb refuse it — if this codex owns the file, run `lex build --force --codex %s %s` to rebuild it from the fragments (edits in the file are lost)", out, ForeignHeaderPhrase(owner), codexArg, fileArg), false
+	}
+	if err := rejectTextAboveHeader(out, manifestPath, m, actual); err != nil {
+		return err.Error(), false
 	}
 	fragmentsChanged := fragmentsChangedSinceBuild(codex, manifestPath, m, want)
 	fileChanged := statusFileChanged(actual, manifestPath, m)
@@ -3890,6 +3893,8 @@ type StatusEntry struct {
 	ProblemFile bool
 	// Problem says why the file could not be compared; Command is empty then.
 	Problem string
+	// Refusal says why lex absorb refuses the file and what to change in it; Command is empty then.
+	Refusal string
 	// ForeignCodex names the codex whose lex header the file carries; Command then rebuilds the file from this codex.
 	ForeignCodex string
 }
@@ -3979,10 +3984,6 @@ func statusFileChanged(actual []byte, manifestPath string, m manifest) bool {
 }
 
 func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath string, m manifest, actual, want []byte) error {
-	if err := rejectTextAboveHeader(m.out, manifestPath, m, actual); err != nil {
-		entry.Problem = err.Error()
-		return nil
-	}
 	assessment, refreshErr := assessRefresh(codex, manifestKey(manifestPath), manifestPath, m, actual)
 	fragmentsChanged := fragmentsChangedSinceBuild(codex, manifestPath, m, want)
 	rel, err := filepath.Rel(home, m.out)
@@ -3994,6 +3995,11 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 		// lex import and lex absorb refuse such a file; only build --force rebuilds it.
 		entry.ForeignCodex = owner
 		entry.Command = "lex build --force --codex " + target
+		return nil
+	}
+	if rejectTextAboveHeader(m.out, manifestPath, m, actual) != nil {
+		// lex absorb refuses such a file the same way; no command settles it before the text moves.
+		entry.Refusal = textAboveHeaderAdvice
 		return nil
 	}
 	entry.Command = "lex import --refresh --codex " + target
