@@ -143,3 +143,33 @@ func TestOrphanSkillFileBoundaries(t *testing.T) {
 		t.Errorf("ожидались ровно три находки: %v", byPath)
 	}
 }
+
+func TestOrphanSkillFileNamesInsideLongerNames(t *testing.T) {
+	root := t.TempDir()
+	skill := filepath.Join(root, "skills", "sample")
+	corpus := textCorpus{
+		filepath.Join(skill, "SKILL.md"):    []byte("# Инструкция\nСм. a.md.bak, a.mdx и my notes.md\n"),
+		filepath.Join(skill, "a.md"):        []byte("# А\n"),
+		filepath.Join(skill, "a.md.bak"):    []byte("# Копия\n"),
+		filepath.Join(skill, "a.mdx"):       []byte("# Икс\n"),
+		filepath.Join(skill, "notes.md"):    []byte("# Заметки\n"),
+		filepath.Join(skill, "my notes.md"): []byte("# Мои заметки\n"),
+	}
+	if findings := onlyOrphanFindings(corpus, filepath.Join(root, "decisions.md")); len(findings) != 0 {
+		t.Fatalf("каждое имя, начатое с другого имени, упомянуто само и упоминает короткое: %v", findings)
+	}
+}
+
+func TestOrphanSkillFileHeadingSkipsCodeBlock(t *testing.T) {
+	root := t.TempDir()
+	skill := filepath.Join(root, "skills", "sample")
+	lost := filepath.Join(skill, "lost.md")
+	corpus := textCorpus{
+		filepath.Join(skill, "SKILL.md"): []byte("# Инструкция\n"),
+		lost:                             []byte("```sh\n# install\n```\n# Потерянный\n"),
+	}
+	findings := onlyOrphanFindings(corpus, filepath.Join(root, "decisions.md"))
+	if len(findings) != 1 || findings[0].line != 4 || findings[0].text != "# Потерянный" {
+		t.Fatalf("строка находки — первый заголовок вне блока кода: %v", findings)
+	}
+}

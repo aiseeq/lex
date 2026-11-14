@@ -1,6 +1,7 @@
 package lex
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 type textRefFinding struct {
@@ -843,40 +846,50 @@ func findOrphanSkillFiles(corpus textCorpus) []textRefFinding {
 			skillDirs[dir] = true
 		}
 	}
-	files := slices.Sorted(maps.Keys(corpus))
-	fileSkills, names := skillFilesAndNames(files, skillDirs)
-	if len(names) == 0 {
+	if len(skillDirs) == 0 {
 		return nil
 	}
-	counts, ownCounts := skillMentionCounts(files, corpus, fileSkills, names)
+	skillFiles := map[string][]string{}
+	for _, path := range slices.Sorted(maps.Keys(corpus)) {
+		if dir, ok := nearestSkillDirectory(path, skillDirs); ok {
+			skillFiles[dir] = append(skillFiles[dir], path)
+		}
+	}
 	var findings []textRefFinding
-	for _, path := range files {
-		owner, ok := fileSkills[path]
-		if !ok || filepath.Base(path) == "SKILL.md" {
-			continue
+	for _, dir := range slices.Sorted(maps.Keys(skillFiles)) {
+		for _, path := range skillFiles[dir] {
+			if filepath.Base(path) == "SKILL.md" || mentionedInSkill(path, skillFiles[dir], corpus) {
+				continue
+			}
+			findings = append(findings, orphanSkillFinding(path, filepath.Base(dir), corpus[path]))
 		}
-		name := filepath.Base(path)
-		if counts[owner][name]-ownCounts[path][name] > 0 {
-			continue
-		}
-		findings = append(findings, orphanSkillFinding(path, filepath.Base(owner), corpus[path]))
 	}
 	return findings
 }
 
-// skillFilesAndNames maps each corpus file to the nearest skill directory above it and lists the base names of the non-SKILL.md files.
-func skillFilesAndNames(files []string, skillDirs map[string]bool) (map[string]string, []string) {
-	fileSkills := map[string]string{}
-	nameSet := map[string]bool{}
-	for _, path := range files {
-		if dir, ok := nearestSkillDirectory(path, skillDirs); ok {
-			fileSkills[path] = dir
-			if filepath.Base(path) != "SKILL.md" {
-				nameSet[filepath.Base(path)] = true
-			}
+// mentionedInSkill reports whether another file of the skill names the file: its base name not preceded by a letter, digit, "_" or "-".
+func mentionedInSkill(path string, files []string, corpus textCorpus) bool {
+	name := []byte(filepath.Base(path))
+	for _, other := range files {
+		if other != path && mentionsName(corpus[other], name) {
+			return true
 		}
 	}
-	return fileSkills, slices.Sorted(maps.Keys(nameSet))
+	return false
+}
+
+func mentionsName(data, name []byte) bool {
+	for offset := 0; ; {
+		i := bytes.Index(data[offset:], name)
+		if i < 0 {
+			return false
+		}
+		at := offset + i
+		if before, _ := utf8.DecodeLastRune(data[:at]); at == 0 || !(unicode.IsLetter(before) || unicode.IsDigit(before) || before == '_' || before == '-') {
+			return true
+		}
+		offset = at + 1
+	}
 }
 
 func nearestSkillDirectory(path string, skillDirs map[string]bool) (string, bool) {
@@ -888,36 +901,15 @@ func nearestSkillDirectory(path string, skillDirs map[string]bool) (string, bool
 	return "", false
 }
 
-func skillMentionCounts(files []string, corpus textCorpus, fileSkills map[string]string, names []string) (map[string]map[string]int, map[string]map[string]int) {
-	parts := make([]string, len(names))
-	for i, name := range names {
-		parts[i] = regexp.QuoteMeta(name)
-	}
-	mention := regexp.MustCompile(`(^|[^\pL\pN_-])(` + strings.Join(parts, "|") + `)`)
-	counts := map[string]map[string]int{}
-	ownCounts := map[string]map[string]int{}
-	for _, path := range files {
-		owner, ok := fileSkills[path]
-		if !ok {
-			continue
-		}
-		if counts[owner] == nil {
-			counts[owner] = map[string]int{}
-		}
-		ownCounts[path] = map[string]int{}
-		for _, match := range mention.FindAllSubmatch(corpus[path], -1) {
-			name := string(match[2])
-			counts[owner][name]++
-			ownCounts[path][name]++
-		}
-	}
-	return counts, ownCounts
-}
-
 func orphanSkillFinding(path, skill string, data []byte) textRefFinding {
 	line, text := 1, ""
+	inCode := false
 	for i, candidate := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(candidate, "# ") {
+		if strings.HasPrefix(strings.TrimSpace(candidate), "```") {
+			inCode = !inCode
+			continue
+		}
+		if !inCode && strings.HasPrefix(candidate, "# ") {
 			line, text = i+1, candidate
 			break
 		}
