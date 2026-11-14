@@ -1100,7 +1100,26 @@ func expandHeaderCodexPath(path string) string {
 	return resolvePath(path)
 }
 
+// unknownCodex stands for the owner of a lex header that names no manifest path.
+const unknownCodex = "unknown codex"
+
 func rejectForeignOutput(codex, output string, data []byte) error {
+	if owner, foreign := foreignOutputOwner(codex, data); foreign {
+		return fmt.Errorf("%s: output belongs to codex %s, not codex %s", output, owner, resolvePath(codex))
+	}
+	return nil
+}
+
+// ForeignHeaderPhrase names the lex header of another codex for check and status lines.
+func ForeignHeaderPhrase(owner string) string {
+	if owner == unknownCodex {
+		return "a lex header that names no codex"
+	}
+	return "the lex header of codex " + owner
+}
+
+// foreignOutputOwner reports the codex named by a lex header that is not this codex's ("unknown codex" when the header names none).
+func foreignOutputOwner(codex string, data []byte) (string, bool) {
 	marker := []byte("<!-- lex: собран из ")
 	lines := bytes.SplitAfter(data, []byte("\n"))
 	offset := 0
@@ -1115,10 +1134,10 @@ func rejectForeignOutput(codex, output string, data []byte) error {
 	}
 	value, ok := bytes.CutPrefix(line, marker)
 	if !ok {
-		return nil
+		return "", false
 	}
 	codex = resolvePath(codex)
-	owner := "unknown codex"
+	owner := unknownCodex
 	if before, _, ok0 := bytes.Cut(value, []byte(".yaml. Правь фрагменты в ")); ok0 {
 		manifestDir := []byte("/manifest/")
 		if manifestIndex := bytes.LastIndex(before, manifestDir); manifestIndex >= 0 {
@@ -1126,11 +1145,11 @@ func rejectForeignOutput(codex, output string, data []byte) error {
 			owner = expandHeaderCodexPath(ownerPath)
 			name := before[manifestIndex+len(manifestDir):]
 			if owner == codex && len(name) > 0 && !bytes.Contains(name, []byte("/")) {
-				return nil
+				return "", false
 			}
 		}
 	}
-	return fmt.Errorf("%s: output belongs to codex %s, not codex %s", output, owner, codex)
+	return owner, true
 }
 
 func withoutGeneratedHeader(data []byte, manifestPath string) []byte {
@@ -2751,6 +2770,9 @@ func stagedOrphans(commit *stagedPaths, codex string, referenced map[string]bool
 
 func builtDiffers(out, codex string, m manifest, manifestPath string, want, actual []byte) string {
 	codexArg, fileArg := strconv.Quote(codex), strconv.Quote(out)
+	if owner, foreign := foreignOutputOwner(codex, actual); foreign {
+		return fmt.Sprintf("%s: the file carries %s, so lex import and lex absorb refuse it — if this codex owns the file, run `lex build --force --codex %s %s` to rebuild it from the fragments (edits in the file are lost)", out, ForeignHeaderPhrase(owner), codexArg, fileArg)
+	}
 	fragmentsChanged := fragmentsChangedSinceBuild(codex, manifestPath, m, want)
 	fileChanged := statusFileChanged(actual, manifestPath, m)
 	if fragmentsChanged && !fileChanged {
@@ -3246,6 +3268,8 @@ type StatusEntry struct {
 	ProblemFile bool
 	// Problem says why the file could not be compared; Command is empty then.
 	Problem string
+	// ForeignCodex names the codex whose lex header the file carries; Command then rebuilds the file from this codex.
+	ForeignCodex string
 }
 
 // statusFragmentProblem names the path of a failed file operation once.
@@ -3340,6 +3364,12 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 		return fmt.Errorf("%s: resolve source path: %w", m.out, err)
 	}
 	target := strconv.Quote(codex) + " " + strconv.Quote(filepath.Join(home, rel))
+	if owner, foreign := foreignOutputOwner(codex, actual); foreign {
+		// lex import and lex absorb refuse such a file; only build --force rebuilds it.
+		entry.ForeignCodex = owner
+		entry.Command = "lex build --force --codex " + target
+		return nil
+	}
 	entry.Command = "lex import --refresh --codex " + target
 	if fragmentsChanged {
 		entry.Command = "lex absorb --force --codex " + target
