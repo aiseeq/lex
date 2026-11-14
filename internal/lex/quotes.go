@@ -145,7 +145,7 @@ func selectQuoteManifests(codex string, options QuotesToBasisOptions) ([]*select
 	if err != nil {
 		return nil, "", err
 	}
-	selected, _, problems, err := selectManifestsUnder(paths, filepath.Clean(abs), under, tree)
+	selected, _, problems, err := selectManifestsUnder(newManifestCatalog(paths), filepath.Clean(abs), under, tree)
 	if err != nil {
 		return nil, "", err
 	}
