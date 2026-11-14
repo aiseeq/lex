@@ -165,7 +165,7 @@ type refreshAssessment struct {
 	noChange       bool
 }
 
-func refreshRemovedSharedOutputs(codex, topic string, m manifest, cleanData []byte, purposeEnabled bool) ([]string, error) {
+func refreshRemovedSharedOutputs(codex, topic string, m manifest, cleanData []byte, purposeEnabled bool, catalog *manifestCatalog) ([]string, error) {
 	headers, err := readFragmentHeaders(codex, m.parts)
 	if err != nil {
 		return nil, err
@@ -182,17 +182,12 @@ func refreshRemovedSharedOutputs(codex, topic string, m manifest, cleanData []by
 	for _, id := range newParts {
 		newPartSet[id] = true
 	}
-	paths, err := filepath.Glob(filepath.Join(codex, "manifest", "*.yaml"))
-	if err != nil {
-		return nil, fmt.Errorf("list manifests: %w", err)
-	}
-	sort.Strings(paths)
 	var otherOutputs []string
 	for _, id := range m.parts {
 		if newPartSet[id] {
 			continue
 		}
-		outputs, err := manifestsUsing(paths, id)
+		outputs, err := catalog.manifestsUsing(id)
 		if err != nil {
 			return nil, err
 		}
@@ -206,7 +201,7 @@ func refreshRemovedSharedOutputs(codex, topic string, m manifest, cleanData []by
 	return slices.Compact(otherOutputs), nil
 }
 
-func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byte) (refreshAssessment, error) {
+func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byte, catalog *manifestCatalog) (refreshAssessment, error) {
 	sourceData := diskData
 	if m.header {
 		sourceData = withoutGeneratedHeader(diskData, manifestPath)
@@ -232,14 +227,14 @@ func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byt
 		if err != nil {
 			return assessment, err
 		}
-		sharedFlag, sharedHint, hintErr := codexSharedForceHint(codex, m, layout.rendered, sourceData)
+		sharedFlag, sharedHint, hintErr := codexSharedForceHint(codex, m, layout.rendered, sourceData, catalog)
 		if hintErr != nil {
 			return assessment, hintErr
 		}
 		if sharedFlag != "" {
 			return assessment, fmt.Errorf("%s: refresh would edit a shared fragment%s; run `lex absorb%s --codex %s %s`", m.out, sharedHint, sharedFlag, ShellQuoteArg(codex), ShellQuoteArg(m.out))
 		}
-		otherOutputs, err := refreshRemovedSharedOutputs(codex, topic, m, assessment.cleanData, purposeEnabled)
+		otherOutputs, err := refreshRemovedSharedOutputs(codex, topic, m, assessment.cleanData, purposeEnabled, catalog)
 		if err != nil {
 			return assessment, err
 		}
@@ -337,7 +332,11 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 			return fmt.Errorf("%s: manifest key already points to %s", manifestPath, old.out)
 		}
 		if refresh {
-			assessment, err = assessRefresh(codex, topic, manifestPath, old, data)
+			catalog, catalogErr := listManifestCatalog(codex)
+			if catalogErr != nil {
+				return catalogErr
+			}
+			assessment, err = assessRefresh(codex, topic, manifestPath, old, data, catalog)
 			if err != nil {
 				return err
 			}
@@ -1370,9 +1369,9 @@ func AbsorbWithPaths(codex, file string, options AbsorbOptions) ([]string, error
 }
 
 func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
-	paths, err := filepath.Glob(filepath.Join(codex, "manifest", "*.yaml"))
+	catalog, err := listManifestCatalog(codex)
 	if err != nil {
-		return fmt.Errorf("list manifests: %w", err)
+		return err
 	}
 	target, err := filepath.Abs(file)
 	if err != nil {
@@ -1385,8 +1384,7 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 	if err := rejectForeignOutput(codex, target, actual); err != nil {
 		return err
 	}
-	sort.Strings(paths)
-	selected, m, err := findOutputManifest(paths, target)
+	selected, m, err := catalog.findOutputManifest(target)
 	if err != nil {
 		return err
 	}
@@ -1394,7 +1392,7 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 		return err
 	}
 	read := os.ReadFile
-	built, err := absorbBuiltBody(codex, target, selected, paths, m, actual, options)
+	built, err := absorbBuiltBody(codex, target, selected, m, actual, options, catalog)
 	if err != nil {
 		return err
 	}
@@ -1411,7 +1409,7 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 	if err != nil {
 		return err
 	}
-	if moved, err := tryAbsorbPurePartMove(codex, paths, selected, m, purposeEnabled, actual, fileBytes, options); moved || err != nil {
+	if moved, err := tryAbsorbPurePartMove(codex, selected, m, purposeEnabled, actual, fileBytes, options, catalog); moved || err != nil {
 		return warnAfterAbsorb(err, target, warnSnapshot)
 	}
 	var purpose *purposeLayout
@@ -1432,10 +1430,10 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 			return err
 		}
 	}
-	return warnAfterAbsorb(absorbEditedFragment(codex, paths, selected, m, built, actual, fileBytes, options, purpose), target, warnSnapshot)
+	return warnAfterAbsorb(absorbEditedFragment(codex, selected, m, built, actual, fileBytes, options, purpose, catalog), target, warnSnapshot)
 }
 
-func absorbBuiltBody(codex, target, selected string, paths []string, m manifest, actual []byte, options AbsorbOptions) ([]byte, error) {
+func absorbBuiltBody(codex, target, selected string, m manifest, actual []byte, options AbsorbOptions, catalog *manifestCatalog) ([]byte, error) {
 	built, err := manifestBodyWithRead(codex, m, os.ReadFile)
 	if err != nil {
 		return nil, err
@@ -1444,7 +1442,7 @@ func absorbBuiltBody(codex, target, selected string, paths []string, m manifest,
 		built = generatedHeader(selected, built)
 	}
 	if fragmentsChangedSinceBuild(codex, selected, m, built) && !outputMatchesGenerated(actual, built, m.header, selected) && !options.Force {
-		return nil, forceRefusal(codex, target, selected, paths, built, actual, m)
+		return nil, forceRefusal(codex, target, selected, built, actual, m, catalog)
 	}
 	return built, nil
 }
@@ -1520,7 +1518,7 @@ func readPlainPartLayout(codex string, m manifest) (purposeLayout, error) {
 	return l, nil
 }
 
-func tryAbsorbPurePartMove(codex string, paths []string, selected string, m manifest, printed bool, actual, fileBytes []byte, options AbsorbOptions) (bool, error) {
+func tryAbsorbPurePartMove(codex, selected string, m manifest, printed bool, actual, fileBytes []byte, options AbsorbOptions, catalog *manifestCatalog) (bool, error) {
 	var layout purposeLayout
 	var err error
 	if printed {
@@ -1531,7 +1529,7 @@ func tryAbsorbPurePartMove(codex string, paths []string, selected string, m mani
 	if err != nil {
 		return false, err
 	}
-	return absorbPurePartMove(codex, paths, selected, m, layout, actual, fileBytes, options)
+	return absorbPurePartMove(codex, selected, m, layout, actual, fileBytes, options, catalog)
 }
 
 // restoreDeletedHeader writes the build back into a file whose text equals the fragments but whose lex header line was deleted: nothing in the file is lost, and lex check names absorb for it.
@@ -1578,16 +1576,7 @@ func snapshotAbsorbEditWarning(target, codex, selected string, m manifest, fileB
 }
 
 func findOutputManifest(paths []string, target string) (string, manifest, error) {
-	for _, path := range paths {
-		m, err := readManifest(path)
-		if err != nil {
-			return "", manifest{}, err
-		}
-		if m.out == target {
-			return path, m, nil
-		}
-	}
-	return "", manifest{}, fmt.Errorf("%s: no manifest output", target)
+	return newManifestCatalog(paths).findOutputManifest(target)
 }
 
 type lineHunk struct {
@@ -1603,7 +1592,7 @@ type preparedFragmentEdit struct {
 	replacement []byte
 }
 
-func planEditedFragment(codex string, paths []string, selected string, m manifest, built, actual, fileBytes []byte, options AbsorbOptions, purpose *purposeLayout) ([][2]int, []int, []preparedFragmentEdit, map[int][]lineHunk, error) {
+func planEditedFragment(codex, selected string, m manifest, built, actual, fileBytes []byte, options AbsorbOptions, purpose *purposeLayout, catalog *manifestCatalog) ([][2]int, []int, []preparedFragmentEdit, map[int][]lineHunk, error) {
 	oldLines, newLines := absorbLines(built), absorbLines(actual)
 	var bounds [][2]int
 	var err error
@@ -1622,35 +1611,35 @@ func planEditedFragment(codex string, paths []string, selected string, m manifes
 	if purpose != nil {
 		hunks = splitPurposeHunks(purpose.spans, purpose.owners, oldLines, newLines, hunks)
 	}
-	edits, owners, additions, err := planAbsorbEdits(codex, paths, selected, m, bounds, oldLines, newLines, hunks, fileBytes, options, purpose != nil)
+	edits, owners, additions, err := planAbsorbEdits(codex, selected, m, bounds, oldLines, newLines, hunks, fileBytes, options, purpose != nil, catalog)
 	return bounds, owners, edits, additions, err
 }
 
-func absorbEditedFragment(codex string, paths []string, selected string, m manifest, built, actual, fileBytes []byte, options AbsorbOptions, purpose *purposeLayout) error {
+func absorbEditedFragment(codex, selected string, m manifest, built, actual, fileBytes []byte, options AbsorbOptions, purpose *purposeLayout, catalog *manifestCatalog) error {
 	newLines := absorbLines(actual)
-	bounds, _, edits, additions, err := planEditedFragment(codex, paths, selected, m, built, actual, fileBytes, options, purpose)
+	bounds, _, edits, additions, err := planEditedFragment(codex, selected, m, built, actual, fileBytes, options, purpose, catalog)
 	if err != nil {
 		return err
 	}
-	plan, err := planAbsorbManifest(codex, paths, selected, m, bounds, edits, additions, newLines, fileBytes)
+	plan, err := planAbsorbManifest(codex, selected, m, bounds, edits, additions, newLines, fileBytes, catalog)
 	if err != nil {
 		return err
 	}
 	if err := verifyAbsorbPlan(codex, plan, actual, options.DraftDir, manifestKey(selected), m.out, fileBytes); err != nil {
 		return err
 	}
-	if err := writeAbsorbPlan(selected, plan); err != nil {
+	if err := writeAbsorbPlan(selected, plan, catalog); err != nil {
 		return err
 	}
 	if options.Force && options.Shared {
-		warnSharedOutputsToRebuild(codex, paths, selected, edits)
+		warnSharedOutputsToRebuild(codex, selected, edits, catalog)
 	}
 	return nil
 }
 
 // absorbPurePartMove recognizes a file made solely by reordering complete,
 // unique manifest parts. It runs before printed purpose lines are stripped.
-func absorbPurePartMove(codex string, paths []string, selected string, m manifest, layout purposeLayout, actual, fileBytes []byte, options AbsorbOptions) (bool, error) {
+func absorbPurePartMove(codex, selected string, m manifest, layout purposeLayout, actual, fileBytes []byte, options AbsorbOptions, catalog *manifestCatalog) (bool, error) {
 	order, changedOwners, compact, ok, err := planPurePartMove(codex, m, layout, actual)
 	if err != nil || !ok {
 		return false, err
@@ -1678,7 +1667,7 @@ func absorbPurePartMove(codex string, paths []string, selected string, m manifes
 	}
 	// A shared fragment whose bytes change here would change the other files it builds; the
 	// line-edit path keeps that fragment and adds a new one for this file, as it did before.
-	affected, err := firstSharedEdit(paths, m.parts, changedOwners)
+	affected, err := firstSharedEdit(m.parts, changedOwners, catalog)
 	if err != nil {
 		return true, err
 	}
@@ -1689,7 +1678,7 @@ func absorbPurePartMove(codex string, paths []string, selected string, m manifes
 	if err := verifyAbsorbPlan(codex, plan, actual, options.DraftDir, manifestKey(selected), m.out, fileBytes); err != nil {
 		return true, err
 	}
-	if err := writeAbsorbPlan(selected, plan); err != nil {
+	if err := writeAbsorbPlan(selected, plan, catalog); err != nil {
 		return true, err
 	}
 	return true, nil
@@ -1822,7 +1811,7 @@ type absorbPlan struct {
 	removePaths []string
 }
 
-func planAbsorbEdits(codex string, paths []string, selected string, m manifest, bounds [][2]int, oldLines, newLines [][]byte, hunks []lineHunk, fileBytes []byte, options AbsorbOptions, printedPurpose bool) ([]preparedFragmentEdit, []int, map[int][]lineHunk, error) {
+func planAbsorbEdits(codex, selected string, m manifest, bounds [][2]int, oldLines, newLines [][]byte, hunks []lineHunk, fileBytes []byte, options AbsorbOptions, printedPurpose bool, catalog *manifestCatalog) ([]preparedFragmentEdit, []int, map[int][]lineHunk, error) {
 	owners, deltas, additions, err := assignAbsorbHunks(bounds, m.parts, oldLines, newLines, hunks, options.DraftDir, manifestKey(selected), m.out, fileBytes)
 	if err != nil {
 		return nil, nil, nil, err
@@ -1844,14 +1833,14 @@ func planAbsorbEdits(codex string, paths []string, selected string, m manifest, 
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if err := validateSharedEdits(paths, m.parts, editable, options.Shared); err != nil {
+	if err := validateSharedEdits(m.parts, editable, options.Shared, catalog); err != nil {
 		return nil, nil, nil, err
 	}
 	return edits, editable, additions, nil
 }
 
-func planAbsorbManifest(codex string, paths []string, selected string, m manifest, bounds [][2]int, edits []preparedFragmentEdit, additions map[int][]lineHunk, newLines [][]byte, fileBytes []byte) (absorbPlan, error) {
-	updated, removePaths, err := applyAbsorbedEdits(paths, m, edits, fileBytes)
+func planAbsorbManifest(codex, selected string, m manifest, bounds [][2]int, edits []preparedFragmentEdit, additions map[int][]lineHunk, newLines [][]byte, fileBytes []byte, catalog *manifestCatalog) (absorbPlan, error) {
+	updated, removePaths, err := applyAbsorbedEdits(m, edits, fileBytes, catalog)
 	if err != nil {
 		return absorbPlan{}, err
 	}
@@ -1902,7 +1891,7 @@ func verifyAbsorbPlan(codex string, plan absorbPlan, actual []byte, draftDir, ke
 	return writeAbsorbDraft(draftDir, key, output, fileBytes, reason)
 }
 
-func writeAbsorbPlan(selected string, plan absorbPlan) error {
+func writeAbsorbPlan(selected string, plan absorbPlan, catalog *manifestCatalog) error {
 	for _, edit := range plan.edits {
 		body, err := fragmentBody(edit.updated)
 		if err != nil {
@@ -1928,6 +1917,7 @@ func writeAbsorbPlan(selected string, plan absorbPlan) error {
 	if err := writeManifest(selected, plan.manifest, plan.manifest.links); err != nil {
 		return err
 	}
+	catalog.update(selected, plan.manifest)
 	return removeAbsorbedFragments(plan.removePaths)
 }
 
@@ -2233,7 +2223,7 @@ func nonemptyEditedOwners(owners []int, parts []string, edits []preparedFragment
 	return editable, nil
 }
 
-func applyAbsorbedEdits(paths []string, m manifest, edits []preparedFragmentEdit, fileBytes []byte) (manifest, []string, error) {
+func applyAbsorbedEdits(m manifest, edits []preparedFragmentEdit, fileBytes []byte, catalog *manifestCatalog) (manifest, []string, error) {
 	updated := m
 	updated.parts = append([]string(nil), m.parts...)
 	updated.fragmentHashes = make(map[string]string, len(m.fragmentHashes))
@@ -2247,7 +2237,7 @@ func applyAbsorbedEdits(paths []string, m manifest, edits []preparedFragmentEdit
 		if len(body) == 0 {
 			updated.parts = slices.DeleteFunc(updated.parts, func(id string) bool { return id == edit.part })
 			delete(updated.fragmentHashes, edit.part)
-			affected, err := manifestsUsing(paths, edit.part)
+			affected, err := catalog.manifestsUsing(edit.part)
 			if err != nil {
 				return manifest{}, nil, err
 			}
@@ -2627,8 +2617,8 @@ func trailingBlankLines(data []byte) int {
 	return count
 }
 
-func validateSharedEdits(paths []string, parts []string, owners []int, shared bool) error {
-	affected, err := firstSharedEdit(paths, parts, owners)
+func validateSharedEdits(parts []string, owners []int, shared bool, catalog *manifestCatalog) error {
+	affected, err := firstSharedEdit(parts, owners, catalog)
 	if err != nil {
 		return err
 	}
@@ -2639,7 +2629,7 @@ func validateSharedEdits(paths []string, parts []string, owners []int, shared bo
 }
 
 // firstSharedEdit returns the manifests using the first edited part that more than one manifest builds, or nil.
-func firstSharedEdit(paths []string, parts []string, owners []int) ([]string, error) {
+func firstSharedEdit(parts []string, owners []int, catalog *manifestCatalog) ([]string, error) {
 	checked := make(map[string]bool)
 	for _, owner := range owners {
 		part := parts[owner]
@@ -2647,7 +2637,7 @@ func firstSharedEdit(paths []string, parts []string, owners []int) ([]string, er
 			continue
 		}
 		checked[part] = true
-		affected, err := manifestsUsing(paths, part)
+		affected, err := catalog.manifestsUsing(part)
 		if err != nil {
 			return nil, err
 		}
@@ -2836,24 +2826,97 @@ func fragmentLineBounds(codex string, parts []string) ([][2]int, error) {
 	return bounds, nil
 }
 
-func manifestsUsing(paths []string, part string) ([]string, error) {
-	var outputs []string
-	for _, path := range paths {
-		m, err := readManifest(path)
+type manifestCatalog struct {
+	paths   []string
+	items   map[string]manifest
+	errs    map[string]error
+	parts   map[string][]string
+	indexed bool
+}
+
+func listManifestCatalog(codex string) (*manifestCatalog, error) {
+	paths, err := filepath.Glob(filepath.Join(codex, "manifest", "*.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("list manifests: %w", err)
+	}
+	sort.Strings(paths)
+	return newManifestCatalog(paths), nil
+}
+
+func newManifestCatalog(paths []string) *manifestCatalog {
+	return &manifestCatalog{paths: paths, items: make(map[string]manifest, len(paths)), errs: make(map[string]error), parts: make(map[string][]string)}
+}
+
+func (catalog *manifestCatalog) read(path string) (manifest, error) {
+	if m, ok := catalog.items[path]; ok {
+		return m, catalog.errs[path]
+	}
+	m, err := readManifest(path)
+	if err != nil {
+		catalog.items[path] = m
+		catalog.errs[path] = err
+		return m, err
+	}
+	catalog.items[path] = m
+	return m, nil
+}
+
+func (catalog *manifestCatalog) update(path string, m manifest) {
+	catalog.items[path] = m
+	delete(catalog.errs, path)
+	catalog.parts = make(map[string][]string)
+	catalog.indexed = false
+}
+
+func (catalog *manifestCatalog) findOutputManifest(target string) (string, manifest, error) {
+	for _, path := range catalog.paths {
+		m, err := catalog.read(path)
 		if err != nil {
-			return nil, err
+			return "", manifest{}, err
 		}
-		if slices.Contains(m.parts, part) {
-			outputs = append(outputs, m.out)
+		if m.out == target {
+			return path, m, nil
 		}
 	}
-	return outputs, nil
+	return "", manifest{}, fmt.Errorf("%s: no manifest output", target)
+}
+
+// buildIndex indexes only manifests already in items; manifestsUsing reads
+// every path first, so the index it builds covers the whole catalog.
+func (catalog *manifestCatalog) buildIndex() {
+	if !catalog.indexed {
+		for _, path := range catalog.paths {
+			m, ok := catalog.items[path]
+			if !ok {
+				continue
+			}
+			seen := make(map[string]bool, len(m.parts))
+			for _, id := range m.parts {
+				if seen[id] {
+					continue
+				}
+				seen[id] = true
+				catalog.parts[id] = append(catalog.parts[id], m.out)
+			}
+		}
+		catalog.indexed = true
+	}
+}
+
+func (catalog *manifestCatalog) manifestsUsing(part string) ([]string, error) {
+	for _, path := range catalog.paths {
+		if _, err := catalog.read(path); err != nil {
+			return nil, err
+		}
+	}
+	catalog.buildIndex()
+	return catalog.parts[part], nil
 }
 
 // forceRefusal says why absorb refuses a file whose fragments changed since the build, with the commands that keep either side.
-func forceRefusal(codex, target, selected string, paths []string, built, actual []byte, m manifest) error {
+func forceRefusal(codex, target, selected string, built, actual []byte, m manifest, catalog *manifestCatalog) error {
 	codexArg, fileArg := ShellQuoteArg(codex), ShellQuoteArg(target)
-	sharedFlag, sharedHint, hintErr := sharedForceHint(paths, codex, m.out, m.parts, built, actual)
+	sharedFlag, sharedHint, hintErr := codexSharedForceHint(codex, m, built, actual, catalog)
 	if hintErr != nil {
 		return hintErr
 	}
@@ -2877,9 +2940,9 @@ func sharedHintPlanRefusal(err error) bool {
 	return errors.As(err, &draftErr) && draftErr.reason == "boundary conflict" || errors.Is(err, errInvalidEditedFragmentLineBounds)
 }
 
-// sharedForceHint returns shared advice only when the edits would change a shared part.
-func sharedForceHint(paths []string, codex, selected string, parts []string, built, actual []byte) (string, string, error) {
-	manifestPath, manifest, err := findOutputManifest(paths, selected)
+func codexSharedForceHint(codex string, m manifest, built, actual []byte, catalog *manifestCatalog) (string, string, error) {
+	selected, parts := m.out, m.parts
+	manifestPath, manifest, err := catalog.findOutputManifest(selected)
 	if err != nil {
 		return "", "", err
 	}
@@ -2907,7 +2970,7 @@ func sharedForceHint(paths []string, codex, selected string, parts []string, bui
 		return "", "", err
 	}
 	if isMove {
-		affected, err := firstSharedEdit(paths, parts, moveOwners)
+		affected, err := firstSharedEdit(parts, moveOwners, catalog)
 		if err != nil {
 			return "", "", err
 		}
@@ -2915,15 +2978,14 @@ func sharedForceHint(paths []string, codex, selected string, parts []string, bui
 			return "", "", nil
 		}
 	}
-	_, owners, _, _, err := planEditedFragment(codex, paths, selected, manifest, built, actual, actual, AbsorbOptions{Shared: true}, purpose)
+	_, owners, _, _, err := planEditedFragment(codex, selected, manifest, built, actual, actual, AbsorbOptions{Shared: true}, purpose, catalog)
 	if err != nil {
 		if sharedHintPlanRefusal(err) {
 			return "", "", nil
 		}
 		return "", "", err
 	}
-
-	affected, err := firstSharedEdit(paths, parts, owners)
+	affected, err := firstSharedEdit(parts, owners, catalog)
 	if err != nil {
 		return "", "", err
 	}
@@ -2938,16 +3000,6 @@ func sharedForceHint(paths []string, codex, selected string, parts []string, bui
 		return "", "", nil
 	}
 	return " --shared", "; --shared lets this file replace the fragments shared with " + strings.Join(others, ", ") + ": their edits there that are not in this file are lost", nil
-}
-
-// codexSharedForceHint applies sharedForceHint to the current output and codex manifests.
-func codexSharedForceHint(codex string, m manifest, built, actual []byte) (string, string, error) {
-	paths, err := filepath.Glob(filepath.Join(codex, "manifest", "*.yaml"))
-	if err != nil {
-		return "", "", fmt.Errorf("list manifests: %w", err)
-	}
-	sort.Strings(paths)
-	return sharedForceHint(paths, codex, m.out, m.parts, built, actual)
 }
 
 func sharedOutputEdits(codex string, m manifest, actual []byte, sharedParts map[string]bool) (bool, bool, error) {
@@ -2991,14 +3043,14 @@ func sharedOutputEdits(codex string, m manifest, actual []byte, sharedParts map[
 	return sharedChanged, ownChanged, nil
 }
 
-func warnSharedOutputsToRebuild(codex string, paths []string, selected string, edits []preparedFragmentEdit) {
+func warnSharedOutputsToRebuild(codex, selected string, edits []preparedFragmentEdit, catalog *manifestCatalog) {
 	seen := make(map[string]bool)
 	editedParts := make(map[string]bool, len(edits))
 	for _, edit := range edits {
 		editedParts[edit.part] = true
 	}
 	for _, edit := range edits {
-		outputs, err := manifestsUsing(paths, edit.part)
+		outputs, err := catalog.manifestsUsing(edit.part)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: %s: cannot list outputs using shared fragment %s: %v\n", selected, edit.part, err)
 			return
@@ -3008,7 +3060,7 @@ func warnSharedOutputsToRebuild(codex string, paths []string, selected string, e
 				continue
 			}
 			seen[output] = true
-			_, m, err := findOutputManifest(paths, output)
+			_, m, err := catalog.findOutputManifest(output)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: %s: cannot read manifest for shared output: %v\n", output, err)
 				continue
@@ -3253,12 +3305,11 @@ func checkDiskUnder(codex, under, tree string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	paths, err := filepath.Glob(filepath.Join(codex, "manifest", "*.yaml"))
+	catalog, err := listManifestCatalog(codex)
 	if err != nil {
-		return nil, fmt.Errorf("list manifests: %w", err)
+		return nil, err
 	}
-	sort.Strings(paths)
-	selected, warnings, problems, err := selectManifestsUnder(paths, underText, under, tree)
+	selected, warnings, problems, err := selectManifestsUnder(catalog, underText, under, tree)
 	if err != nil {
 		return nil, err
 	}
@@ -3269,7 +3320,7 @@ func checkDiskUnder(codex, under, tree string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return checkSelectedOutputs(codex, tree, codexInMain, selected, warnings, problems)
+	return checkSelectedOutputs(codex, tree, codexInMain, selected, warnings, problems, catalog)
 }
 
 // codexInMainTree reports a codex under the checked main tree and outside the --tree copy: lex absorb then changes the main tree's fragments.
@@ -3290,11 +3341,11 @@ func codexInMainTree(codex, under, tree string) (bool, error) {
 	return !inTree, err
 }
 
-func selectManifestsUnder(paths []string, underText, under, tree string) ([]*selectedManifestUnder, []string, []string, error) {
-	selected := make([]*selectedManifestUnder, 0, len(paths))
+func selectManifestsUnder(catalog *manifestCatalog, underText, under, tree string) ([]*selectedManifestUnder, []string, []string, error) {
+	selected := make([]*selectedManifestUnder, 0, len(catalog.paths))
 	var warnings, problems []string
-	for _, path := range paths {
-		m, manifestErr := readManifest(path)
+	for _, path := range catalog.paths {
+		m, manifestErr := catalog.read(path)
 		if manifestErr != nil && m.out == "" {
 			problems = append(problems, invalidManifestProblem(path, manifestErr))
 			continue
@@ -3341,7 +3392,7 @@ func selectManifestsUnder(paths []string, underText, under, tree string) ([]*sel
 	return selected, warnings, problems, nil
 }
 
-func checkSelectedOutputs(codex, tree string, codexInMain bool, selected []*selectedManifestUnder, warnings, problems []string) ([]string, error) {
+func checkSelectedOutputs(codex, tree string, codexInMain bool, selected []*selectedManifestUnder, warnings, problems []string, catalog *manifestCatalog) ([]string, error) {
 	hasOutput := false
 	for _, entry := range selected {
 		hasOutput = hasOutput || entry.output
@@ -3385,7 +3436,7 @@ func checkSelectedOutputs(codex, tree string, codexInMain bool, selected []*sele
 			continue
 		}
 		if !outputMatchesGenerated(data, body, entry.m.header, entry.path) {
-			problem, fileEdited := builtDiffers(codex, entry.m, entry.path, body, data)
+			problem, fileEdited := builtDiffers(codex, entry.m, entry.path, body, data, catalog)
 			if tree != "" {
 				problem = labelTreeOutputProblem(problem, entry.m.out, out)
 				if fileEdited {
@@ -3409,15 +3460,14 @@ func checkDisk(codex string) ([]string, error) {
 		return nil, err
 	}
 	checker.purpose = purposeEnabled
-	paths, err := filepath.Glob(filepath.Join(codex, "manifest", "*.yaml"))
+	catalog, err := listManifestCatalog(codex)
 	if err != nil {
-		return nil, fmt.Errorf("list manifests: %w", err)
+		return nil, err
 	}
-	sort.Strings(paths)
 	referenced := map[string]bool{}
 	var warnings, problems []string
-	for _, path := range paths {
-		m, err := readManifest(path)
+	for _, path := range catalog.paths {
+		m, err := catalog.read(path)
 		if err != nil {
 			problems = append(problems, invalidManifestProblem(path, err))
 			continue
@@ -3435,7 +3485,7 @@ func checkDisk(codex string) ([]string, error) {
 			continue
 		}
 		if !outputMatchesGenerated(data, body, m.header, path) {
-			problem, _ := builtDiffers(codex, m, path, body, data)
+			problem, _ := builtDiffers(codex, m, path, body, data, catalog)
 			problems = append(problems, problem)
 		}
 	}
@@ -3496,6 +3546,7 @@ func checkStaged(codex string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list manifests: %w", err)
 	}
+	catalog := newManifestCatalog(paths)
 	paths = mergePaths(paths, commit.indexedUnder(filepath.Join(codex, "manifest"), ".yaml"))
 	if err = commit.prefetch(paths); err != nil {
 		return nil, err
@@ -3503,7 +3554,7 @@ func checkStaged(codex string) ([]string, error) {
 	referenced := map[string]bool{}
 	var warnings, problems []string
 	for _, path := range paths {
-		w, p, err := checkStagedManifest(commit, codex, path, referenced, checker)
+		w, p, err := checkStagedManifest(commit, codex, path, referenced, checker, catalog)
 		if err != nil {
 			return nil, err
 		}
@@ -3519,7 +3570,7 @@ func checkStaged(codex string) ([]string, error) {
 
 // checkStagedManifest - проверка одного манифеста коммита; части каждого читаемого манифеста индекса
 // помечаются в referenced: манифест, удалённый в коммите, сюда не попадает, и его фрагменты станут сиротами.
-func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map[string]bool, checker *toolChecker) (warnings, problems []string, err error) {
+func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map[string]bool, checker *toolChecker, catalog *manifestCatalog) (warnings, problems []string, err error) {
 	raw, rerr := commit.read(path)
 	if rerr != nil {
 		if commit.has(path) {
@@ -3586,7 +3637,7 @@ func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map
 		problems = append(problems, commit.labelProblem(m.out+": index and disk differ — stage the whole file (git add) or restore it", m.out))
 	}
 	if !outputMatchesGenerated(staged, body, m.header, path) {
-		problems = append(problems, commit.stagedDiffers(codex, m, path, body, staged))
+		problems = append(problems, commit.stagedDiffers(codex, m, path, body, staged, catalog))
 		hints := unstagedFragmentHints(commit, fragPaths, indexed, m.out)
 		for i := range hints {
 			hints[i] = commit.labelProblem(hints[i], m.out)
@@ -3686,7 +3737,7 @@ func stagedOrphans(commit *stagedPaths, codex string, referenced map[string]bool
 }
 
 // builtDiffers explains why the manifest output m.out differs from its fragments; fileEdited reports advice that keeps an edit made in the file with lex absorb.
-func builtDiffers(codex string, m manifest, manifestPath string, want, actual []byte) (problem string, fileEdited bool) {
+func builtDiffers(codex string, m manifest, manifestPath string, want, actual []byte, catalog *manifestCatalog) (problem string, fileEdited bool) {
 	out := m.out
 	codexArg, fileArg := ShellQuoteArg(codex), ShellQuoteArg(out)
 	if owner, foreign := foreignOutputOwner(codex, actual); foreign {
@@ -3701,7 +3752,7 @@ func builtDiffers(codex string, m manifest, manifestPath string, want, actual []
 		return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`", out, codexArg), false
 	}
 	if fragmentsChanged && fileChanged {
-		sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual)
+		sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual, catalog)
 		if err != nil {
 			return fmt.Sprintf("%s: %v", out, err), false
 		}
@@ -3709,7 +3760,7 @@ func builtDiffers(codex string, m manifest, manifestPath string, want, actual []
 	}
 	var sharedFlag, sharedHint string
 	if _, err := os.Stat(manifestPath); err == nil {
-		sharedFlag, sharedHint, err = codexSharedForceHint(codex, m, want, actual)
+		sharedFlag, sharedHint, err = codexSharedForceHint(codex, m, want, actual, catalog)
 		if err != nil {
 			return fmt.Sprintf("%s: %v", out, err), false
 		}
@@ -4016,8 +4067,8 @@ func (s *stagedPaths) treePath(path string) string {
 }
 
 // stagedDiffers explains why the staged m.out differs from its fragments, naming the tree it was read from and, for a file edit, what a worktree changes.
-func (s *stagedPaths) stagedDiffers(codex string, m manifest, manifestPath string, want, staged []byte) string {
-	problem, fileEdited := builtDiffers(codex, m, manifestPath, want, staged)
+func (s *stagedPaths) stagedDiffers(codex string, m manifest, manifestPath string, want, staged []byte, catalog *manifestCatalog) string {
+	problem, fileEdited := builtDiffers(codex, m, manifestPath, want, staged, catalog)
 	problem = s.labelProblem(problem, m.out)
 	if fileEdited {
 		problem = s.stagedOutputAdvice(problem, codex, m.out)
@@ -4284,14 +4335,13 @@ func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 		}
 		home = current
 	}
-	paths, err := filepath.Glob(filepath.Join(codex, "manifest", "*.yaml"))
+	catalog, err := listManifestCatalog(codex)
 	if err != nil {
-		return nil, fmt.Errorf("list manifests: %w", err)
+		return nil, err
 	}
-	sort.Strings(paths)
 	var changed []StatusEntry
-	for _, p := range paths {
-		m, err := readManifest(p)
+	for _, p := range catalog.paths {
+		m, err := catalog.read(p)
 		if err != nil {
 			return nil, err
 		}
@@ -4318,7 +4368,7 @@ func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 		if outputMatchesGenerated(actual, want, m.header, p) {
 			continue
 		}
-		if err := recommendStatusCommands(&entry, codex, home, p, m, actual, want); err != nil {
+		if err := recommendStatusCommands(&entry, codex, home, p, m, actual, want, catalog); err != nil {
 			return nil, err
 		}
 		changed = append(changed, entry)
@@ -4337,8 +4387,8 @@ func statusFileChanged(actual []byte, manifestPath string, m manifest) bool {
 	return sha(source) != m.hash
 }
 
-func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath string, m manifest, actual, want []byte) error {
-	assessment, refreshErr := assessRefresh(codex, manifestKey(manifestPath), manifestPath, m, actual)
+func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath string, m manifest, actual, want []byte, catalog *manifestCatalog) error {
+	assessment, refreshErr := assessRefresh(codex, manifestKey(manifestPath), manifestPath, m, actual, catalog)
 	fragmentsChanged := fragmentsChangedSinceBuild(codex, manifestPath, m, want)
 	rel, err := filepath.Rel(home, m.out)
 	if err != nil {
@@ -4359,7 +4409,7 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 	entry.Command = "lex import --refresh --codex " + target
 	if fragmentsChanged {
 		entry.KeepFragments = "lex build --force --codex " + target
-		sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual)
+		sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual, catalog)
 		if err != nil {
 			return err
 		}
@@ -4375,7 +4425,7 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 	if m.header || refreshErr != nil || assessment.noChange {
 		entry.Command = "lex absorb --codex " + target
 	}
-	sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual)
+	sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual, catalog)
 	if err != nil {
 		return err
 	}
