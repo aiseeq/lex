@@ -1483,7 +1483,7 @@ func textAboveHeaderRefusal(selected string, m manifest, actual []byte) string {
 	}
 	if afterMark, ok := bytes.CutPrefix(actual, byteOrderMark); ok {
 		for _, form := range forms {
-			if bytes.HasPrefix(afterMark, form) {
+			if bytes.HasPrefix(afterMark[frontMatterOffset(afterMark):], form) {
 				return "a byte order mark (bytes EF BB BF) stands before the lex header, so the header is not recognised; delete the mark from the start of the file"
 			}
 		}

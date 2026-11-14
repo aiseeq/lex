@@ -52,3 +52,14 @@ func TestBOMBeforeHeaderRefused(t *testing.T) {
 		}
 	})
 }
+
+// A byte order mark before front matter hides the front matter and the header
+// after it; absorb names the mark rather than text above the header.
+func TestBOMBeforeFrontMatterNamesMark(t *testing.T) {
+	_, out, codex, _, data := builtWithHeader(t, "---\nname: a\n---\n# A\n\n- one\n")
+	mustWrite(t, out, append([]byte("\xef\xbb\xbf"), data...))
+	err := Absorb(codex, out, AbsorbOptions{})
+	if err == nil || !strings.Contains(err.Error(), "byte order mark") || strings.Contains(err.Error(), "text above lex header") {
+		t.Fatalf("absorb = %v, want the byte order mark refusal", err)
+	}
+}
