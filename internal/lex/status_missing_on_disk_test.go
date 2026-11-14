@@ -128,3 +128,34 @@ func runMissingDiskRestore(t *testing.T, root, path string) {
 		t.Fatalf("git checkout %s: %s: %v", rel, output, err)
 	}
 }
+
+func TestStatusNamesEveryMissingFragment(t *testing.T) {
+	root, codex, _, _ := sharedEditFixture(t)
+	t.Chdir(root)
+	initMissingDiskRepo(t, root)
+	manifestPath := filepath.Join(codex, "manifest", codexKey("docs/a.md")+".yaml")
+	m := mustReadManifest(t, manifestPath)
+	if len(m.parts) < 2 {
+		t.Fatalf("fixture manifest has %d parts; want at least 2", len(m.parts))
+	}
+	want := map[string]bool{}
+	for _, id := range m.parts[:2] {
+		fragment := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
+		if err := os.Remove(fragment); err != nil {
+			t.Fatal(err)
+		}
+		want[missingFragmentAdvice(fragment, id, manifestPath)] = true
+	}
+	entries, err := Status(codex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Manifest == manifestPath {
+			delete(want, entry.Problem)
+		}
+	}
+	if len(want) > 0 {
+		t.Fatalf("status entries = %#v; missing advice %v", entries, want)
+	}
+}

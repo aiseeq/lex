@@ -4623,16 +4623,16 @@ func statusFileProblem(err error) string {
 
 func Status(codex string) ([]StatusEntry, error) { return StatusWithHome(codex, "") }
 
-func statusMissingFragment(codex, manifestPath string, m manifest) (string, error) {
+// statusMissingFragments gives the restore advice for every fragment of m missing on disk; other stat errors are left to the build comparison.
+func statusMissingFragments(codex, manifestPath string, m manifest) []string {
+	var advice []string
 	for _, id := range m.parts {
 		fragment := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
 		if _, err := os.Stat(fragment); errors.Is(err, fs.ErrNotExist) {
-			return missingFragmentAdvice(fragment, id, manifestPath), nil
-		} else if err != nil {
-			return "", fmt.Errorf("stat fragment %s: %w", fragment, err)
+			advice = append(advice, missingFragmentAdvice(fragment, id, manifestPath))
 		}
 	}
-	return "", nil
+	return advice
 }
 
 func StatusWithHome(codex, home string) ([]StatusEntry, error) {
@@ -4661,12 +4661,10 @@ func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 		for _, id := range m.parts {
 			referenced[id] = true
 		}
-		advice, err := statusMissingFragment(codex, p, m)
-		if err != nil {
-			return nil, err
-		}
-		if advice != "" {
-			changed = append(changed, StatusEntry{Manifest: p, Output: m.out, Problem: advice})
+		if advice := statusMissingFragments(codex, p, m); len(advice) > 0 {
+			for _, problem := range advice {
+				changed = append(changed, StatusEntry{Manifest: p, Output: m.out, Problem: problem})
+			}
 			continue
 		}
 		entry := StatusEntry{Manifest: p, Output: m.out}
