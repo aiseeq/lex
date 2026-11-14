@@ -4903,7 +4903,7 @@ func TestBuildCheckNoHeaderRelativeCodex(t *testing.T) {
 	}
 }
 
-func TestStagedHintsFragmentDeletedOnDisk(t *testing.T) {
+func TestStagedMissingFragmentAdvice(t *testing.T) {
 	repo, codex, git := stagedRepo(t)
 	mustWrite(t, filepath.Join(repo, "a.md"), []byte("# A\nHACK\n"))
 	if err := git("add", "a.md"); err != nil {
@@ -4914,8 +4914,8 @@ func TestStagedHintsFragmentDeletedOnDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := checkIn(t, repo, codex)
-	if err == nil || !strings.Contains(err.Error(), frag+": fragment deleted on disk but not staged") {
-		t.Fatalf("expected a hint about the fragment deleted on disk, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), frag) || !strings.Contains(err.Error(), "restore it with") || !strings.Contains(err.Error(), "remove") || strings.Contains(err.Error(), "git add it together") {
+		t.Fatalf("expected advice to restore or remove the missing fragment without staging its deletion, got %v", err)
 	}
 }
 
