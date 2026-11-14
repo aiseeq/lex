@@ -3460,7 +3460,11 @@ func checkSelectedOutputs(codex, tree string, codexInMain bool, selected []*sele
 			continue
 		}
 		if !outputMatchesGenerated(data, body, entry.m.header, entry.path) {
-			problem, fileEdited := builtDiffers(codex, entry.m, entry.path, body, data, catalog)
+			var copyOf *outputCopy
+			if tree != "" && out != entry.m.out {
+				copyOf = &outputCopy{}
+			}
+			problem, fileEdited := builtDiffers(codex, entry.m, entry.path, body, data, catalog, copyOf)
 			if tree != "" {
 				problem = labelTreeOutputProblem(problem, entry.m.out, out)
 				if fileEdited {
@@ -3509,7 +3513,7 @@ func checkDisk(codex string) ([]string, error) {
 			continue
 		}
 		if !outputMatchesGenerated(data, body, m.header, path) {
-			problem, _ := builtDiffers(codex, m, path, body, data, catalog)
+			problem, _ := builtDiffers(codex, m, path, body, data, catalog, nil)
 			problems = append(problems, problem)
 		}
 	}
@@ -3760,8 +3764,38 @@ func stagedOrphans(commit *stagedPaths, codex string, referenced map[string]bool
 	return problems, warnings, nil
 }
 
-// builtDiffers explains why the manifest output m.out differs from its fragments; fileEdited reports advice that keeps an edit made in the file with lex absorb.
-func builtDiffers(codex string, m manifest, manifestPath string, want, actual []byte, catalog *manifestCatalog) (problem string, fileEdited bool) {
+// outputCopy is a worktree copy of a manifest output that check reads in place of the output; lex build writes only the output.
+type outputCopy struct {
+	staged bool // read from the index, so a fixed copy must be staged again
+}
+
+// foreignHeaderAction tells how to fix a worktree copy, actual, that carries a foreign header: lex build writes only the manifest output, so the copy's header line itself is fixed.
+func (c *outputCopy) foreignHeaderAction(actual, want []byte, m manifest, manifestPath string) string {
+	offset := frontMatterOffset(actual)
+	end := len(actual)
+	if i := bytes.IndexByte(actual[offset:], '\n'); i >= 0 {
+		end = offset + i + 1
+	}
+	line := bytes.Count(actual[:offset], []byte("\n")) + 1
+	var replacement []byte
+	action := fmt.Sprintf("if this codex owns the file, delete line %d, the foreign header, from this worktree copy", line)
+	if m.header {
+		replacement = generatedMarker(manifestPath)
+		action = fmt.Sprintf("if this codex owns the file, replace line %d, the foreign header, in this worktree copy with %q", line, strings.TrimSuffix(string(replacement), "\n"))
+	}
+	action += " (`lex build` writes " + strconv.Quote(m.out) + ", not the copy)"
+	if c.staged {
+		action += ", then git add the copy"
+	}
+	fixed := slices.Concat(actual[:offset], replacement, actual[end:])
+	if !outputMatchesGenerated(fixed, want, m.header, manifestPath) {
+		action += "; the copy has other edits too, so run the check again for them"
+	}
+	return action
+}
+
+// builtDiffers explains why the manifest output m.out differs from its fragments; copyOf is set when actual is a worktree copy of m.out. fileEdited reports advice that keeps an edit made in the file with lex absorb.
+func builtDiffers(codex string, m manifest, manifestPath string, want, actual []byte, catalog *manifestCatalog, copyOf *outputCopy) (problem string, fileEdited bool) {
 	out := m.out
 	codexArg, fileArg := ShellQuoteArg(codex), ShellQuoteArg(out)
 	if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
@@ -3770,7 +3804,11 @@ func builtDiffers(codex string, m manifest, manifestPath string, want, actual []
 		return fmt.Sprintf("%s: %v", out, err), false
 	}
 	if owner, foreign := foreignOutputOwner(codex, actual); foreign {
-		return fmt.Sprintf("%s: the file carries %s, so lex import and lex absorb refuse it — if this codex owns the file, run `lex build --force --codex %s %s` to rebuild it from the fragments (edits in the file are lost)", out, ForeignHeaderPhrase(owner), codexArg, fileArg), false
+		action := fmt.Sprintf("if this codex owns the file, run `lex build --force --codex %s %s` to rebuild it from the fragments (edits in the file are lost)", codexArg, fileArg)
+		if copyOf != nil {
+			action = copyOf.foreignHeaderAction(actual, want, m, manifestPath)
+		}
+		return fmt.Sprintf("%s: the file carries %s, so lex import and lex absorb refuse it — %s", out, ForeignHeaderPhrase(owner), action), false
 	}
 	if err := rejectTextAboveHeader(out, manifestPath, m, actual); err != nil {
 		return err.Error(), false
@@ -4092,7 +4130,11 @@ func (s *stagedPaths) treePath(path string) string {
 
 // stagedDiffers explains why the staged m.out differs from its fragments, naming the tree it was read from and, for a file edit, what a worktree changes.
 func (s *stagedPaths) stagedDiffers(codex string, m manifest, manifestPath string, want, staged []byte, catalog *manifestCatalog) string {
-	problem, fileEdited := builtDiffers(codex, m, manifestPath, want, staged, catalog)
+	var copyOf *outputCopy
+	if s.treePath(m.out) != m.out {
+		copyOf = &outputCopy{staged: true}
+	}
+	problem, fileEdited := builtDiffers(codex, m, manifestPath, want, staged, catalog, copyOf)
 	problem = s.labelProblem(problem, m.out)
 	if fileEdited {
 		problem = s.stagedOutputAdvice(problem, codex, m.out)
