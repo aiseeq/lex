@@ -1902,7 +1902,7 @@ func assertAbsorbedOutputEquals(t *testing.T, codex, out string, want []byte) {
 	}
 }
 
-func TestAbsorbMoveWithoutMergeRejectsInvalidInsertionPosition(t *testing.T) {
+func TestAbsorbMoveWithoutMergeRebuildsSameFile(t *testing.T) {
 	codex := t.TempDir()
 	out := filepath.Join(t.TempDir(), "move.md")
 	if err := importData(codex, out, "move.md", []byte("first\n\nsecond\n\nthird\n"), false); err != nil {
@@ -1911,24 +1911,12 @@ func TestAbsorbMoveWithoutMergeRejectsInvalidInsertionPosition(t *testing.T) {
 	if err := Build(codex, false); err != nil {
 		t.Fatal(err)
 	}
-	manifestPath := filepath.Join(codex, "manifest", codexKey("move.md")+".yaml")
-	beforeManifest, err := os.ReadFile(manifestPath)
-	if err != nil {
-		t.Fatal(err)
+	want := []byte("third\n\nfirst\n\nsecond\n")
+	mustWrite(t, out, want)
+	if err := Absorb(codex, out, AbsorbOptions{DraftDir: codex}); err != nil {
+		t.Fatalf("absorb: %v", err)
 	}
-	beforeFragments := treeBytes(t, filepath.Join(codex, "frag"))
-	mustWrite(t, out, []byte("third\n\nfirst\n\nsecond\n"))
-	err = Absorb(codex, out, AbsorbOptions{})
-	if err == nil || !strings.Contains(err.Error(), "invalid edited fragment line bounds") {
-		t.Fatalf("expected invalid edited fragment line bounds, got %v", err)
-	}
-	afterManifest, readErr := os.ReadFile(manifestPath)
-	if readErr != nil || !bytes.Equal(beforeManifest, afterManifest) {
-		t.Fatalf("manifest changed after refusal: %v", readErr)
-	}
-	if !bytes.Equal(beforeFragments, treeBytes(t, filepath.Join(codex, "frag"))) {
-		t.Fatal("fragments changed after refusal")
-	}
+	assertAbsorbedOutputEquals(t, codex, out, want)
 }
 
 func TestAbsorbAddAtEndOfSectionAndFile(t *testing.T) {

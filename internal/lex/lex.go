@@ -856,14 +856,18 @@ func linkMismatchInTree(link outputLink, state string) error {
 }
 
 func manifestBody(codex string, m manifest) ([]byte, error) {
-	enabled, err := diskPurposeSetting(codex)
+	return manifestBodyWithRead(codex, m, os.ReadFile)
+}
+
+func manifestBodyWithRead(codex string, m manifest, read func(string) ([]byte, error)) ([]byte, error) {
+	enabled, err := readPurposeSetting(codex, read)
 	if err != nil {
 		return nil, err
 	}
 	var out []byte
 	for i, id := range m.parts {
 		p := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
-		raw, e := os.ReadFile(p)
+		raw, e := read(p)
 		if e != nil {
 			return nil, fmt.Errorf("%s: %w", p, e)
 		}
@@ -1141,7 +1145,8 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 	if err != nil {
 		return err
 	}
-	built, err := manifestBody(codex, m)
+	read := os.ReadFile
+	built, err := manifestBodyWithRead(codex, m, read)
 	if err != nil {
 		return err
 	}
@@ -1165,15 +1170,29 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 	if bytes.Equal(actual, built) {
 		return nil
 	}
-	purposeEnabled, err := diskPurposeSetting(codex)
+	purposeEnabled, err := readPurposeSetting(codex, read)
 	if err != nil {
 		return err
 	}
-	built, actual, err = stripPurposeForAbsorb(codex, m, actual, purposeEnabled)
-	if err != nil {
-		return err
+	var purpose *purposeLayout
+	if purposeEnabled {
+		layout, err := readPurposeLayoutWithRead(codex, m, read)
+		if err != nil {
+			return err
+		}
+		_, err = layout.strip(actual, m.out)
+		if err != nil {
+			return err
+		}
+		built = layout.rendered
+		purpose = &layout
+	} else {
+		built, actual, err = stripPurposeForAbsorb(codex, m, actual, purposeEnabled)
+		if err != nil {
+			return err
+		}
 	}
-	return absorbEditedFragment(codex, paths, selected, m, built, actual, fileBytes, options)
+	return absorbEditedFragment(codex, paths, selected, m, built, actual, fileBytes, options, purpose)
 }
 func findOutputManifest(paths []string, target string) (string, manifest, error) {
 	for _, path := range paths {
@@ -1199,56 +1218,157 @@ type preparedFragmentEdit struct {
 	hash       string
 }
 
-func absorbEditedFragment(codex string, paths []string, selected string, m manifest, built, actual, fileBytes []byte, options AbsorbOptions) error {
+func absorbEditedFragment(codex string, paths []string, selected string, m manifest, built, actual, fileBytes []byte, options AbsorbOptions, purpose *purposeLayout) error {
 	oldLines, newLines := absorbLines(built), absorbLines(actual)
-	bounds, err := fragmentLineBounds(codex, m.parts)
+	var bounds [][2]int
+	var err error
+	if purpose != nil {
+		bounds = make([][2]int, len(m.parts))
+		for i, span := range purpose.spans {
+			bounds[i] = [2]int{span.start, span.end}
+		}
+	} else {
+		bounds, err = fragmentLineBounds(codex, m.parts)
+	}
 	if err != nil {
 		return err
 	}
 	hunks := absorbHunks(oldLines, newLines, bounds)
+	edits, additions, err := planAbsorbEdits(codex, paths, selected, m, bounds, oldLines, newLines, hunks, actual, options, purpose != nil)
+	if err != nil {
+		return err
+	}
+	plan, err := planAbsorbManifest(codex, paths, selected, m, bounds, edits, additions, newLines, fileBytes)
+	if err != nil {
+		return err
+	}
+	if err := verifyAbsorbPlan(codex, plan, actual, options.DraftDir, manifestKey(selected), m.out, fileBytes); err != nil {
+		return err
+	}
+	return writeAbsorbPlan(selected, plan)
+}
+
+type absorbPlan struct {
+	edits       []preparedFragmentEdit
+	fragments   map[int][]plannedFragment
+	manifest    manifest
+	removePaths []string
+}
+
+func planAbsorbEdits(codex string, paths []string, selected string, m manifest, bounds [][2]int, oldLines, newLines [][]byte, hunks []lineHunk, actual []byte, options AbsorbOptions, printedPurpose bool) ([]preparedFragmentEdit, map[int][]lineHunk, error) {
 	owners, deltas, additions, err := assignAbsorbHunks(bounds, m.parts, oldLines, hunks, options.DraftDir, manifestKey(selected), m.out, actual)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	if err := validateEditedPartOccurrences(codex, m.parts, owners); err != nil {
-		return err
+		return nil, nil, err
 	}
-	edits, err := prepareFragmentEdits(codex, m.parts, bounds, owners, deltas, newLines, additions)
+	edits, err := prepareFragmentEdits(codex, m.parts, bounds, owners, deltas, newLines, additions, printedPurpose)
+	if err != nil {
+		return nil, nil, err
+	}
+	remaining := append([]string(nil), m.parts...)
+	for _, edit := range edits {
+		body, err := fragmentBody(edit.updated)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", edit.path, err)
+		}
+		if len(body) == 0 {
+			remaining = slices.DeleteFunc(remaining, func(id string) bool { return id == edit.part })
+		}
+	}
+	if err := validateAbsorbedInsertionBounds(codex, m.out, bounds, additions, remaining, m.parts); err != nil {
+		return nil, nil, err
+	}
+	editable, err := nonemptyEditedOwners(owners, m.parts, edits)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := validateSharedEdits(paths, m.parts, editable, options.Shared); err != nil {
+		return nil, nil, err
+	}
+	return edits, additions, nil
+}
+
+func planAbsorbManifest(codex string, paths []string, selected string, m manifest, bounds [][2]int, edits []preparedFragmentEdit, additions map[int][]lineHunk, newLines [][]byte, fileBytes []byte) (absorbPlan, error) {
+	updated, removePaths, err := applyAbsorbedEdits(paths, m, edits, fileBytes)
+	if err != nil {
+		return absorbPlan{}, err
+	}
+	fragments, err := planInsertedFragments(codex, selected, m.parts, additions, newLines)
+	if err != nil {
+		return absorbPlan{}, err
+	}
+	positions := slices.Sorted(maps.Keys(fragments))
+	inserted := 0
+	for _, position := range positions {
+		at := survivingInsertionIndex(position, bounds, m.parts, updated.parts) + inserted
+		ids := make([]string, 0, len(fragments[position]))
+		for _, fragment := range fragments[position] {
+			ids = append(ids, fragment.id)
+			updated.fragmentHashes[fragment.id] = sha(fragment.raw)
+		}
+		updated.parts = append(updated.parts[:at], append(ids, updated.parts[at:]...)...)
+		inserted += len(ids)
+	}
+	return absorbPlan{edits: edits, fragments: fragments, manifest: updated, removePaths: removePaths}, nil
+}
+
+func verifyAbsorbPlan(codex string, plan absorbPlan, actual []byte, draftDir, key, output string, fileBytes []byte) error {
+	overrides := make(map[string][]byte, len(plan.edits)+len(plan.fragments))
+	for _, edit := range plan.edits {
+		overrides[edit.path] = edit.updated
+	}
+	for _, fragments := range plan.fragments {
+		for _, fragment := range fragments {
+			overrides[fragment.path] = fragment.raw
+		}
+	}
+	read := func(path string) ([]byte, error) {
+		if data, ok := overrides[path]; ok {
+			return data, nil
+		}
+		return os.ReadFile(path)
+	}
+	rebuilt, err := manifestBodyWithRead(codex, plan.manifest, read)
 	if err != nil {
 		return err
 	}
-	remainingParts := append([]string(nil), m.parts...)
-	for _, edit := range edits {
+	if bytes.Equal(rebuilt, actual) {
+		return nil
+	}
+	line, fileLine, rebuiltLine := firstDiff(actual, rebuilt)
+	reason := fmt.Sprintf("absorbed fragments would not rebuild this file: first differing line %d: file %q, rebuilt %q", line, trunc(fileLine), trunc(rebuiltLine))
+	return writeAbsorbDraft(draftDir, key, output, fileBytes, reason)
+}
+
+func writeAbsorbPlan(selected string, plan absorbPlan) error {
+	for _, edit := range plan.edits {
 		body, err := fragmentBody(edit.updated)
 		if err != nil {
 			return fmt.Errorf("%s: %w", edit.path, err)
 		}
 		if len(body) == 0 {
-			remainingParts = slices.DeleteFunc(remainingParts, func(id string) bool { return id == edit.part })
+			continue
+		}
+		if err := os.WriteFile(edit.path, edit.updated, fileMode); err != nil {
+			return fmt.Errorf("%s: write fragment: %w", edit.path, err)
 		}
 	}
-	if err := validateAbsorbedInsertionBounds(codex, m.out, bounds, additions, remainingParts, m.parts); err != nil {
+	for _, fragments := range plan.fragments {
+		for _, fragment := range fragments {
+			if err := os.MkdirAll(filepath.Dir(fragment.path), directoryMode); err != nil {
+				return fmt.Errorf("%s: create fragment directory: %w", filepath.Dir(fragment.path), err)
+			}
+			if err := os.WriteFile(fragment.path, fragment.raw, fileMode); err != nil {
+				return fmt.Errorf("%s: write new fragment: %w", fragment.path, err)
+			}
+		}
+	}
+	if err := writeManifest(selected, plan.manifest, plan.manifest.links); err != nil {
 		return err
 	}
-	editableOwners, err := nonemptyEditedOwners(owners, m.parts, edits)
-	if err != nil {
-		return err
-	}
-	if err := validateSharedEdits(paths, m.parts, editableOwners, options.Shared); err != nil {
-		return err
-	}
-	updatedManifest, removePaths, err := applyAbsorbedEdits(paths, m, edits, fileBytes)
-	if err != nil {
-		return err
-	}
-	updatedManifest, err = addAbsorbedFragments(codex, selected, m.parts, bounds, additions, newLines, updatedManifest)
-	if err != nil {
-		return err
-	}
-	if err := writeManifest(selected, updatedManifest, updatedManifest.links); err != nil {
-		return err
-	}
-	return removeAbsorbedFragments(removePaths)
+	return removeAbsorbedFragments(plan.removePaths)
 }
 
 func assignAbsorbHunks(bounds [][2]int, parts []string, oldLines [][]byte, hunks []lineHunk, draftDir, key, output string, actual []byte) ([]int, []int, map[int][]lineHunk, error) {
@@ -1258,7 +1378,7 @@ func assignAbsorbHunks(bounds [][2]int, parts []string, oldLines [][]byte, hunks
 	for _, hunk := range hunks {
 		assignment, ok := assignAbsorbHunk(bounds, oldLines, hunk)
 		if !ok {
-			return nil, nil, nil, writeAbsorbDraft(draftDir, key, output, actual)
+			return nil, nil, nil, writeAbsorbDraft(draftDir, key, output, actual, "boundary conflict")
 		}
 		for _, owner := range assignment.owners {
 			owners = appendUniqueInt(owners, owner)
@@ -1287,7 +1407,11 @@ func assignAbsorbHunk(bounds [][2]int, oldLines [][]byte, hunk lineHunk) (absorb
 	if hunk.oldStart == hunk.oldEnd && hunk.newEnd > hunk.newStart {
 		if part, tail, ok := insertionBoundaryPart(bounds, oldLines, hunk.oldStart); ok {
 			hunk.newEnd += tail
-			return absorbHunkAssignment{deltas: map[int]int{part: -tail}, additionPosition: bounds[part][1], addition: &hunk}, true
+			position := bounds[part][1]
+			if hunk.oldStart == 0 {
+				position = bounds[part][0]
+			}
+			return absorbHunkAssignment{deltas: map[int]int{part: -tail}, additionPosition: position, addition: &hunk}, true
 		}
 	}
 	if hunk.newEnd > hunk.newStart {
@@ -1364,41 +1488,10 @@ func applyAbsorbedEdits(paths []string, m manifest, edits []preparedFragmentEdit
 			}
 			continue
 		}
-		if err := os.WriteFile(edit.path, edit.updated, fileMode); err != nil {
-			return manifest{}, nil, fmt.Errorf("%s: write fragment: %w", edit.path, err)
-		}
 		updated.fragmentHashes[edit.part] = edit.hash
 	}
 	updated.builtHash = sha(fileBytes)
 	return updated, removePaths, nil
-}
-
-func addAbsorbedFragments(codex, selected string, originalParts []string, bounds [][2]int, additions map[int][]lineHunk, newLines [][]byte, updated manifest) (manifest, error) {
-	if err := validateAbsorbedInsertionBounds(codex, updated.out, bounds, additions, updated.parts, originalParts); err != nil {
-		return manifest{}, err
-	}
-	newParts, err := appendInsertedFragments(codex, selected, originalParts, additions, newLines)
-	if err != nil {
-		return manifest{}, err
-	}
-	positions := slices.Sorted(maps.Keys(newParts))
-	inserted := 0
-	for _, position := range positions {
-		at := survivingInsertionIndex(position, bounds, originalParts, updated.parts)
-		at += inserted
-		ids := newParts[position]
-		updated.parts = append(updated.parts[:at], append(ids, updated.parts[at:]...)...)
-		inserted += len(ids)
-		for _, id := range ids {
-			path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
-			raw, err := os.ReadFile(path)
-			if err != nil {
-				return manifest{}, fmt.Errorf("%s: read new fragment: %w", path, err)
-			}
-			updated.fragmentHashes[id] = sha(raw)
-		}
-	}
-	return updated, nil
 }
 
 func validateAbsorbedInsertionBounds(codex, output string, bounds [][2]int, additions map[int][]lineHunk, remainingParts, originalParts []string) error {
@@ -1514,8 +1607,13 @@ func deletedFragmentOwners(bounds [][2]int, oldLines [][]byte, hunk lineHunk) []
 	return fullyDeleted
 }
 
-func appendInsertedFragments(codex, selected string, parts []string, additions map[int][]lineHunk, newLines [][]byte) (map[int][]string, error) {
-	created := make(map[int][]string)
+type plannedFragment struct {
+	id, path string
+	raw      []byte
+}
+
+func planInsertedFragments(codex, selected string, parts []string, additions map[int][]lineHunk, newLines [][]byte) (map[int][]plannedFragment, error) {
+	created := make(map[int][]plannedFragment)
 	counts := make(map[string]int)
 	for _, part := range parts {
 		base := filepath.Base(part)
@@ -1540,14 +1638,8 @@ func appendInsertedFragments(codex, selected string, parts []string, additions m
 				counts[label]++
 				id := fmt.Sprintf("%s/%s-%d", manifestKey(selected), label, counts[label])
 				path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
-				if err := os.MkdirAll(filepath.Dir(path), directoryMode); err != nil {
-					return nil, fmt.Errorf("%s: create fragment directory: %w", filepath.Dir(path), err)
-				}
 				raw := append([]byte("---\nid: "+id+"\nцель: \nоснование: \nснять_когда: \n---\n"), unit...)
-				if err := os.WriteFile(path, raw, fileMode); err != nil {
-					return nil, fmt.Errorf("%s: write new fragment: %w", path, err)
-				}
-				created[position] = append(created[position], id)
+				created[position] = append(created[position], plannedFragment{id: id, path: path, raw: raw})
 			}
 		}
 	}
@@ -1620,15 +1712,17 @@ func validateSharedEdits(paths []string, parts []string, owners []int, shared bo
 	return nil
 }
 
-func prepareFragmentEdits(codex string, parts []string, bounds [][2]int, owners, deltas []int, newLines [][]byte, additions map[int][]lineHunk) ([]preparedFragmentEdit, error) {
+func prepareFragmentEdits(codex string, parts []string, bounds [][2]int, owners, deltas []int, newLines [][]byte, additions map[int][]lineHunk, printedPurpose bool) ([]preparedFragmentEdit, error) {
 	edits := make([]preparedFragmentEdit, 0)
 	lineShift := 0
+	appliedAdditions := make(map[int]bool, len(additions))
 	for i, part := range parts {
 		for position, hunks := range additions {
-			if position <= bounds[i][0] {
+			if position <= bounds[i][0] && !appliedAdditions[position] {
 				for _, hunk := range hunks {
 					lineShift += hunk.newEnd - hunk.newStart
 				}
+				appliedAdditions[position] = true
 			}
 		}
 		if !slices.Contains(owners, i) {
@@ -1648,11 +1742,25 @@ func prepareFragmentEdits(codex string, parts []string, bounds [][2]int, owners,
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
-		updated := replaceFragmentBody(raw, body, bytes.Join(newLines[lo:hi], nil))
+		replacement := bytes.Join(newLines[lo:hi], nil)
+		if printedPurpose {
+			replacement = stripPurposeLines(replacement)
+		}
+		updated := absorbReplaceFragmentBody(raw, body, replacement)
 		edits = append(edits, preparedFragmentEdit{part: part, path: path, updated: updated, hash: sha(updated)})
 		lineShift += deltas[i]
 	}
 	return edits, nil
+}
+
+func stripPurposeLines(data []byte) []byte {
+	var result []byte
+	for _, line := range absorbLines(data) {
+		if !bytes.HasPrefix(line, []byte(purposeMarker)) {
+			result = append(result, line...)
+		}
+	}
+	return result
 }
 
 // changedLineHunks groups edits separated by at least one unchanged line.
@@ -1819,6 +1927,9 @@ func replaceFragmentBody(file, old, repl []byte) []byte {
 	}
 	return append(header, repl...)
 }
+
+var absorbReplaceFragmentBody = replaceFragmentBody
+
 func fragmentIsDraft(fragment []byte) bool {
 	if !bytes.HasPrefix(fragment, []byte("---\n")) {
 		return false
@@ -1835,9 +1946,9 @@ func fragmentIsDraft(fragment []byte) bool {
 	}
 	return false
 }
-func writeAbsorbDraft(dir, key, output string, data []byte) error {
+func writeAbsorbDraft(dir, key, output string, data []byte, reason string) error {
 	if dir == "" {
-		return fmt.Errorf("%s: boundary conflict; draft directory must be provided", output)
+		return fmt.Errorf("%s: %s; draft directory must be provided", output, reason)
 	}
 	if err := os.MkdirAll(filepath.Join(dir, "drafts"), directoryMode); err != nil {
 		return fmt.Errorf("create draft directory: %w", err)
@@ -1847,7 +1958,7 @@ func writeAbsorbDraft(dir, key, output string, data []byte) error {
 	if err := os.WriteFile(p, data, fileMode); err != nil {
 		return fmt.Errorf("%s: write draft: %w", p, err)
 	}
-	return fmt.Errorf("%s: boundary conflict; draft saved to %s", output, p)
+	return fmt.Errorf("%s: %s; draft saved to %s", output, reason, p)
 }
 
 type CheckOptions struct {

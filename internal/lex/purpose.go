@@ -175,11 +175,15 @@ func rejectStalePurposes(codex string, m manifest, actual []byte) error {
 }
 
 func readPurposeLayout(codex string, m manifest) (purposeLayout, error) {
+	return readPurposeLayoutWithRead(codex, m, os.ReadFile)
+}
+
+func readPurposeLayoutWithRead(codex string, m manifest, read func(string) ([]byte, error)) (purposeLayout, error) {
 	layout := purposeLayout{owners: map[int]string{}}
 	line := 0
 	for _, id := range m.parts {
 		path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
-		raw, err := os.ReadFile(path)
+		raw, err := read(path)
 		if err != nil {
 			return layout, fmt.Errorf("%s: %w", path, err)
 		}
