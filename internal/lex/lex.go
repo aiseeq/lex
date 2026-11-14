@@ -2724,6 +2724,8 @@ func (catalog *manifestCatalog) findOutputManifest(target string) (string, manif
 	return "", manifest{}, fmt.Errorf("%s: no manifest output", target)
 }
 
+// buildIndex indexes only manifests already in items; manifestsUsing reads
+// every path first, so the index it builds covers the whole catalog.
 func (catalog *manifestCatalog) buildIndex() {
 	if !catalog.indexed {
 		for _, path := range catalog.paths {
