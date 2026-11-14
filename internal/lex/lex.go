@@ -48,6 +48,8 @@ const (
 	fileMode      = 0644
 )
 
+var errInvalidEditedFragmentLineBounds = errors.New("invalid edited fragment line bounds")
+
 func snapshotCodexFiles(codex string) (map[string][]byte, error) {
 	files := make(map[string][]byte)
 	err := filepath.WalkDir(codex, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -1326,7 +1328,7 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 	}
 	fragmentsChanged := fragmentsChangedSinceBuild(codex, selected, m, built)
 	if fragmentsChanged && !outputMatchesGenerated(actual, built, m.header, selected) && !options.Force {
-		return forceRefusal(codex, target, selected, paths, actual, m)
+		return forceRefusal(codex, target, selected, paths, built, actual, m)
 	}
 	fileBytes := actual
 	if m.header {
@@ -1496,7 +1498,13 @@ func absorbEditedFragment(codex string, paths []string, selected string, m manif
 	if err := verifyAbsorbPlan(codex, plan, actual, options.DraftDir, manifestKey(selected), m.out, fileBytes); err != nil {
 		return err
 	}
-	return writeAbsorbPlan(selected, plan)
+	if err := writeAbsorbPlan(selected, plan); err != nil {
+		return err
+	}
+	if options.Force && options.Shared {
+		warnSharedOutputsToRebuild(codex, paths, selected, edits)
+	}
+	return nil
 }
 
 // absorbPurePartMove recognizes a file made solely by reordering complete,
@@ -2221,7 +2229,7 @@ func prepareFragmentEdits(codex string, parts []string, bounds [][2]int, owners,
 		hi := lo + (bounds[i][1] - bounds[i][0]) + deltas[i]
 		path := filepath.Join(codex, "frag", filepath.FromSlash(part)+".md")
 		if lo < 0 || hi < lo || hi > len(newLines) {
-			return nil, fmt.Errorf("%s: invalid edited fragment line bounds", path)
+			return nil, fmt.Errorf("%s: %w", path, errInvalidEditedFragmentLineBounds)
 		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -2405,9 +2413,9 @@ func manifestsUsing(paths []string, part string) ([]string, error) {
 }
 
 // forceRefusal says why absorb refuses a file whose fragments changed since the build, with the commands that keep either side.
-func forceRefusal(codex, target, selected string, paths []string, actual []byte, m manifest) error {
+func forceRefusal(codex, target, selected string, paths []string, built, actual []byte, m manifest) error {
 	codexArg, fileArg := ShellQuoteArg(codex), ShellQuoteArg(target)
-	sharedFlag, sharedHint, hintErr := sharedForceHint(paths, m.out, m.parts)
+	sharedFlag, sharedHint, hintErr := sharedForceHint(paths, codex, m.out, m.parts, built, actual)
 	if hintErr != nil {
 		return hintErr
 	}
@@ -2426,10 +2434,12 @@ func forceRefusal(codex, target, selected string, paths []string, actual []byte,
 	return fmt.Errorf("%s: %s; run `lex build --codex %s %s` to carry fragment edits into the file, or `lex absorb --force%s --codex %s %s` to discard them%s", target, conflict, codexArg, fileArg, sharedFlag, codexArg, fileArg, sharedHint)
 }
 
-// sharedForceHint returns " --shared" and the sentence naming the other outputs
-// when a part of the output is in another manifest too, so that the absorb
-// --force command named beside it runs as written; both are empty otherwise.
-func sharedForceHint(paths []string, selected string, parts []string) (string, string, error) {
+func sharedHintPlanRefusal(err error) bool {
+	var draftErr *absorbDraftError
+	return errors.As(err, &draftErr) && draftErr.reason == "boundary conflict" || errors.Is(err, errInvalidEditedFragmentLineBounds)
+}
+
+func sharedForceHintForParts(paths []string, selected string, parts []string) (string, string, error) {
 	var others []string
 	seen := make(map[string]bool)
 	for _, part := range parts {
@@ -2451,14 +2461,104 @@ func sharedForceHint(paths []string, selected string, parts []string) (string, s
 	return " --shared", "; --shared lets this file replace the fragments shared with " + strings.Join(others, ", ") + ": their edits there that are not in this file are lost", nil
 }
 
-// codexSharedForceHint is sharedForceHint over the manifests of codex.
-func codexSharedForceHint(codex string, m manifest) (string, string, error) {
+// sharedForceHint returns shared advice only when the edits would change a shared part.
+func sharedForceHint(paths []string, codex, selected string, parts []string, built, actual []byte) (string, string, error) {
+	manifestPath, manifest, err := findOutputManifest(paths, selected)
+	if err != nil {
+		return "", "", err
+	}
+	if manifest.header {
+		built = withoutGeneratedHeader(built, manifestPath)
+		actual = withoutGeneratedHeader(actual, manifestPath)
+	}
+	bounds, err := fragmentLineBounds(codex, parts)
+	if err != nil {
+		return "", "", err
+	}
+	oldLines, newLines := absorbLines(built), absorbLines(actual)
+	hunks := absorbHunks(oldLines, newLines, bounds)
+	owners, deltas, additions, err := assignAbsorbHunks(bounds, parts, oldLines, hunks, "", manifestKey(selected), selected, actual)
+	if err != nil {
+		if sharedHintPlanRefusal(err) {
+			return "", "", nil
+		}
+		return "", "", err
+	}
+	edits, err := prepareFragmentEdits(codex, parts, bounds, owners, deltas, newLines, additions, false)
+	if err != nil {
+		if sharedHintPlanRefusal(err) {
+			return "", "", nil
+		}
+		return "", "", err
+	}
+	owners, err = nonemptyEditedOwners(owners, parts, edits)
+	if err != nil {
+		return "", "", err
+	}
+	affected, err := firstSharedEdit(paths, parts, owners)
+	if err != nil {
+		return "", "", err
+	}
+	var others []string
+	for _, output := range affected {
+		if output != selected {
+			others = append(others, output)
+		}
+	}
+	sort.Strings(others)
+	if len(others) == 0 {
+		return "", "", nil
+	}
+	return " --shared", "; --shared lets this file replace the fragments shared with " + strings.Join(others, ", ") + ": their edits there that are not in this file are lost", nil
+}
+
+// codexSharedForceHint applies sharedForceHint to the current output and codex manifests.
+func codexSharedForceHint(codex string, m manifest, built, actual []byte) (string, string, error) {
 	paths, err := filepath.Glob(filepath.Join(codex, "manifest", "*.yaml"))
 	if err != nil {
 		return "", "", fmt.Errorf("list manifests: %w", err)
 	}
 	sort.Strings(paths)
-	return sharedForceHint(paths, m.out, m.parts)
+	return sharedForceHint(paths, codex, m.out, m.parts, built, actual)
+}
+
+func warnSharedOutputsToRebuild(codex string, paths []string, selected string, edits []preparedFragmentEdit) {
+	seen := make(map[string]bool)
+	for _, edit := range edits {
+		outputs, err := manifestsUsing(paths, edit.part)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %s: cannot list outputs using shared fragment %s: %v\n", selected, edit.part, err)
+			return
+		}
+		for _, output := range outputs {
+			if output == selected || seen[output] {
+				continue
+			}
+			seen[output] = true
+			manifestPath, m, err := findOutputManifest(paths, output)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: %s: cannot read manifest for shared output: %v\n", output, err)
+				continue
+			}
+			want, err := manifestBody(codex, m)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: %s: cannot build shared output for comparison: %v\n", output, err)
+				continue
+			}
+			if m.header {
+				want = generatedHeader(manifestPath, want)
+			}
+			actual, err := os.ReadFile(output)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: %s: cannot read shared output: %v\n", output, err)
+				continue
+			}
+			if outputMatchesGenerated(actual, want, m.header, manifestPath) {
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "warning: %s: its shared part no longer matches the fragments this absorb wrote; `lex build --codex %s %s` replaces that part with the absorbed text\n", output, ShellQuoteArg(codex), ShellQuoteArg(output))
+		}
+	}
 }
 
 func manifestKey(path string) string { return strings.TrimSuffix(filepath.Base(path), ".yaml") }
@@ -2492,9 +2592,22 @@ func fragmentIsDraft(fragment []byte) bool {
 	}
 	return false
 }
+
+type absorbDraftError struct {
+	output, reason, path string
+	draftDirMissing      bool
+}
+
+func (e *absorbDraftError) Error() string {
+	if e.draftDirMissing {
+		return fmt.Sprintf("%s: %s; draft directory must be provided", e.output, e.reason)
+	}
+	return fmt.Sprintf("%s: %s; draft saved to %s", e.output, e.reason, e.path)
+}
+
 func writeAbsorbDraft(dir, key, output string, data []byte, reason string) error {
 	if dir == "" {
-		return fmt.Errorf("%s: %s; draft directory must be provided", output, reason)
+		return &absorbDraftError{output: output, reason: reason, draftDirMissing: true}
 	}
 	if err := os.MkdirAll(filepath.Join(dir, "drafts"), directoryMode); err != nil {
 		return fmt.Errorf("create draft directory: %w", err)
@@ -2504,7 +2617,7 @@ func writeAbsorbDraft(dir, key, output string, data []byte, reason string) error
 	if err := os.WriteFile(p, data, fileMode); err != nil {
 		return fmt.Errorf("%s: write draft: %w", p, err)
 	}
-	return fmt.Errorf("%s: %s; draft saved to %s", output, reason, p)
+	return &absorbDraftError{output: output, reason: reason, path: p}
 }
 
 type CheckOptions struct {
@@ -3076,7 +3189,18 @@ func builtDiffers(out, codex string, m manifest, manifestPath string, want, actu
 		return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`", out, codexArg), false
 	}
 	if fragmentsChanged && fileChanged {
-		sharedFlag, sharedHint, err := codexSharedForceHint(codex, m)
+		var sharedFlag, sharedHint string
+		var err error
+		if filepath.Clean(out) == filepath.Clean(m.out) {
+			sharedFlag, sharedHint, err = codexSharedForceHint(codex, m, want, actual)
+		} else {
+			paths, globErr := filepath.Glob(filepath.Join(codex, "manifest", "*.yaml"))
+			if globErr != nil {
+				return fmt.Sprintf("%s: list manifests: %v", out, globErr), false
+			}
+			sort.Strings(paths)
+			sharedFlag, sharedHint, err = sharedForceHintForParts(paths, m.out, m.parts)
+		}
 		if err != nil {
 			return fmt.Sprintf("%s: %v", out, err), false
 		}
@@ -3706,7 +3830,7 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 	entry.Command = "lex import --refresh --codex " + target
 	if fragmentsChanged {
 		entry.KeepFragments = "lex build --force --codex " + target
-		sharedFlag, sharedHint, err := codexSharedForceHint(codex, m)
+		sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual)
 		if err != nil {
 			return err
 		}
