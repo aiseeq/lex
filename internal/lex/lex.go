@@ -2234,7 +2234,7 @@ func sharedForceHint(paths []string, selected string, parts []string) (string, s
 	if len(others) == 0 {
 		return "", "", nil
 	}
-	return " --shared", "; --shared also rewrites the shared fragment that builds " + strings.Join(others, ", ") + ": their edits to it not in this file are lost", nil
+	return " --shared", "; --shared lets this file replace the fragments shared with " + strings.Join(others, ", ") + ": their edits there that are not in this file are lost", nil
 }
 
 // codexSharedForceHint is sharedForceHint over the manifests of codex.

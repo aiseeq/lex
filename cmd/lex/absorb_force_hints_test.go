@@ -118,6 +118,18 @@ func commandFromHint(hint string) ([]string, error) {
 	return args[1:], nil
 }
 
+// sharedHintIsLast fails unless message names other after its commands: no command or " to …" purpose follows the name.
+func sharedHintIsLast(t *testing.T, message, other string) {
+	t.Helper()
+	i := strings.LastIndex(message, other)
+	if i < 0 {
+		t.Fatalf("message does not name shared output %q: %q", other, message)
+	}
+	if after := message[i+len(other):]; strings.Contains(after, "`") || strings.Contains(after, " to ") || strings.Contains(after, "lex ") {
+		t.Fatalf("shared output %q is named before the end of the advice: %q", other, message)
+	}
+}
+
 // sharedForceScenario follows the hint of source ("absorb", "status" or "check") for a file whose --force would change a shared fragment.
 func sharedForceScenario(t *testing.T, source string) {
 	t.Helper()
@@ -136,8 +148,10 @@ func sharedForceScenario(t *testing.T, source string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(outB, bytes.Replace(b, []byte("more"), []byte("MORE"), 1), 0644); err != nil {
-		t.Fatal(err)
+	if source != "absorb-unchanged" {
+		if err := os.WriteFile(outB, bytes.Replace(b, []byte("more"), []byte("MORE"), 1), 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var commandText string
 	if source == "status" {
@@ -153,9 +167,7 @@ func sharedForceScenario(t *testing.T, source string) {
 					t.Fatalf("status line for B has no `run … to keep the file's text` command: %q", line)
 				}
 				commandText = line[start+4 : end]
-				if !strings.Contains(line[end:], outA) {
-					t.Fatalf("status line does not name shared output A %q: %q", outA, line)
-				}
+				sharedHintIsLast(t, line, outA)
 			}
 		}
 	} else {
@@ -177,9 +189,7 @@ func sharedForceScenario(t *testing.T, source string) {
 				commandText = text[start : start+end]
 			}
 		}
-		if !strings.Contains(text[strings.LastIndex(text, "`")+1:], outA) {
-			t.Fatalf("%s does not name shared output A %q after its last command: %v", source, outA, err)
-		}
+		sharedHintIsLast(t, text, outA)
 	}
 	args, err := commandFromHint(commandText)
 	if err != nil {
@@ -196,6 +206,11 @@ func sharedForceScenario(t *testing.T, source string) {
 func TestAbsorbForceSharedHintRuns(t *testing.T) { sharedForceScenario(t, "absorb") }
 func TestStatusForceSharedHintRuns(t *testing.T) { sharedForceScenario(t, "status") }
 func TestCheckForceSharedHintRuns(t *testing.T)  { sharedForceScenario(t, "check") }
+
+// The refusal for a file without its own edit offers --force --shared to discard the shared fragment edit.
+func TestAbsorbForceSharedHintRunsForUnchangedFile(t *testing.T) {
+	sharedForceScenario(t, "absorb-unchanged")
+}
 
 // noBuiltHashFixture builds one output and drops built_sha256 from its manifest; it returns the codex, the output and its first fragment.
 func noBuiltHashFixture(t *testing.T) (string, string, string) {
