@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
@@ -71,6 +72,7 @@ type textRefSettings struct {
 	TextRefs struct {
 		Decisions  string             `json:"decisions"`
 		Exceptions []textRefException `json:"exceptions"`
+		External   []string           `json:"external"`
 	} `json:"text_refs"`
 }
 
@@ -82,26 +84,99 @@ func checkTextRefs(codex string, options CheckOptions) ([]string, error) {
 		return nil, err
 	}
 	findings, unused := applyTextRefExceptions(corpus, findTextRefsWithSkills(corpus, journal, skills), exceptions, filepath.Dir(codex))
+	externalCorpus, externalPaths, missingExternal, err := loadExternalTextCorpus(codex, options.OutputsUnder, corpus)
+	if err != nil {
+		return nil, err
+	}
+	combined := cloneTextCorpus(corpus)
+	combinedOld := cloneTextCorpus(old)
+	for path, data := range externalCorpus {
+		combined[path], combinedOld[path] = data, data
+	}
+	if len(externalCorpus) > 0 {
+		for _, finding := range findTextRefsWithExcluded(combined, journal, skills, externalPaths) {
+			if externalPaths[finding.path] {
+				findings = append(findings, finding)
+			}
+		}
+	}
 	baseline := map[textRefKey]bool{}
 	if old != nil {
 		oldFindings, _ := applyTextRefExceptions(old, findTextRefsWithSkills(old, journal, skills), exceptions, filepath.Dir(codex))
 		for _, f := range oldFindings {
 			baseline[refKey(f)] = true
 		}
+		if len(externalCorpus) > 0 {
+			for _, f := range findTextRefsWithExcluded(combinedOld, journal, skills, externalPaths) {
+				if externalPaths[f.path] {
+					baseline[refKey(f)] = true
+				}
+			}
+		}
 	}
-	warnings := append([]string(nil), unused...)
+	warnings := append(append([]string(nil), unused...), missingExternal...)
 	var problems []string
 	for _, f := range findings {
 		if baseline[refKey(f)] {
 			continue
 		}
-		if f.kind == 1 {
+		if f.kind == 1 && !externalPaths[f.path] {
 			problems = append(problems, f.String())
 		} else {
 			warnings = append(warnings, f.String())
 		}
 	}
 	return finishCheck(warnings, problems)
+}
+
+// loadExternalTextCorpus reads the files listed in text_refs.external. A file
+// that is already in the corpus stays a corpus file, and a file that cannot be
+// read is a warning: neither changes the exit code of lex check.
+func loadExternalTextCorpus(codex, outputsUnder string, corpus textCorpus) (textCorpus, map[string]bool, []string, error) {
+	external := textCorpus{}
+	paths := map[string]bool{}
+	var warnings []string
+	if outputsUnder != "" {
+		return external, paths, warnings, nil
+	}
+	settings, err := (&corpusReader{}).textRefSettings(codex)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	warned := map[string]bool{}
+	warn := func(line string) {
+		if !warned[line] {
+			warned[line] = true
+			warnings = append(warnings, line)
+		}
+	}
+	for _, configured := range settings.TextRefs.External {
+		if strings.HasPrefix(configured, "~/") {
+			if _, homeErr := os.UserHomeDir(); homeErr != nil {
+				warn(configured + ": external file for text references not read: " + homeErr.Error())
+				continue
+			}
+		}
+		path := resolveRefTarget(codex, configured)
+		if _, inCorpus := corpus[path]; inCorpus || paths[path] {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			warn(path + ": external file for text references not found")
+			continue
+		}
+		if err != nil {
+			var pathErr *fs.PathError
+			if errors.As(err, &pathErr) {
+				err = pathErr.Err
+			}
+			warn(path + ": external file for text references not read: " + err.Error())
+			continue
+		}
+		external[path], paths[path] = data, true
+	}
+	return external, paths, warnings, nil
 }
 
 type textRefKey struct {
@@ -148,7 +223,32 @@ func (r *corpusReader) textRefSettings(codex string) (textRefSettings, error) {
 		}
 		seen[key] = true
 	}
+	for _, external := range settings.TextRefs.External {
+		if !filepath.IsAbs(external) && !strings.HasPrefix(external, "~/") {
+			return textRefSettings{}, fmt.Errorf("%s: text_refs external path must be absolute or start with ~/: %q", path, external)
+		}
+	}
 	return settings, nil
+}
+
+// resolveRefTarget resolves a file reference written in source: an absolute
+// path as is, ~/ from the home directory, anything else next to source.
+func resolveRefTarget(source, ref string) string {
+	if strings.HasPrefix(ref, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Clean(filepath.Join(home, ref[2:]))
+		}
+	}
+	if filepath.IsAbs(ref) {
+		return filepath.Clean(ref)
+	}
+	return filepath.Join(filepath.Dir(source), ref)
+}
+
+func cloneTextCorpus(corpus textCorpus) textCorpus {
+	clone := make(textCorpus, len(corpus))
+	maps.Copy(clone, corpus)
+	return clone
 }
 
 func exceptionKey(exception textRefException) string {
@@ -370,6 +470,7 @@ func loadTextCorpus(codex string, o CheckOptions) (textCorpus, textCorpus, strin
 
 type refScanner struct {
 	corpus         textCorpus
+	external       map[string]bool
 	slugs          map[string]bool
 	skills         map[string]bool
 	hasJournal     bool
@@ -531,7 +632,7 @@ func (s *refScanner) skillSections() {
 	for _, match := range skillSection.FindAllStringSubmatch(s.line, -1) {
 		name := strings.TrimSuffix(match[1], "/")
 		target := filepath.Join(filepath.Dir(filepath.Dir(s.path)), name, "SKILL.md")
-		if body, ok := s.corpus[target]; ok && !sectionExists(string(body), match[2], s.line) {
+		if body, ok := s.corpus[target]; ok && !s.external[target] && !sectionExists(string(body), match[2], s.line) {
 			s.add(2, "нет раздела или пункта «"+match[2]+"» в "+target)
 		}
 	}
@@ -553,10 +654,10 @@ func (s *refScanner) quotedSections() {
 		}
 		target := s.path
 		if ref := nearestFileRef(s.line, indexes[2]); ref != "" {
-			target = filepath.Join(filepath.Dir(s.path), ref)
+			target = resolveRefTarget(s.path, ref)
 		}
-		if body, ok := s.corpus[target]; ok && !sectionExists(string(body), title, s.line) {
-			if !sectionExistsInSiblingFiles(s.corpus, filepath.Dir(s.path), target, title) {
+		if body, ok := s.corpus[target]; ok && !s.external[target] && !sectionExists(string(body), title, s.line) {
+			if !sectionExistsInSiblingFiles(s.corpus, filepath.Dir(s.path), target, title, s.external) {
 				s.add(2, "нет раздела или пункта «"+title+"» в "+target)
 			}
 		}
@@ -578,9 +679,9 @@ func nearestFileRef(line string, position int) string {
 	return closest
 }
 
-func sectionExistsInSiblingFiles(corpus textCorpus, dir, except, title string) bool {
+func sectionExistsInSiblingFiles(corpus textCorpus, dir, except, title string, external map[string]bool) bool {
 	for path, body := range corpus {
-		if filepath.Dir(path) == dir && path != except && sectionExists(string(body), title, "") {
+		if filepath.Dir(path) == dir && path != except && !external[path] && sectionExists(string(body), title, "") {
 			return true
 		}
 	}
@@ -594,9 +695,9 @@ func (s *refScanner) registerSections() {
 		if strings.Contains(strings.ToLower(match[0]), "из раздела") {
 			target = filepath.Join(filepath.Dir(s.path), "SKILL.md")
 		} else if len(refs) > 0 {
-			target = filepath.Join(filepath.Dir(s.path), refs[0][1])
+			target = resolveRefTarget(s.path, refs[0][1])
 		}
-		if body, ok := s.corpus[target]; ok {
+		if body, ok := s.corpus[target]; ok && !s.external[target] {
 			text := strings.ToLower(strings.ReplaceAll(string(body), "ё", "е"))
 			needle := strings.ToLower(strings.ReplaceAll(match[1], "ё", "е"))
 			if target == s.path {
@@ -622,7 +723,7 @@ func (s *refScanner) files() {
 		if strings.Contains(match[1], "://") {
 			continue
 		}
-		target := filepath.Join(filepath.Dir(s.path), match[1])
+		target := resolveRefTarget(s.path, match[1])
 		if s.missingFile(target) {
 			s.add(3, "нет файла "+target)
 			continue
@@ -633,7 +734,7 @@ func (s *refScanner) files() {
 		}
 	}
 	for _, match := range nearbyRef.FindAllStringSubmatch(s.line, -1) {
-		target := filepath.Join(filepath.Dir(s.path), match[1])
+		target := resolveRefTarget(s.path, match[1])
 		if s.missingFile(target) {
 			s.add(3, "нет файла "+target)
 		}
@@ -750,7 +851,7 @@ func (s *refScanner) stepAvailable(step string) bool {
 	if match := skillNameRef.FindStringSubmatch(s.line); match != nil {
 		target := filepath.Join(filepath.Dir(filepath.Dir(s.path)), match[1], "SKILL.md")
 		body, ok := s.corpus[target]
-		if !ok {
+		if !ok || s.external[target] {
 			return true
 		}
 		return stepExistsInBody(string(body), step)
@@ -759,14 +860,14 @@ func (s *refScanner) stepAvailable(step string) bool {
 		return true
 	}
 	if strings.IndexFunc(step, func(r rune) bool { return r >= 'a' && r <= 'z' }) >= 0 {
-		return stepExistsAnywhere(s.corpus, step)
+		return stepExistsAnywhere(s.corpus, step, s.external)
 	}
 	return false
 }
 
-func stepExistsAnywhere(corpus textCorpus, step string) bool {
-	for _, body := range corpus {
-		if stepExistsInBody(string(body), step) {
+func stepExistsAnywhere(corpus textCorpus, step string, excluded map[string]bool) bool {
+	for path, body := range corpus {
+		if !excluded[path] && stepExistsInBody(string(body), step) {
 			return true
 		}
 	}
@@ -826,7 +927,11 @@ func findTextRefs(corpus textCorpus, journal string) []textRefFinding {
 // findTextRefsWithSkills also treats names in skills as known skills: with
 // --outputs-under the corpus holds one project, not the codex's skills.
 func findTextRefsWithSkills(corpus textCorpus, journal string, skills map[string]bool) []textRefFinding {
-	s := refScanner{corpus: corpus, slugs: map[string]bool{}, skills: skills}
+	return findTextRefsWithExcluded(corpus, journal, skills, nil)
+}
+
+func findTextRefsWithExcluded(corpus textCorpus, journal string, skills map[string]bool, external map[string]bool) []textRefFinding {
+	s := refScanner{corpus: corpus, external: external, slugs: map[string]bool{}, skills: skills}
 	journalData, hasJournal := corpus[journal]
 	s.hasJournal = hasJournal
 	for _, m := range decisionHead.FindAllStringSubmatch(string(journalData), -1) {
@@ -927,12 +1032,18 @@ func orphanSkillFinding(path, skill string, data []byte) textRefFinding {
 func sectionExists(body, title, referenceLine string) bool {
 	norm := func(s string) string { return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(s), "ё", "е")) }
 	title = norm(title)
+	inFence := false
 	for line := range strings.SplitSeq(body, "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~") {
+			inFence = !inFence
+		}
 		if line == referenceLine {
 			continue
 		}
-		t := strings.TrimSpace(line)
-		if strings.HasPrefix(t, "#") || strings.HasPrefix(t, "-") || listItem.MatchString(t) {
+		// A plain line equal to the title is a heading without # (the shared CLAUDE.md form), not a line of a code block.
+		plainHeading := !inFence && norm(t) == title
+		if plainHeading || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "-") || listItem.MatchString(t) {
 			if strings.Contains(norm(t), title) {
 				return true
 			}
