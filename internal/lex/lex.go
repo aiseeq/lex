@@ -1316,17 +1316,13 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 	if err != nil {
 		return err
 	}
-	read := os.ReadFile
-	built, err := manifestBodyWithRead(codex, m, read)
-	if err != nil {
+	if err := rejectTextAboveHeader(file, selected, m, actual); err != nil {
 		return err
 	}
-	if m.header {
-		built = generatedHeader(selected, built)
-	}
-	fragmentsChanged := fragmentsChangedSinceBuild(codex, selected, m, built)
-	if fragmentsChanged && !outputMatchesGenerated(actual, built, m.header, selected) && !options.Force {
-		return forceRefusal(codex, target, selected, paths, actual, m)
+	read := os.ReadFile
+	built, err := absorbBuiltBody(codex, target, selected, paths, m, actual, options)
+	if err != nil {
+		return err
 	}
 	fileBytes := actual
 	if m.header {
@@ -1363,6 +1359,39 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 		}
 	}
 	return warnAfterAbsorb(absorbEditedFragment(codex, paths, selected, m, built, actual, fileBytes, options, purpose), target, warnSnapshot)
+}
+
+func absorbBuiltBody(codex, target, selected string, paths []string, m manifest, actual []byte, options AbsorbOptions) ([]byte, error) {
+	built, err := manifestBodyWithRead(codex, m, os.ReadFile)
+	if err != nil {
+		return nil, err
+	}
+	if m.header {
+		built = generatedHeader(selected, built)
+	}
+	if fragmentsChangedSinceBuild(codex, selected, m, built) && !outputMatchesGenerated(actual, built, m.header, selected) && !options.Force {
+		return nil, forceRefusal(codex, target, selected, paths, actual, m)
+	}
+	return built, nil
+}
+
+func rejectTextAboveHeader(file, selected string, m manifest, actual []byte) error {
+	if m.header {
+		for _, marker := range generatedMarkerForms(selected) {
+			if index := bytes.Index(actual, marker); index > 0 && actual[index-1] == '\n' {
+				prefix := actual[:index]
+				lines := bytes.SplitAfter(prefix, []byte("\n"))
+				frontLength := 0
+				for _, line := range lines[:frontMatterLength(lines)] {
+					frontLength += len(line)
+				}
+				if frontLength != len(prefix) {
+					return fmt.Errorf("%s: text above lex header; move the text below the header", file)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func readPlainPartLayout(codex string, m manifest) (purposeLayout, error) {
