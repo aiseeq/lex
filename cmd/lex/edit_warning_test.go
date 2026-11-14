@@ -173,7 +173,7 @@ func TestEditWarningNamesGitState(t *testing.T) {
 	if !strings.Contains(stderr, "git: staged and modified") {
 		t.Errorf("warning does not name staged and modified output: %q", stderr)
 	}
-	if !strings.Contains(stderr, "fragments: uncommitted changes in ") {
+	if !strings.Contains(stderr, "fragments: uncommitted changes in 1 file)") {
 		t.Errorf("warning does not name fragment changes: %q", stderr)
 	}
 }
@@ -215,7 +215,7 @@ func TestEditWarningNamesEachGitState(t *testing.T) {
 		}, "git: untracked; fragments: committed)"},
 		{"ignored", func(t *testing.T, root, output string) {
 			gitCommand(t, root, "init", "-q")
-			if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("instructions.md\n"), 0644); err != nil {
+			if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("/instructions.md\n"), 0644); err != nil {
 				t.Fatal(err)
 			}
 			commitAll(t, root)
@@ -237,6 +237,37 @@ func TestEditWarningNamesEachGitState(t *testing.T) {
 			commitAll(t, root)
 			edit(t, output)
 		}, "git: modified; fragments: committed)"},
+		{"untracked hidden by config", func(t *testing.T, root, output string) {
+			gitCommand(t, root, "init", "-q")
+			gitCommand(t, root, "config", "status.showUntrackedFiles", "no")
+			gitCommand(t, root, append(append([]string{}, config...), "add", "codex")...)
+			gitCommand(t, root, append(append([]string{}, config...), "commit", "-qm", "fixture")...)
+			edit(t, output)
+		}, "git: untracked; fragments: committed)"},
+		{"ignored codex", func(t *testing.T, root, output string) {
+			gitCommand(t, root, "init", "-q")
+			if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("codex/\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			commitAll(t, root)
+			edit(t, output)
+		}, "git: modified; fragments: uncommitted changes in "},
+		{"inherited git environment", func(t *testing.T, root, output string) {
+			gitCommand(t, root, "init", "-q")
+			commitAll(t, root)
+			other := t.TempDir()
+			gitCommand(t, other, "init", "-q")
+			t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
+			t.Setenv("GIT_WORK_TREE", other)
+			t.Setenv("GIT_INDEX_FILE", filepath.Join(other, "missing-index"))
+			edit(t, output)
+		}, "git: modified; fragments: committed)"},
+		{"git not in PATH", func(t *testing.T, root, output string) {
+			gitCommand(t, root, "init", "-q")
+			commitAll(t, root)
+			edit(t, output)
+			t.Setenv("PATH", t.TempDir())
+		}, "git: unknown (git not found); fragments: unknown (git not found))"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -315,5 +346,19 @@ func TestAbsorbForceWithUneditedFileDoesNotWarn(t *testing.T) {
 	}
 	if !bytes.Contains(built, []byte("Original rule.")) {
 		t.Errorf("absorb --force changed the file: %q", built)
+	}
+}
+
+func TestAbsorbRefusalDoesNotWarn(t *testing.T) {
+	_, codex, output := warningFixture(t)
+	if err := os.WriteFile(output, []byte("# Changed\nChanged rule.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err := captureRunWithStderr(t, "absorb", "--codex", codex, output)
+	if err == nil {
+		t.Fatalf("absorb of an edit across two fragments was not refused: %q", stderr)
+	}
+	if strings.Contains(stderr, "warning:") || strings.Contains(err.Error(), "warning:") {
+		t.Errorf("refused absorb warned: %q, %v", stderr, err)
 	}
 }

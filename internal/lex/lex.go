@@ -713,21 +713,32 @@ type editWarningSnapshot struct {
 	partsGit string
 }
 
-func gitStatus(cwd string, ignored bool, paths ...string) (string, string, error) {
+// gitLocalEnv lists the variables of `git rev-parse --local-env-vars`: inherited from a hook or another repository, they would make git report the state of the wrong repository.
+var gitLocalEnv = map[string]bool{"GIT_ALTERNATE_OBJECT_DIRECTORIES": true, "GIT_CONFIG": true, "GIT_CONFIG_PARAMETERS": true, "GIT_CONFIG_COUNT": true, "GIT_OBJECT_DIRECTORY": true, "GIT_DIR": true, "GIT_WORK_TREE": true, "GIT_IMPLICIT_WORK_TREE": true, "GIT_GRAFT_FILE": true, "GIT_INDEX_FILE": true, "GIT_NO_REPLACE_OBJECTS": true, "GIT_REPLACE_REF_BASE": true, "GIT_PREFIX": true, "GIT_SHALLOW_FILE": true, "GIT_COMMON_DIR": true}
+
+// gitStatusEnv runs git for the warning in the repository around the path, with English messages and without taking the index lock another session may need.
+func gitStatusEnv() []string {
+	env := []string{"LC_ALL=C", "GIT_OPTIONAL_LOCKS=0"}
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if !gitLocalEnv[key] && key != "LC_ALL" && key != "GIT_OPTIONAL_LOCKS" {
+			env = append(env, entry)
+		}
+	}
+	return env
+}
+
+func gitStatus(cwd string, paths ...string) (string, string, error) {
 	git, err := exec.LookPath("git")
 	if errors.Is(err, exec.ErrNotFound) {
-		return "", "not in a git repository", nil
+		return "", "", errors.New("git not found")
 	}
 	if err != nil {
 		return "", "", fmt.Errorf("find git: %w", err)
 	}
-	args := []string{"-C", cwd, "status", "--porcelain=v1"}
-	if ignored {
-		args = append(args, "--ignored")
-	}
-	args = append(args, "--")
-	args = append(args, paths...)
+	args := append([]string{"-C", cwd, "status", "--porcelain=v1", "--untracked-files=all", "--ignored", "--"}, paths...)
 	cmd := exec.Command(git, args...)
+	cmd.Env = gitStatusEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -748,7 +759,7 @@ func gitStatus(cwd string, ignored bool, paths ...string) (string, string, error
 
 func fileGitState(path string) string {
 	dir, base := filepath.Dir(path), filepath.Base(path)
-	output, absentRepo, err := gitStatus(dir, true, base)
+	output, absentRepo, err := gitStatus(dir, base)
 	if absentRepo != "" {
 		return absentRepo
 	}
@@ -784,7 +795,7 @@ func fragmentsGitState(codex string, m manifest, manifestPath string) string {
 		paths = append(paths, filepath.Join(codex, "frag", filepath.FromSlash(id)+".md"))
 	}
 	paths = append(paths, manifestPath)
-	output, absentRepo, err := gitStatus(codex, false, paths...)
+	output, absentRepo, err := gitStatus(codex, paths...)
 	if absentRepo != "" {
 		return absentRepo
 	}
@@ -794,7 +805,10 @@ func fragmentsGitState(codex string, m manifest, manifestPath string) string {
 	if output == "" {
 		return "committed"
 	}
-	return fmt.Sprintf("uncommitted changes in %d files", strings.Count(strings.TrimSuffix(output, "\n"), "\n")+1)
+	if files := strings.Count(strings.TrimSuffix(output, "\n"), "\n") + 1; files > 1 {
+		return fmt.Sprintf("uncommitted changes in %d files", files)
+	}
+	return "uncommitted changes in 1 file"
 }
 
 func snapshotEditWarning(output, codex, manifestPath string, m manifest) *editWarningSnapshot {
