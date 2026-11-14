@@ -83,3 +83,22 @@ func TestAdviceNamesHeaderLine(t *testing.T) {
 		})
 	}
 }
+
+// TestAbsorbRefusesHeaderCopyBelowQuote covers a deleted header with a quoted copy above a full
+// copy: the quote must not hide the full copy, or absorb would store a bare header line in a fragment.
+func TestAbsorbRefusesHeaderCopyBelowQuote(t *testing.T) {
+	_, out, codex, _, data := builtWithHeader(t, "# A\n\n- one\n")
+	header, body, _ := bytes.Cut(data, []byte("\n"))
+	edited := append([]byte("> "), header...)
+	edited = append(append(edited, '\n'), body...)
+	edited = append(append(edited, header...), '\n')
+	mustWrite(t, out, edited)
+	before := treeBytes(t, codex)
+	err := Absorb(codex, out, AbsorbOptions{})
+	if err == nil || !strings.Contains(err.Error(), "text above lex header (found at line 5)") {
+		t.Fatalf("absorb error = %v, want the refusal naming line 5", err)
+	}
+	if after := treeBytes(t, codex); !bytes.Equal(after, before) {
+		t.Fatal("refused absorb changed the codex")
+	}
+}
