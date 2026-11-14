@@ -35,12 +35,13 @@ func (e *manifestError) Error() string { return e.path + ": " + e.err.Error() }
 func (e *manifestError) Unwrap() error { return e.err }
 
 type manifest struct {
-	out, hash      string
-	parts          []string
-	links          []outputLink
-	fragmentHashes map[string]string
-	builtHash      string
-	header         bool
+	out, hash             string
+	parts                 []string
+	links                 []outputLink
+	fragmentHashes        map[string]string
+	builtHash             string
+	header                bool
+	refreshDetachedShared bool
 }
 
 const (
@@ -159,11 +160,12 @@ func validateRefresh(codex, topic string, m manifest) error {
 }
 
 type refreshAssessment struct {
-	sourceData     []byte
-	cleanData      []byte
-	purposeEnabled bool
-	noChange       bool
-	keepShared     []string
+	sourceData      []byte
+	cleanData       []byte
+	purposeEnabled  bool
+	noChange        bool
+	keepShared      []string
+	detachedOutputs []string
 }
 
 func refreshRemovedSharedOutputs(codex, topic string, m manifest, cleanData []byte, purposeEnabled bool, catalog *manifestCatalog) ([]string, []string, error) {
@@ -187,13 +189,15 @@ func refreshRemovedSharedOutputs(codex, topic string, m manifest, cleanData []by
 	for _, header := range headers {
 		bodyHashes[header.id] = header.bodyHash
 	}
-	newBodyHashes := make(map[string]bool, len(units))
-	for _, unit := range units {
-		newBodyHashes[sha(unit)] = true
+	newBodyByID := make(map[string]bool, len(units))
+	for i, id := range newParts {
+		if i < len(units) && sha(units[i]) == bodyHashes[id] {
+			newBodyByID[id] = true
+		}
 	}
 	var otherOutputs, sharedParts []string
 	for _, id := range m.parts {
-		if newPartSet[id] && newBodyHashes[bodyHashes[id]] {
+		if newPartSet[id] && newBodyByID[id] {
 			continue
 		}
 		outputs, err := catalog.manifestsUsing(id)
@@ -260,6 +264,7 @@ func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byt
 				return assessment, fmt.Errorf("%s: refresh would remove a fragment still used by %s; run `lex absorb --codex %s %s`", m.out, strings.Join(otherOutputs, ", "), ShellQuoteArg(codex), ShellQuoteArg(m.out))
 			}
 			assessment.keepShared = sharedParts
+			assessment.detachedOutputs = otherOutputs
 		}
 	}
 	if !assessment.noChange && validationErr != nil {
@@ -336,6 +341,46 @@ func importData(codex, abs, rel string, data []byte, refresh bool) error {
 	return importDataWithLinks(codex, abs, rel, data, refresh, nil)
 }
 
+type preparedRefreshImport struct {
+	assessment       refreshAssessment
+	preservedHeaders []preservedFragmentHeader
+	units            [][]byte
+	sourceData       []byte
+}
+
+func prepareRefreshImport(codex, topic, manifestPath string, old manifest, data []byte, catalog *manifestCatalog) (preparedRefreshImport, error) {
+	prepared := preparedRefreshImport{}
+	assessment, err := assessRefresh(codex, topic, manifestPath, old, data, catalog)
+	if err != nil {
+		return prepared, err
+	}
+	prepared.assessment = assessment
+	prepared.sourceData = assessment.sourceData
+	if assessment.noChange {
+		return prepared, nil
+	}
+	prepared.preservedHeaders, err = readFragmentHeaders(codex, old.parts)
+	if err != nil {
+		return prepared, err
+	}
+	prepared.sourceData = append([]byte(nil), assessment.sourceData...)
+	if assessment.purposeEnabled {
+		prepared.units, err = refreshPurposeUnits(prepared.sourceData, prepared.preservedHeaders)
+		if err != nil {
+			return prepared, err
+		}
+	} else {
+		prepared.units = split(assessment.cleanData)
+	}
+	if err := relocateRefreshSharedFragments(codex, old.out, assessment.keepShared, catalog); err != nil {
+		return prepared, err
+	}
+	if err := removeOldFragmentsExcept(codex, old.parts, assessment.keepShared, os.Remove); err != nil {
+		return prepared, err
+	}
+	return prepared, nil
+}
+
 func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, links []outputLink) error {
 	diskHash := sha(data)
 	key := codexKey(filepath.ToSlash(rel))
@@ -346,20 +391,26 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 	var units [][]byte
 	var sourceData []byte
 	var assessment refreshAssessment
+	var catalog *manifestCatalog
 	old, err := readManifest(manifestPath)
 	if err == nil {
 		if old.out != abs {
 			return fmt.Errorf("%s: manifest key already points to %s", manifestPath, old.out)
 		}
 		if refresh {
-			catalog, catalogErr := listManifestCatalog(codex)
+			var catalogErr error
+			catalog, catalogErr = listManifestCatalog(codex)
 			if catalogErr != nil {
 				return catalogErr
 			}
-			assessment, err = assessRefresh(codex, topic, manifestPath, old, data, catalog)
-			if err != nil {
-				return err
+			prepared, prepareErr := prepareRefreshImport(codex, topic, manifestPath, old, data, catalog)
+			if prepareErr != nil {
+				return prepareErr
 			}
+			assessment = prepared.assessment
+			preservedHeaders = prepared.preservedHeaders
+			units = prepared.units
+			sourceData = prepared.sourceData
 			data = assessment.sourceData
 		}
 		mergedLinks := uniqueLinks(append(old.links, links...))
@@ -377,22 +428,7 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 		if !refresh {
 			return fmt.Errorf("%s: source changed; re-import with --refresh", abs)
 		}
-		preservedHeaders, err = readFragmentHeaders(codex, old.parts)
-		if err != nil {
-			return err
-		}
-		sourceData = append([]byte(nil), data...)
-		if assessment.purposeEnabled {
-			units, err = refreshPurposeUnits(data, preservedHeaders)
-			if err != nil {
-				return err
-			}
-		} else {
-			units = split(assessment.cleanData)
-		}
-		if err := removeOldFragmentsExcept(codex, old.parts, assessment.keepShared, os.Remove); err != nil {
-			return err
-		}
+
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("%s: %w", manifestPath, err)
 	}
@@ -409,10 +445,16 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 	if sourceData == nil {
 		sourceData = data
 	}
-	m := manifest{out: abs, hash: sha(sourceData), builtHash: diskHash, parts: parts, fragmentHashes: hashes, header: old.header}
+	m := manifest{out: abs, hash: sha(sourceData), builtHash: diskHash, parts: parts, fragmentHashes: hashes, header: old.header, refreshDetachedShared: old.refreshDetachedShared || len(assessment.detachedOutputs) > 0}
 	allLinks := uniqueLinks(append(old.links, links...))
 	m.links = allLinks
-	return finishImport(codex, manifestPath, m, allLinks, topic, units, preservedHeaders)
+	if err := finishImport(codex, manifestPath, m, allLinks, topic, units, preservedHeaders); err != nil {
+		return err
+	}
+	if len(assessment.detachedOutputs) > 0 {
+		fmt.Fprintf(os.Stderr, "warning: %s no longer uses the shared fragment(s), still used by %s\n", abs, strings.Join(assessment.detachedOutputs, ", "))
+	}
+	return nil
 }
 
 func finishImport(codex, manifestPath string, m manifest, links []outputLink, topic string, units [][]byte, preservedHeaders []preservedFragmentHeader) error {
@@ -480,6 +522,10 @@ func matchImportedHeadersReserved(topic string, units [][]byte, preservedHeaders
 			oldCounts[name[:end]]++
 		}
 	}
+	usedIDs := make(map[string]bool, len(reservedIDs)+len(units))
+	for id := range reservedIDs {
+		usedIDs[id] = true
+	}
 	for i, unit := range units {
 		label := slug(unit)
 		if label == "" {
@@ -487,10 +533,13 @@ func matchImportedHeadersReserved(topic string, units [][]byte, preservedHeaders
 		}
 		counts[label]++
 		labels[i] = label
-		ids[i] = fmt.Sprintf("%s/%s-%d", topic, label, counts[label])
-		for suffix := counts[label] + 1; reservedIDs[ids[i]]; suffix++ {
+		suffix := counts[label]
+		ids[i] = fmt.Sprintf("%s/%s-%d", topic, label, suffix)
+		for usedIDs[ids[i]] {
+			suffix++
 			ids[i] = fmt.Sprintf("%s/%s-%d", topic, label, suffix)
 		}
+		usedIDs[ids[i]] = true
 	}
 	matched := make([]int, len(units))
 	for i, unit := range units {
@@ -554,6 +603,9 @@ func fragmentHeaderHasValues(header []byte) bool {
 func writeManifest(manifestPath string, m manifest, links []outputLink) error {
 	var content strings.Builder
 	content.WriteString("out: " + strconv.Quote(m.out) + "\nsource_sha256: " + m.hash + "\nbuilt_sha256: " + m.builtHash + "\nheader: " + strconv.FormatBool(m.header) + "\n")
+	if m.refreshDetachedShared {
+		content.WriteString("refresh_detached_shared: true\n")
+	}
 	if len(links) > 0 {
 		content.WriteString("links:\n")
 		for _, link := range uniqueLinks(links) {
@@ -603,6 +655,97 @@ func uniqueLinks(links []outputLink) []outputLink {
 		out = append(out, outputLink{path: path, target: byPath[path]})
 	}
 	return out
+}
+
+func relocateRefreshSharedFragments(codex, currentOutput string, parts []string, catalog *manifestCatalog) error {
+	for _, id := range parts {
+		outputs, err := catalog.manifestsUsing(id)
+		if err != nil {
+			return err
+		}
+		owners := make([]string, 0, len(outputs))
+		for _, output := range outputs {
+			if output != currentOutput {
+				owners = append(owners, output)
+			}
+		}
+		sort.Strings(owners)
+		if len(owners) == 0 {
+			continue
+		}
+		ownerPath, _, err := catalog.findOutputManifest(owners[0])
+		if err != nil {
+			return err
+		}
+		newID, err := refreshSharedFragmentID(codex, manifestKey(ownerPath), id)
+		if err != nil {
+			return err
+		}
+		if newID == id {
+			continue
+		}
+		oldPath := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
+		newPath := filepath.Join(codex, "frag", filepath.FromSlash(newID)+".md")
+		raw, err := os.ReadFile(oldPath)
+		if err != nil {
+			return fmt.Errorf("%s: read shared fragment for refresh: %w", oldPath, err)
+		}
+		body, err := fragmentBody(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", oldPath, err)
+		}
+		newRaw := append(replaceHeaderID(fragmentHeader(raw), newID), body...)
+		if err := os.MkdirAll(filepath.Dir(newPath), directoryMode); err != nil {
+			return fmt.Errorf("%s: create fragment directory: %w", newPath, err)
+		}
+		if err := os.WriteFile(newPath, newRaw, fileMode); err != nil {
+			return fmt.Errorf("%s: %w", newPath, err)
+		}
+		for _, output := range owners {
+			path, m, err := catalog.findOutputManifest(output)
+			if err != nil {
+				return err
+			}
+			for i, part := range m.parts {
+				if part == id {
+					m.parts[i] = newID
+				}
+			}
+			delete(m.fragmentHashes, id)
+			m.fragmentHashes[newID] = sha(newRaw)
+			if err := writeManifest(path, m, m.links); err != nil {
+				return err
+			}
+			catalog.update(path, m)
+		}
+		if err := os.Remove(oldPath); err != nil {
+			return fmt.Errorf("%s: remove relocated fragment: %w", oldPath, err)
+		}
+
+	}
+	return nil
+}
+
+func refreshSharedFragmentID(codex, topic, id string) (string, error) {
+	name := id[strings.LastIndex(id, "/")+1:]
+	separator := strings.LastIndex(name, "-")
+	if separator < 0 {
+		return "", fmt.Errorf("%s: shared fragment id has no numeric suffix", id)
+	}
+	label := name[:separator]
+	for suffix := 1; ; suffix++ {
+		candidate := fmt.Sprintf("%s/%s-%d", topic, label, suffix)
+		if candidate == id {
+			return candidate, nil
+		}
+		path := filepath.Join(codex, "frag", filepath.FromSlash(candidate)+".md")
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			return candidate, nil
+		} else if err != nil {
+			return "", fmt.Errorf("%s: check shared fragment destination: %w", path, err)
+		}
+
+	}
 }
 
 func removeOldFragments(codex string, parts []string, remove func(string) error) error {
@@ -3887,10 +4030,14 @@ func builtDiffers(codex string, m manifest, manifestPath string, want, actual []
 		return fmt.Sprintf("%s: %v", out, err), false
 	}
 	assessment, refreshErr := assessRefresh(codex, manifestKey(manifestPath), manifestPath, m, actual, catalog)
-	if refreshErr == nil && len(assessment.keepShared) > 0 {
-		return fmt.Sprintf("%s: built output differs from its fragments — run `lex import --refresh --codex %s %s`", out, codexArg, fileArg), true
+	if refreshErr == nil && (m.refreshDetachedShared || len(assessment.keepShared) > 0) {
+		return fmt.Sprintf("%s: built output differs from its fragments%s — run `lex import --refresh --codex %s %s`", out, refreshSharedDetachHint(out, assessment.detachedOutputs), codexArg, fileArg), true
 	}
 	return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`, or keep this edit with `lex absorb%s --codex %s %s`%s", out, codexArg, sharedFlag, codexArg, fileArg, sharedHint), true
+}
+
+func refreshSharedDetachHint(output string, otherOutputs []string) string {
+	return fmt.Sprintf("; refresh will stop using the shared fragment for %s; it remains used by %s", output, strings.Join(otherOutputs, ", "))
 }
 
 func finishCheck(warnings, problems []string) ([]string, error) {
@@ -4223,7 +4370,14 @@ func (s *stagedPaths) stagedOutputAdvice(problem, codex, out string) string {
 // that lex absorb reads and lex build rewrites out; codexInMain says the codex lies in the main checkout.
 func treeOutputAdvice(problem, out, tree string, codexInMain bool) string {
 	mainOut, treeOut := strconv.Quote(out), strconv.Quote(tree)
-	problem += "; lex builds " + mainOut + " and the edit is in " + treeOut + ": carry the edit into " + mainOut + " before running `lex absorb`"
+	command := "lex absorb"
+	if start := strings.Index(problem, "run `lex import --refresh "); start >= 0 {
+		start += len("run `")
+		if end := strings.IndexByte(problem[start:], '`'); end >= 0 {
+			command = problem[start : start+end]
+		}
+	}
+	problem += "; lex builds " + mainOut + " and the edit is in " + treeOut + ": carry the edit into " + mainOut + " before running `" + command + "`"
 	if codexInMain {
 		problem += ", which changes the fragments in the main checkout"
 	}
@@ -4554,6 +4708,10 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 		}
 		return nil
 	}
+	if len(assessment.keepShared) > 0 {
+		entry.SharedHint = refreshSharedDetachHint(m.out, assessment.detachedOutputs)
+		return nil
+	}
 	if m.header || refreshErr != nil || assessment.noChange {
 		entry.Command = "lex absorb --codex " + target
 	}
@@ -4565,9 +4723,6 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 			return nil
 		}
 		return err
-	}
-	if len(assessment.keepShared) > 0 {
-		return nil
 	}
 	if sharedFlag != "" {
 		entry.Command = "lex absorb" + sharedFlag + " --codex " + target
@@ -5031,6 +5186,9 @@ func parseManifestFields(line string, m *manifest) error {
 	}
 	if after, ok := strings.CutPrefix(line, "header: "); ok {
 		m.header = after == "true"
+	}
+	if after, ok := strings.CutPrefix(line, "refresh_detached_shared: "); ok {
+		m.refreshDetachedShared = after == "true"
 	}
 	return nil
 }
