@@ -36,7 +36,6 @@ var (
 	backSlug                 = regexp.MustCompile("`([a-z0-9]+(?:-[a-z0-9]+)+)`")
 	backSlugContext          = regexp.MustCompile(`(?i)(?:по|решени[а-я]*|запис[а-я]*|снят[а-я]*)\s*:?\s*$`)
 	backSlugNoCeilingContext = regexp.MustCompile(`(?i)не потолок\s*:?\s*$`)
-	backSlugDismissedContext = regexp.MustCompile(`(?i)(?:отклон[а-я]*|снят[а-я]*|не действует)\s*\($`)
 	relativeSectionRef       = regexp.MustCompile(`(?i)раздел\s+(выше|ниже)`)
 	relativeAsideRef         = regexp.MustCompile(`(?i)(?:,\s*(выше|ниже)(?:\s*[),.;:]|$)|подробнее\s+(выше|ниже))`)
 	relativeNamedBelowRef    = regexp.MustCompile(`(?i)([^,\n]+),\s*ниже(?:\s*[),.;:]|$)`)
@@ -553,7 +552,7 @@ func (s *refScanner) decisions() {
 			s.decisionSlug(match[1])
 		} else if context && !knownSkill || backSlugNoCeilingContext.MatchString(prefix) {
 			s.decisionSlug(match[1])
-		} else if parenthetical && !knownSkill && (strings.HasSuffix(prefix, "(") || backSlugDismissedContext.MatchString(prefix) || insideQuote(s.line, start)) {
+		} else if parenthetical && !knownSkill && (strings.HasSuffix(prefix, "(") || insideQuote(s.line, start)) {
 			s.add(2, "неоднозначный slug в скобках: возможная запись "+match[1])
 		}
 	}
