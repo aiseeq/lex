@@ -194,6 +194,7 @@ func TestTextRefsForms(t *testing.T) {
 		registerSource: []byte("Регистр - «начальство» в `SKILL.md`\n"),
 		registerTarget: []byte("# Другой раздел\n"),
 	}, journal)
+	registerFindings = withoutOrphanSkillFindings(registerFindings)
 	if len(registerFindings) != 1 || registerFindings[0].kind != 2 {
 		t.Errorf("битый регистр в соседнем SKILL.md не найден: %v", registerFindings)
 	}
@@ -203,13 +204,13 @@ func TestTextRefsForms(t *testing.T) {
 		registerForm:  []byte("Регистр из раздела «Температура погреба» для хранения корнеплодов зимой\n"),
 		registerSkill: []byte("## Температура погреба\n"),
 	}, journal)
-	if len(goodRegister) != 0 {
+	if goodRegister = withoutOrphanSkillFindings(goodRegister); len(goodRegister) != 0 {
 		t.Errorf("ссылка «Регистр из раздела» с существующим заголовком дала находки: %v", goodRegister)
 	}
-	badRegister := findTextRefs(textCorpus{
+	badRegister := withoutOrphanSkillFindings(findTextRefs(textCorpus{
 		registerForm:  []byte("Регистр из раздела «Нет такого»\n"),
 		registerSkill: []byte("## Температура погреба\n"),
-	}, journal)
+	}, journal))
 	if len(badRegister) != 1 || badRegister[0].kind != 2 {
 		t.Errorf("битая форма «Регистр из раздела» не найдена: %v", badRegister)
 	}
@@ -367,4 +368,15 @@ func TestCheckOutputsUnderKnowsCodexSkills(t *testing.T) {
 	if _, err := CheckWithWarnings(codex, CheckOptions{OutputsUnder: filepath.Join(root, "projects", "other")}); err == nil || !strings.Contains(err.Error(), "нет записи no-such-skill") {
 		t.Fatalf("an unknown name after «по» must still need a decision: %v", err)
 	}
+}
+
+// withoutOrphanSkillFindings drops kind 5 findings for tests whose sample skill files are not about skill coverage.
+func withoutOrphanSkillFindings(findings []textRefFinding) []textRefFinding {
+	var kept []textRefFinding
+	for _, finding := range findings {
+		if finding.kind != 5 {
+			kept = append(kept, finding)
+		}
+	}
+	return kept
 }

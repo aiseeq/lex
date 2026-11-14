@@ -136,8 +136,8 @@ func (r *corpusReader) textRefSettings(codex string) (textRefSettings, error) {
 		if exception.Path == "" || filepath.IsAbs(exception.Path) || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || clean != exception.Path {
 			return textRefSettings{}, fmt.Errorf("%s: text_refs exception path must be relative: %q", path, exception.Path)
 		}
-		if exception.Kind < 1 || exception.Kind > 4 || exception.Contains == "" || exception.Reason == "" {
-			return textRefSettings{}, fmt.Errorf("%s: text_refs exception needs kind 1–4, contains and reason: %s", path, exceptionKey(exception))
+		if exception.Kind < 1 || exception.Kind > 5 || exception.Contains == "" || exception.Reason == "" {
+			return textRefSettings{}, fmt.Errorf("%s: text_refs exception needs kind 1–5, contains and reason: %s", path, exceptionKey(exception))
 		}
 		key := exceptionKey(exception)
 		if seen[key] {
@@ -832,7 +832,97 @@ func findTextRefsWithSkills(corpus textCorpus, journal string, skills map[string
 	for _, path := range slices.Sorted(maps.Keys(corpus)) {
 		s.scan(path)
 	}
+	s.found = append(s.found, findOrphanSkillFiles(corpus)...)
 	return s.found
+}
+
+func findOrphanSkillFiles(corpus textCorpus) []textRefFinding {
+	skillDirs := map[string]bool{}
+	for path := range corpus {
+		if dir := filepath.Dir(path); filepath.Base(path) == "SKILL.md" && filepath.Base(filepath.Dir(dir)) == "skills" {
+			skillDirs[dir] = true
+		}
+	}
+	files := slices.Sorted(maps.Keys(corpus))
+	fileSkills, names := skillFilesAndNames(files, skillDirs)
+	if len(names) == 0 {
+		return nil
+	}
+	counts, ownCounts := skillMentionCounts(files, corpus, fileSkills, names)
+	var findings []textRefFinding
+	for _, path := range files {
+		owner, ok := fileSkills[path]
+		if !ok || filepath.Base(path) == "SKILL.md" {
+			continue
+		}
+		name := filepath.Base(path)
+		if counts[owner][name]-ownCounts[path][name] > 0 {
+			continue
+		}
+		findings = append(findings, orphanSkillFinding(path, filepath.Base(owner), corpus[path]))
+	}
+	return findings
+}
+
+// skillFilesAndNames maps each corpus file to the nearest skill directory above it and lists the base names of the non-SKILL.md files.
+func skillFilesAndNames(files []string, skillDirs map[string]bool) (map[string]string, []string) {
+	fileSkills := map[string]string{}
+	nameSet := map[string]bool{}
+	for _, path := range files {
+		if dir, ok := nearestSkillDirectory(path, skillDirs); ok {
+			fileSkills[path] = dir
+			if filepath.Base(path) != "SKILL.md" {
+				nameSet[filepath.Base(path)] = true
+			}
+		}
+	}
+	return fileSkills, slices.Sorted(maps.Keys(nameSet))
+}
+
+func nearestSkillDirectory(path string, skillDirs map[string]bool) (string, bool) {
+	for dir := filepath.Dir(path); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		if skillDirs[dir] {
+			return dir, true
+		}
+	}
+	return "", false
+}
+
+func skillMentionCounts(files []string, corpus textCorpus, fileSkills map[string]string, names []string) (map[string]map[string]int, map[string]map[string]int) {
+	parts := make([]string, len(names))
+	for i, name := range names {
+		parts[i] = regexp.QuoteMeta(name)
+	}
+	mention := regexp.MustCompile(`(^|[^\pL\pN_-])(` + strings.Join(parts, "|") + `)`)
+	counts := map[string]map[string]int{}
+	ownCounts := map[string]map[string]int{}
+	for _, path := range files {
+		owner, ok := fileSkills[path]
+		if !ok {
+			continue
+		}
+		if counts[owner] == nil {
+			counts[owner] = map[string]int{}
+		}
+		ownCounts[path] = map[string]int{}
+		for _, match := range mention.FindAllSubmatch(corpus[path], -1) {
+			name := string(match[2])
+			counts[owner][name]++
+			ownCounts[path][name]++
+		}
+	}
+	return counts, ownCounts
+}
+
+func orphanSkillFinding(path, skill string, data []byte) textRefFinding {
+	line, text := 1, ""
+	for i, candidate := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(candidate, "# ") {
+			line, text = i+1, candidate
+			break
+		}
+	}
+	return textRefFinding{kind: 5, path: path, line: line, text: text, missing: "не упомянут ни в SKILL.md, ни в других файлах скилла " + skill}
 }
 
 func sectionExists(body, title, referenceLine string) bool {
