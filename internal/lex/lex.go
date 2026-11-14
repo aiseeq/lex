@@ -2107,7 +2107,11 @@ func planInsertedFragments(codex, selected string, parts []string, additions map
 		sort.Slice(hunks, func(i, j int) bool { return hunks[i].newStart < hunks[j].newStart })
 		for _, hunk := range hunks {
 			body := bytes.Join(newLines[hunk.newStart:hunk.newEnd], nil)
-			for _, unit := range split(body) {
+			units := split(body)
+			if hunk.oldStart == hunk.oldEnd && hunk.oldEnd == position && hunk.newEnd == len(newLines) {
+				units = attachLeadingBlankUnits(units)
+			}
+			for _, unit := range units {
 				label := slug(unit)
 				if label == "" {
 					label = "fragment"
@@ -2121,6 +2125,21 @@ func planInsertedFragments(codex, selected string, parts []string, additions map
 		}
 	}
 	return created, nil
+}
+
+// attachLeadingBlankUnits joins the blank separator units that open text appended at the end of a
+// file to the first unit with text, so the separator does not become a fragment of its own.
+func attachLeadingBlankUnits(units [][]byte) [][]byte {
+	leading := 0
+	for leading < len(units) && len(bytes.TrimSpace(units[leading])) == 0 {
+		leading++
+	}
+	if leading == 0 || leading == len(units) {
+		return units
+	}
+	prefix := bytes.Join(units[:leading], nil)
+	units[leading] = append(prefix, units[leading]...)
+	return units[leading:]
 }
 
 func absorbLines(data []byte) [][]byte {
