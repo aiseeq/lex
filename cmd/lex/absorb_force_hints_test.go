@@ -148,9 +148,10 @@ func sharedForceScenario(t *testing.T, source string) {
 			if strings.Contains(line, outB) {
 				start := strings.Index(line, "run ")
 				end := strings.Index(line, " to keep the file's text")
-				if start >= 0 && end > start {
-					commandText = line[start+4 : end]
+				if start < 0 || end <= start {
+					t.Fatalf("status line for B has no `run … to keep the file's text` command: %q", line)
 				}
+				commandText = line[start+4 : end]
 				if !strings.Contains(line[end:], outA) {
 					t.Fatalf("status line does not name shared output A %q: %q", outA, line)
 				}
@@ -175,8 +176,8 @@ func sharedForceScenario(t *testing.T, source string) {
 				commandText = text[start : start+end]
 			}
 		}
-		if !strings.Contains(text, outA) {
-			t.Fatalf("%s does not name shared output A %q: %v", source, outA, err)
+		if !strings.Contains(text[strings.LastIndex(text, "`")+1:], outA) {
+			t.Fatalf("%s does not name shared output A %q after its last command: %v", source, outA, err)
 		}
 	}
 	args, err := commandFromHint(commandText)

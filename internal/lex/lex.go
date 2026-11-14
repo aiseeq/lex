@@ -1319,13 +1319,13 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 			if m.builtHash == "" {
 				conflict = "the file differs from its recorded source and the fragments differ from the manifest"
 			}
-			return fmt.Errorf("%s: %s; run `lex absorb --force%s --codex %s %s`%s to keep the file and lose fragment text edits not in it, or `lex build --force --codex %s %s` to keep the fragments and lose file edits", target, conflict, sharedFlag, codexArg, fileArg, sharedHint, codexArg, fileArg)
+			return fmt.Errorf("%s: %s; run `lex absorb --force%s --codex %s %s` to keep the file and lose fragment text edits not in it, or `lex build --force --codex %s %s` to keep the fragments and lose file edits%s", target, conflict, sharedFlag, codexArg, fileArg, codexArg, fileArg, sharedHint)
 		}
 		conflict := "fragments changed since the last build"
 		if m.builtHash == "" {
 			conflict = "the fragments differ from the manifest"
 		}
-		return fmt.Errorf("%s: %s; run `lex build --codex %s %s` to carry fragment edits into the file, or `lex absorb --force%s --codex %s %s`%s to discard them", target, conflict, codexArg, fileArg, sharedFlag, codexArg, fileArg, sharedHint)
+		return fmt.Errorf("%s: %s; run `lex build --codex %s %s` to carry fragment edits into the file, or `lex absorb --force%s --codex %s %s` to discard them%s", target, conflict, codexArg, fileArg, sharedFlag, codexArg, fileArg, sharedHint)
 	}
 	fileBytes := actual
 	if m.header {
@@ -2229,7 +2229,7 @@ func sharedForceHint(paths []string, selected string, parts []string) (string, s
 	if len(others) == 0 {
 		return "", "", nil
 	}
-	return " --shared", "; --shared: the shared fragment also builds " + strings.Join(others, ", "), nil
+	return " --shared", "; --shared also rewrites the shared fragment that builds " + strings.Join(others, ", ") + ": their edits to it not in this file are lost", nil
 }
 
 // codexSharedForceHint is sharedForceHint over the manifests of codex.
@@ -2858,7 +2858,7 @@ func builtDiffers(out, codex string, m manifest, manifestPath string, want, actu
 		if err != nil {
 			return fmt.Sprintf("%s: %v", out, err)
 		}
-		return fmt.Sprintf("%s: built output differs from its fragments — run `lex absorb --force%s --codex %s %s`%s to keep the file, or `lex build --force --codex %s %s` to keep the fragments", out, sharedFlag, codexArg, fileArg, sharedHint, codexArg, fileArg)
+		return fmt.Sprintf("%s: built output differs from its fragments — run `lex absorb --force%s --codex %s %s` to keep the file, or `lex build --force --codex %s %s` to keep the fragments%s", out, sharedFlag, codexArg, fileArg, codexArg, fileArg, sharedHint)
 	}
 	return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`, or keep this edit with `lex absorb --codex %s %s`", out, codexArg, codexArg, fileArg)
 }
