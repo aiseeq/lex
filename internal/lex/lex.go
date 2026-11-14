@@ -1517,8 +1517,14 @@ func absorbPurePartMove(codex string, paths []string, selected string, m manifes
 		updated.fragmentHashes[id] = sha(changed)
 		edits = append(edits, preparedFragmentEdit{part: id, path: path, updated: changed, hash: sha(changed)})
 	}
-	if err := validateSharedEdits(paths, m.parts, changedOwners, options.Shared); err != nil {
+	// A shared fragment whose bytes change here would change the other files it builds; the
+	// line-edit path keeps that fragment and adds a new one for this file, as it did before.
+	affected, err := firstSharedEdit(paths, m.parts, changedOwners)
+	if err != nil {
 		return true, err
+	}
+	if len(affected) > 0 {
+		return false, nil
 	}
 	plan := absorbPlan{edits: edits, manifest: updated}
 	if err := verifyAbsorbPlan(codex, plan, actual, options.DraftDir, manifestKey(selected), m.out, fileBytes); err != nil {
@@ -2147,6 +2153,18 @@ func validateEditedPartOccurrences(codex string, parts []string, owners []int) e
 }
 
 func validateSharedEdits(paths []string, parts []string, owners []int, shared bool) error {
+	affected, err := firstSharedEdit(paths, parts, owners)
+	if err != nil {
+		return err
+	}
+	if len(affected) > 0 && !shared {
+		return fmt.Errorf("shared fragment affects: %s; pass --shared", strings.Join(affected, ", "))
+	}
+	return nil
+}
+
+// firstSharedEdit returns the manifests using the first edited part that more than one manifest builds, or nil.
+func firstSharedEdit(paths []string, parts []string, owners []int) ([]string, error) {
 	checked := make(map[string]bool)
 	for _, owner := range owners {
 		part := parts[owner]
@@ -2156,13 +2174,13 @@ func validateSharedEdits(paths []string, parts []string, owners []int, shared bo
 		checked[part] = true
 		affected, err := manifestsUsing(paths, part)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if len(affected) > 1 && !shared {
-			return fmt.Errorf("shared fragment affects: %s; pass --shared", strings.Join(affected, ", "))
+		if len(affected) > 1 {
+			return affected, nil
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func prepareFragmentEdits(codex string, parts []string, bounds [][2]int, owners, deltas []int, newLines [][]byte, additions map[int][]lineHunk, printedPurpose bool) ([]preparedFragmentEdit, error) {

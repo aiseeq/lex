@@ -276,10 +276,18 @@ func TestAbsorbMoveKeepsSharedFragment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustWrite(t, outA, []byte("third\n\nfirst\n\nsecond\n"))
-	err = Absorb(codex, outA, AbsorbOptions{})
-	if err == nil || !strings.Contains(err.Error(), "--shared") {
-		t.Fatalf("Absorb error = %v, want shared-fragment refusal", err)
+	editedA := []byte("third\n\nfirst\n\nsecond\n")
+	mustWrite(t, outA, editedA)
+	if err = Absorb(codex, outA, AbsorbOptions{}); err != nil {
+		t.Fatalf("Absorb: %v (the line-edit path absorbed this move before)", err)
+	}
+	ma = mustReadManifest(t, manifestA)
+	rebuiltA, err := manifestBody(codex, ma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rebuiltA, editedA) {
+		t.Errorf("rebuilt a.md %q, want the edited file %q", rebuiltA, editedA)
 	}
 	afterB, err := os.ReadFile(outB)
 	if err != nil {
