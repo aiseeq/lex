@@ -1321,7 +1321,7 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 		actual = withoutGeneratedHeader(actual, selected)
 	}
 	if bytes.Equal(actual, built) {
-		return nil
+		return restoreDeletedHeader(selected, m, fileBytes, built)
 	}
 	warnSnapshot := snapshotAbsorbEditWarning(target, codex, selected, m, fileBytes)
 	purposeEnabled, err := readPurposeSetting(codex, read)
@@ -1347,6 +1347,34 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 		}
 	}
 	return warnAfterAbsorb(absorbEditedFragment(codex, paths, selected, m, built, actual, fileBytes, options, purpose), target, warnSnapshot)
+}
+
+// restoreDeletedHeader writes the build back into a file whose text equals the fragments but whose lex header line was deleted: nothing in the file is lost, and lex check names absorb for it.
+func restoreDeletedHeader(manifestPath string, m manifest, fileBytes, body []byte) error {
+	if !m.header {
+		return nil
+	}
+	full := generatedHeader(manifestPath, body)
+	if outputMatchesGenerated(fileBytes, full, true, manifestPath) {
+		// A restore whose manifest write failed left the file right and the hash stale: record it now.
+		if m.builtHash != "" && bytes.Equal(fileBytes, full) && sha(full) != m.builtHash {
+			if err := updateManifestField(manifestPath, "built_sha256", sha(full)); err != nil {
+				return fmt.Errorf("%s: record the restored file in the manifest: %w", m.out, err)
+			}
+		}
+		return nil
+	}
+	if info, err := os.Lstat(m.out); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s: refusing to write through symlink", m.out)
+	}
+	if err := os.WriteFile(m.out, full, fileMode); err != nil {
+		return fmt.Errorf("%s: %w", m.out, err)
+	}
+	if err := updateManifestField(manifestPath, "built_sha256", sha(full)); err != nil {
+		return fmt.Errorf("%s: restored the lex header line, but the manifest was not updated: %w; run lex absorb again to record the file", m.out, err)
+	}
+	fmt.Fprintf(os.Stderr, "%s: restored the lex header line; the text already matched the fragments\n", m.out)
+	return nil
 }
 
 // warnAfterAbsorb prints the edit warning only when the absorb succeeded.
