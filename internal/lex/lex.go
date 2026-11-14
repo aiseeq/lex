@@ -1401,6 +1401,9 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 		built = withoutGeneratedHeader(built, selected)
 		actual = withoutGeneratedHeader(actual, selected)
 	}
+	if allLinesCRLFData(actual) && allLinesLFData(built) {
+		return fmt.Errorf("%s: line endings changed to CRLF, but the fragments use LF; convert the file back to LF and run `lex absorb` again", file)
+	}
 	if bytes.Equal(actual, built) {
 		return restoreDeletedHeader(selected, m, fileBytes, built)
 	}
@@ -2414,6 +2417,34 @@ func absorbLines(data []byte) [][]byte {
 		return lines[:len(lines)-1]
 	}
 	return lines
+}
+
+func allLinesCRLFData(data []byte) bool {
+	seen := false
+	for i, b := range data {
+		if b != '\n' {
+			continue
+		}
+		if i == 0 || data[i-1] != '\r' {
+			return false
+		}
+		seen = true
+	}
+	return seen
+}
+
+func allLinesLFData(data []byte) bool {
+	seen := false
+	for i, b := range data {
+		if b != '\n' {
+			continue
+		}
+		if i > 0 && data[i-1] == '\r' {
+			return false
+		}
+		seen = true
+	}
+	return seen
 }
 
 func absorbHunks(oldLines, newLines [][]byte, bounds [][2]int) []lineHunk {
