@@ -227,6 +227,9 @@ func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byt
 		if err != nil {
 			return assessment, err
 		}
+		if turnedWhollyCRLF(layout.rendered, sourceData) {
+			return assessment, wholeFileCRLFRefusal(m.out, "lex import --refresh")
+		}
 		sharedFlag, sharedHint, hintErr := codexSharedForceHint(codex, m, layout.rendered, sourceData, catalog)
 		if hintErr != nil {
 			return assessment, hintErr
@@ -1400,6 +1403,9 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 	if m.header {
 		built = withoutGeneratedHeader(built, selected)
 		actual = withoutGeneratedHeader(actual, selected)
+	}
+	if turnedWhollyCRLF(built, actual) {
+		return wholeFileCRLFRefusal(file, "lex absorb")
 	}
 	if bytes.Equal(actual, built) {
 		return restoreDeletedHeader(selected, m, fileBytes, built)
@@ -2974,6 +2980,9 @@ func codexSharedForceHint(codex string, m manifest, built, actual []byte, catalo
 		}
 		purpose = &layout
 		built = layout.rendered
+	}
+	if turnedWhollyCRLF(built, actual) {
+		actual = bytes.ReplaceAll(actual, []byte("\r\n"), []byte("\n"))
 	}
 	_, moveOwners, _, isMove, err := planPurePartMove(codex, manifest, layout, actual)
 	if err != nil {

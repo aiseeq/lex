@@ -498,18 +498,46 @@ func hasCRLFPurposeCounterpart(oldLines, newLines [][]byte, failed []int) bool {
 	return len(failed) > 0
 }
 
-func allLinesCRLF(lines [][]byte) bool {
-	seen := false
+type lineEndingKind uint8
+
+const (
+	lineEndingNone lineEndingKind = iota
+	lineEndingLF
+	lineEndingCRLF
+	lineEndingMixed
+)
+
+func uniformLineEnding(lines [][]byte) lineEndingKind {
+	ending := lineEndingNone
 	for _, line := range lines {
+		var lineEnding lineEndingKind
 		if bytes.HasSuffix(line, []byte("\r\n")) {
-			seen = true
+			lineEnding = lineEndingCRLF
+		} else if bytes.HasSuffix(line, []byte("\n")) {
+			lineEnding = lineEndingLF
+		} else {
 			continue
 		}
-		if bytes.HasSuffix(line, []byte("\n")) {
-			return false
+		if ending != lineEndingNone && ending != lineEnding {
+			return lineEndingMixed
 		}
+		ending = lineEnding
 	}
-	return seen
+	return ending
+}
+
+// turnedWhollyCRLF reports a file whose every line ends in CRLF while the
+// fragments it was built from use LF.
+func turnedWhollyCRLF(built, actual []byte) bool {
+	return uniformLineEnding(absorbLines(actual)) == lineEndingCRLF && uniformLineEnding(absorbLines(built)) == lineEndingLF
+}
+
+func allLinesCRLF(lines [][]byte) bool {
+	return uniformLineEnding(lines) == lineEndingCRLF
+}
+
+func wholeFileCRLFRefusal(file, command string) error {
+	return fmt.Errorf("%s: line endings changed to CRLF, but the fragments use LF; convert the file back to LF and run `%s` again", file, command)
 }
 
 func (p purposeLayout) ownerBefore(matches [][2]int, line int, fallback string) string {
