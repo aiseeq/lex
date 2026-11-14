@@ -1449,28 +1449,53 @@ func absorbBuiltBody(codex, target, selected string, paths []string, m manifest,
 	return built, nil
 }
 
-// textAboveHeaderAdvice is the refusal absorb, check and status give for text above the lex header;
-// a deleted header with a copy quoted further down looks the same, so the advice names both fixes.
-const textAboveHeaderAdvice = "text above lex header; move the text below the header, or if the header line was deleted, restore it as the first line"
+// textAboveHeaderAdvice builds the shared refusal shown by absorb, check and status.
+func textAboveHeaderAdvice(line int, hasFrontMatter bool) string {
+	advice := fmt.Sprintf("text above lex header (found at line %d); move the text below the header, or if the header line was deleted, restore it ", line)
+	if hasFrontMatter {
+		return advice + "immediately after the front matter"
+	}
+	return advice + "as the first line"
+}
 
-// rejectTextAboveHeader refuses a file whose lex header line, with either line ending, stands
-// below text other than front matter. A header in its place ends the check, so a copy of the
-// header quoted further down the file does not count.
-func rejectTextAboveHeader(file, selected string, m manifest, actual []byte) error {
+// textAboveHeaderRefusal returns the shared refusal when a lex header stands below text other
+// than front matter. A header in its place ends the check, so a copy quoted further down does not count.
+func textAboveHeaderRefusal(selected string, m manifest, actual []byte) string {
 	if !m.header {
-		return nil
+		return ""
 	}
 	forms := headerLineForms(selected)
 	top := actual[frontMatterOffset(actual):]
 	for _, form := range forms {
 		if bytes.HasPrefix(top, form) {
-			return nil
+			return ""
 		}
 	}
+	first := -1
 	for _, form := range forms {
-		if index := bytes.Index(actual, form); index > 0 && actual[index-1] == '\n' {
-			return fmt.Errorf("%s: %s", file, textAboveHeaderAdvice)
+		for start := 0; start < len(actual); {
+			relative := bytes.Index(actual[start:], form)
+			if relative < 0 {
+				break
+			}
+			index := start + relative
+			if index > 0 && actual[index-1] == '\n' && (first < 0 || index < first) {
+				first = index
+			}
+			start = index + 1
 		}
+	}
+	if first < 0 {
+		return ""
+	}
+	line := bytes.Count(actual[:first], []byte{'\n'}) + 1
+	return textAboveHeaderAdvice(line, frontMatterOffset(actual) > 0)
+}
+
+// rejectTextAboveHeader adds the file path to the shared refusal text.
+func rejectTextAboveHeader(file, selected string, m manifest, actual []byte) error {
+	if refusal := textAboveHeaderRefusal(selected, m, actual); refusal != "" {
+		return fmt.Errorf("%s: %s", file, refusal)
 	}
 	return nil
 }
@@ -4194,9 +4219,9 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 		entry.Command = "lex build --force --codex " + target
 		return nil
 	}
-	if rejectTextAboveHeader(m.out, manifestPath, m, actual) != nil {
+	if refusal := textAboveHeaderRefusal(manifestPath, m, actual); refusal != "" {
 		// lex absorb refuses such a file the same way; no command settles it before the text moves.
-		entry.Refusal = textAboveHeaderAdvice
+		entry.Refusal = refusal
 		return nil
 	}
 	entry.Command = "lex import --refresh --codex " + target

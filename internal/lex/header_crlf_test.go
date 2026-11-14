@@ -70,7 +70,7 @@ func TestAbsorbCRLFHeaderKeepsOneHeader(t *testing.T) {
 func TestAdviceTextAboveHeaderNamesHeader(t *testing.T) {
 	_, out, codex, _, data := builtWithHeader(t, "# A\n\n- one\n")
 	mustWrite(t, out, append([]byte("intro\n"), data...))
-	want := "text above lex header; move the text below the header"
+	want := "text above lex header (found at line 2); move the text below the header"
 	check, err := CheckWithWarnings(codex, CheckOptions{})
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("check advice = %q, error = %v", check, err)
