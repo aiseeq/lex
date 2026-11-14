@@ -372,7 +372,9 @@ func checkCommand(o cliOptions) error {
 	for _, warning := range warnings {
 		fmt.Fprintln(os.Stderr, "warning:", warning)
 	}
-	fmt.Fprintln(os.Stderr, lex.RuleWarningSummary(warnings))
+	if !o.refsOnly {
+		fmt.Fprintln(os.Stderr, lex.RuleWarningSummary(warnings))
+	}
 	return err
 }
 func statusCommand(o cliOptions) error {

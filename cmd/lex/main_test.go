@@ -728,6 +728,9 @@ func TestCheckPrintsRuleSummaryOnceAfterWarnings(t *testing.T) {
 		if stdout != "" {
 			t.Fatalf("check wrote to stdout: %q", stdout)
 		}
+		if !strings.HasSuffix(stderr, summary+"\n") {
+			t.Fatalf("stderr = %q, want it to end with the line %q and a newline", stderr, summary)
+		}
 		lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
 		if len(lines) != 4 || lines[3] != summary {
 			t.Fatalf("stderr = %q, want three warnings and then the line %q", stderr, summary)
@@ -747,6 +750,32 @@ func TestCheckPrintsRuleSummaryOnceAfterWarnings(t *testing.T) {
 			t.Fatalf("check failed: %v\n%s", err, stderr)
 		}
 		assertStreams(t, stdout, stderr)
+	})
+	t.Run("check under a tree", func(t *testing.T) {
+		tree := filepath.Join(root, "tree")
+		if err := os.MkdirAll(tree, 0755); err != nil {
+			t.Fatal(err)
+		}
+		built, err := os.ReadFile(output)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tree, filepath.Base(output)), built, 0644); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, err := captureStreams(t, func() error {
+			return run([]string{"check", "--codex", codex, "--outputs-under", root, "--tree", tree})
+		})
+		if err != nil {
+			t.Fatalf("check under a tree failed: %v\n%s", err, stderr)
+		}
+		assertStreams(t, stdout, stderr)
+	})
+	t.Run("refs-only check", func(t *testing.T) {
+		_, stderr, _ := captureStreams(t, func() error { return run([]string{"check", "--refs-only", "--codex", codex}) })
+		if strings.Contains(stderr, "правил без основания") {
+			t.Fatalf("refs-only check printed the rule summary: %q", stderr)
+		}
 	})
 	t.Run("failing check", func(t *testing.T) {
 		if err := os.WriteFile(output, []byte(body+"manual edit\n"), 0644); err != nil {
