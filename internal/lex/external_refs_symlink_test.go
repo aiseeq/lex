@@ -154,3 +154,42 @@ func TestExternalEntriesForOneFileKeepRelativeFindings(t *testing.T) {
 		})
 	}
 }
+
+// A finding that names its own file ("no section below in FILE") is the same finding under both entries.
+func TestExternalEntriesForOneFileDropRepeatNamingTheFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	codex := filepath.Join(home, "codex")
+	externalRefsImport(t, codex, filepath.Join(home, "tree", "CLAUDE.md"), "CLAUDE.md", "# Бюджет\n")
+	if err := Build(codex, false); err != nil {
+		t.Fatalf("build corpus: %v", err)
+	}
+	agent := filepath.Join(home, "agent.md")
+	if err := os.WriteFile(agent, []byte("- См. раздел ниже.\n- Правило, ниже.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(agent, filepath.Join(home, "alias.md")); err != nil {
+		t.Fatal(err)
+	}
+	tools := `{"text_refs":{"external":["~/alias.md","` + agent + `"]}}`
+	if err := os.WriteFile(filepath.Join(codex, "tools.json"), []byte(tools), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	warnings, err := CheckWithWarnings(codex, CheckOptions{})
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	counts := map[string]int{}
+	for _, warning := range warnings {
+		for _, line := range []string{"См. раздел ниже.", "Правило, ниже."} {
+			if strings.Contains(warning, line) {
+				counts[line]++
+			}
+		}
+	}
+	for _, line := range []string{"См. раздел ниже.", "Правило, ниже."} {
+		if counts[line] != 1 {
+			t.Errorf("want one finding for %q, got %d in %v", line, counts[line], warnings)
+		}
+	}
+}

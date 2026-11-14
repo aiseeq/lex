@@ -1124,7 +1124,9 @@ func distinctExternalFindings(all []textRefFinding, externalPaths map[string]boo
 		if !externalPaths[f.path] {
 			continue
 		}
-		k := key{f.kind, f.line, resolvePath(f.path), f.text, f.missing}
+		real := resolvePath(f.path)
+		// a "below"/"above" finding names its own file in missing; through a symlink that name differs
+		k := key{f.kind, f.line, real, f.text, strings.ReplaceAll(f.missing, f.path, real)}
 		if seen[k] {
 			continue
 		}
