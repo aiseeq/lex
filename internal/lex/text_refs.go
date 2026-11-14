@@ -1,6 +1,7 @@
 package lex
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 type textRefFinding struct {
@@ -136,8 +139,8 @@ func (r *corpusReader) textRefSettings(codex string) (textRefSettings, error) {
 		if exception.Path == "" || filepath.IsAbs(exception.Path) || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || clean != exception.Path {
 			return textRefSettings{}, fmt.Errorf("%s: text_refs exception path must be relative: %q", path, exception.Path)
 		}
-		if exception.Kind < 1 || exception.Kind > 4 || exception.Contains == "" || exception.Reason == "" {
-			return textRefSettings{}, fmt.Errorf("%s: text_refs exception needs kind 1–4, contains and reason: %s", path, exceptionKey(exception))
+		if exception.Kind < 1 || exception.Kind > 5 || exception.Contains == "" || exception.Reason == "" {
+			return textRefSettings{}, fmt.Errorf("%s: text_refs exception needs kind 1–5, contains and reason: %s", path, exceptionKey(exception))
 		}
 		key := exceptionKey(exception)
 		if seen[key] {
@@ -832,7 +835,93 @@ func findTextRefsWithSkills(corpus textCorpus, journal string, skills map[string
 	for _, path := range slices.Sorted(maps.Keys(corpus)) {
 		s.scan(path)
 	}
+	s.found = append(s.found, findOrphanSkillFiles(corpus)...)
 	return s.found
+}
+
+func findOrphanSkillFiles(corpus textCorpus) []textRefFinding {
+	skillDirs := map[string]bool{}
+	for path := range corpus {
+		if dir := filepath.Dir(path); filepath.Base(path) == "SKILL.md" && filepath.Base(filepath.Dir(dir)) == "skills" {
+			skillDirs[dir] = true
+		}
+	}
+	if len(skillDirs) == 0 {
+		return nil
+	}
+	skillFiles := map[string][]string{}
+	for _, path := range slices.Sorted(maps.Keys(corpus)) {
+		if dir, ok := nearestSkillDirectory(path, skillDirs); ok {
+			skillFiles[dir] = append(skillFiles[dir], path)
+		}
+	}
+	var findings []textRefFinding
+	for _, dir := range slices.Sorted(maps.Keys(skillFiles)) {
+		for _, path := range skillFiles[dir] {
+			if filepath.Base(path) == "SKILL.md" || mentionedInSkill(path, skillFiles[dir], corpus) {
+				continue
+			}
+			findings = append(findings, orphanSkillFinding(path, filepath.Base(dir), corpus[path]))
+		}
+	}
+	return findings
+}
+
+// mentionedInSkill reports whether another file of the skill names the file: its base name not preceded by a letter, digit, "_" or "-".
+func mentionedInSkill(path string, files []string, corpus textCorpus) bool {
+	name := []byte(filepath.Base(path))
+	for _, other := range files {
+		if other != path && mentionsName(corpus[other], name) {
+			return true
+		}
+	}
+	return false
+}
+
+func mentionsName(data, name []byte) bool {
+	for offset := 0; ; {
+		i := bytes.Index(data[offset:], name)
+		if i < 0 {
+			return false
+		}
+		at := offset + i
+		if before, _ := utf8.DecodeLastRune(data[:at]); at == 0 || !(unicode.IsLetter(before) || unicode.IsDigit(before) || before == '_' || before == '-') {
+			return true
+		}
+		offset = at + 1
+	}
+}
+
+func nearestSkillDirectory(path string, skillDirs map[string]bool) (string, bool) {
+	for dir := filepath.Dir(path); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		if skillDirs[dir] {
+			return dir, true
+		}
+	}
+	return "", false
+}
+
+func orphanSkillFinding(path, skill string, data []byte) textRefFinding {
+	lines := strings.Split(string(data), "\n")
+	line, text := 1, lines[0]
+	fence := ""
+	for i, candidate := range lines {
+		trimmed := strings.TrimSpace(candidate)
+		if marker := trimmed[:min(3, len(trimmed))]; fence == "" && (marker == "```" || marker == "~~~") {
+			fence = marker
+			continue
+		} else if fence != "" {
+			if strings.HasPrefix(trimmed, fence) {
+				fence = ""
+			}
+			continue
+		}
+		if strings.HasPrefix(candidate, "# ") {
+			line, text = i+1, candidate
+			break
+		}
+	}
+	return textRefFinding{kind: 5, path: path, line: line, text: text, missing: "не упомянут ни в SKILL.md, ни в других файлах скилла " + skill}
 }
 
 func sectionExists(body, title, referenceLine string) bool {

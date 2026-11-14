@@ -28,7 +28,7 @@ type finding struct {
 	text string
 }
 
-var findingPattern = regexp.MustCompile(`^(?:warning: )?(.*?):([0-9]+): kind ([1-4]): `)
+var findingPattern = regexp.MustCompile(`^(?:warning: )?(.*?):([0-9]+): kind ([1-5]): `)
 var home string
 
 // unusedExceptionPrefix starts a warning about a tools.json exception that matched nothing: it is not a reference finding.
@@ -196,11 +196,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	counts := [5]int{}
+	counts := [6]int{}
 	for _, f := range findings {
 		counts[f.kind]++
 	}
-	fmt.Printf("HEAD: kind 1: %d, kind 2: %d, kind 3: %d, kind 4: %d\n", counts[1], counts[2], counts[3], counts[4])
+	fmt.Printf("HEAD: kind 1: %d, kind 2: %d, kind 3: %d, kind 4: %d, kind 5: %d\n", counts[1], counts[2], counts[3], counts[4], counts[5])
 	for _, f := range findings {
 		fmt.Println(f.text)
 	}
