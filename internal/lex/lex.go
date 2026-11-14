@@ -1401,7 +1401,7 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 		built = withoutGeneratedHeader(built, selected)
 		actual = withoutGeneratedHeader(actual, selected)
 	}
-	if allLinesCRLF(absorbLines(actual)) && uniformLineEnding(absorbLines(built)) == lineEndingLF {
+	if turnedWhollyCRLF(built, actual) {
 		return fmt.Errorf("%s: line endings changed to CRLF, but the fragments use LF; convert the file back to LF and run `lex absorb` again", file)
 	}
 	if bytes.Equal(actual, built) {
@@ -2967,6 +2967,9 @@ func codexSharedForceHint(codex string, m manifest, built, actual []byte, catalo
 		}
 		purpose = &layout
 		built = layout.rendered
+	}
+	if turnedWhollyCRLF(built, actual) {
+		actual = bytes.ReplaceAll(actual, []byte("\r\n"), []byte("\n"))
 	}
 	_, moveOwners, _, isMove, err := planPurePartMove(codex, manifest, layout, actual)
 	if err != nil {

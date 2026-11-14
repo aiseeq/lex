@@ -80,4 +80,47 @@ func TestAbsorbRefusesWholeFileCRLF(t *testing.T) {
 			})
 		}
 	}
+
+	t.Run("shared refresh", func(t *testing.T) {
+		root, codex, a, b := sharedEditFixture(t)
+		data, err := os.ReadFile(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data = bytes.Replace(data, []byte("shared para"), []byte("changed shared para"), 1)
+		data = bytes.ReplaceAll(data, []byte("\n"), []byte("\r\n"))
+		mustWrite(t, a, data)
+
+		entries, err := StatusWithHome(codex, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, entry := range entries {
+			if entry.Output != a {
+				continue
+			}
+			found = true
+			if !strings.Contains(entry.Command, "--shared") || strings.Contains(entry.Command, "import --refresh") {
+				t.Fatalf("status command = %q; want shared-safe advice", entry.Command)
+			}
+		}
+		if !found {
+			t.Fatalf("status has no entry for %s", a)
+		}
+
+		_, checkErr := CheckWithWarnings(codex, CheckOptions{})
+		if checkErr == nil || !strings.Contains(checkErr.Error(), "--shared") || !strings.Contains(checkErr.Error(), b) || strings.Contains(checkErr.Error(), "import --refresh") {
+			t.Fatalf("check advice = %v; want shared-safe advice naming %s", checkErr, b)
+		}
+
+		before := treeBytes(t, codex)
+		err = ImportWithOptions(codex, a, ImportOptions{Refresh: true, Home: root})
+		if err == nil || !strings.Contains(err.Error(), "--shared") || !strings.Contains(err.Error(), b) {
+			t.Fatalf("CRLF refresh error = %v; want refusal naming shared output %s", err, b)
+		}
+		if !bytes.Equal(before, treeBytes(t, codex)) {
+			t.Fatal("refused CRLF refresh changed codex")
+		}
+	})
 }

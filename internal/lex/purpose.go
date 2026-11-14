@@ -526,6 +526,12 @@ func uniformLineEnding(lines [][]byte) lineEndingKind {
 	return ending
 }
 
+// turnedWhollyCRLF reports a file whose every line ends in CRLF while the
+// fragments it was built from use LF.
+func turnedWhollyCRLF(built, actual []byte) bool {
+	return uniformLineEnding(absorbLines(actual)) == lineEndingCRLF && uniformLineEnding(absorbLines(built)) == lineEndingLF
+}
+
 func allLinesCRLF(lines [][]byte) bool {
 	return uniformLineEnding(lines) == lineEndingCRLF
 }
