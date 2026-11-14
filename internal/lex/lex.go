@@ -332,7 +332,7 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 			return fmt.Errorf("%s: manifest key already points to %s", manifestPath, old.out)
 		}
 		if refresh {
-			catalog, catalogErr := loadManifestCatalog(codex)
+			catalog, catalogErr := listManifestCatalog(codex)
 			if catalogErr != nil {
 				return catalogErr
 			}
@@ -1369,7 +1369,7 @@ func AbsorbWithPaths(codex, file string, options AbsorbOptions) ([]string, error
 }
 
 func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
-	catalog, err := loadManifestCatalog(codex)
+	catalog, err := listManifestCatalog(codex)
 	if err != nil {
 		return err
 	}
@@ -1601,7 +1601,7 @@ func absorbEditedFragment(codex, selected string, m manifest, built, actual, fil
 	if err := verifyAbsorbPlan(codex, plan, actual, options.DraftDir, manifestKey(selected), m.out, fileBytes); err != nil {
 		return err
 	}
-	if err := writeAbsorbPlan(selected, plan); err != nil {
+	if err := writeAbsorbPlan(selected, plan, catalog); err != nil {
 		return err
 	}
 	if options.Force && options.Shared {
@@ -1651,7 +1651,7 @@ func absorbPurePartMove(codex, selected string, m manifest, layout purposeLayout
 	if err := verifyAbsorbPlan(codex, plan, actual, options.DraftDir, manifestKey(selected), m.out, fileBytes); err != nil {
 		return true, err
 	}
-	if err := writeAbsorbPlan(selected, plan); err != nil {
+	if err := writeAbsorbPlan(selected, plan, catalog); err != nil {
 		return true, err
 	}
 	return true, nil
@@ -1859,7 +1859,7 @@ func verifyAbsorbPlan(codex string, plan absorbPlan, actual []byte, draftDir, ke
 	return writeAbsorbDraft(draftDir, key, output, fileBytes, reason)
 }
 
-func writeAbsorbPlan(selected string, plan absorbPlan) error {
+func writeAbsorbPlan(selected string, plan absorbPlan, catalog *manifestCatalog) error {
 	for _, edit := range plan.edits {
 		body, err := fragmentBody(edit.updated)
 		if err != nil {
@@ -1885,6 +1885,7 @@ func writeAbsorbPlan(selected string, plan absorbPlan) error {
 	if err := writeManifest(selected, plan.manifest, plan.manifest.links); err != nil {
 		return err
 	}
+	catalog.update(selected, plan.manifest)
 	return removeAbsorbedFragments(plan.removePaths)
 }
 
@@ -2691,18 +2692,23 @@ func newManifestCatalog(paths []string) *manifestCatalog {
 
 func (catalog *manifestCatalog) read(path string) (manifest, error) {
 	if m, ok := catalog.items[path]; ok {
-		return m, nil
-	}
-	if err, ok := catalog.errs[path]; ok {
-		return manifest{}, err
+		return m, catalog.errs[path]
 	}
 	m, err := readManifest(path)
 	if err != nil {
+		catalog.items[path] = m
 		catalog.errs[path] = err
 		return m, err
 	}
 	catalog.items[path] = m
 	return m, nil
+}
+
+func (catalog *manifestCatalog) update(path string, m manifest) {
+	catalog.items[path] = m
+	delete(catalog.errs, path)
+	catalog.parts = make(map[string][]string)
+	catalog.indexed = false
 }
 
 func (catalog *manifestCatalog) findOutputManifest(target string) (string, manifest, error) {
@@ -2718,21 +2724,11 @@ func (catalog *manifestCatalog) findOutputManifest(target string) (string, manif
 	return "", manifest{}, fmt.Errorf("%s: no manifest output", target)
 }
 
-func loadManifestCatalog(codex string) (*manifestCatalog, error) {
-	catalog, err := listManifestCatalog(codex)
-	if err != nil {
-		return nil, err
-	}
-	catalog.buildIndex()
-	return catalog, nil
-}
-
 func (catalog *manifestCatalog) buildIndex() {
 	if !catalog.indexed {
 		for _, path := range catalog.paths {
-			m, err := catalog.read(path)
-			if err != nil {
-				catalog.errs[path] = err
+			m, ok := catalog.items[path]
+			if !ok {
 				continue
 			}
 			seen := make(map[string]bool, len(m.parts))
@@ -2749,12 +2745,12 @@ func (catalog *manifestCatalog) buildIndex() {
 }
 
 func (catalog *manifestCatalog) manifestsUsing(part string) ([]string, error) {
-	catalog.buildIndex()
 	for _, path := range catalog.paths {
-		if err := catalog.errs[path]; err != nil {
+		if _, err := catalog.read(path); err != nil {
 			return nil, err
 		}
 	}
+	catalog.buildIndex()
 	return catalog.parts[part], nil
 }
 
@@ -3190,8 +3186,7 @@ func selectManifestsUnder(catalog *manifestCatalog, underText, under, tree strin
 	selected := make([]*selectedManifestUnder, 0, len(catalog.paths))
 	var warnings, problems []string
 	for _, path := range catalog.paths {
-		m, manifestErr := manifest{}, error(nil)
-		m, manifestErr = catalog.read(path)
+		m, manifestErr := catalog.read(path)
 		if manifestErr != nil && m.out == "" {
 			problems = append(problems, invalidManifestProblem(path, manifestErr))
 			continue
@@ -3306,16 +3301,16 @@ func checkDisk(codex string) ([]string, error) {
 		return nil, err
 	}
 	checker.purpose = purposeEnabled
-	catalog, err := loadManifestCatalog(codex)
+	catalog, err := listManifestCatalog(codex)
 	if err != nil {
 		return nil, err
 	}
 	referenced := map[string]bool{}
 	var warnings, problems []string
 	for _, path := range catalog.paths {
-		m, ok := catalog.items[path]
-		if !ok {
-			problems = append(problems, invalidManifestProblem(path, catalog.errs[path]))
+		m, err := catalog.read(path)
+		if err != nil {
+			problems = append(problems, invalidManifestProblem(path, err))
 			continue
 		}
 		problems = append(problems, diskLinkProblems(m.links)...)
@@ -3392,12 +3387,9 @@ func checkStaged(codex string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list manifests: %w", err)
 	}
+	catalog := newManifestCatalog(paths)
 	paths = mergePaths(paths, commit.indexedUnder(filepath.Join(codex, "manifest"), ".yaml"))
 	if err = commit.prefetch(paths); err != nil {
-		return nil, err
-	}
-	catalog, err := loadManifestCatalog(codex)
-	if err != nil {
 		return nil, err
 	}
 	referenced := map[string]bool{}
@@ -4184,15 +4176,15 @@ func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 		}
 		home = current
 	}
-	catalog, err := loadManifestCatalog(codex)
+	catalog, err := listManifestCatalog(codex)
 	if err != nil {
 		return nil, err
 	}
 	var changed []StatusEntry
 	for _, p := range catalog.paths {
-		m, ok := catalog.items[p]
-		if !ok {
-			return nil, catalog.errs[p]
+		m, err := catalog.read(p)
+		if err != nil {
+			return nil, err
 		}
 		entry := StatusEntry{Manifest: p, Output: m.out}
 		actual, err := os.ReadFile(m.out)
