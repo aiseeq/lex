@@ -95,3 +95,62 @@ func TestExternalEntriesForOneFileReadItOnce(t *testing.T) {
 		t.Errorf("want the missing section «Деньги» once, under %s; got %v", agent, money)
 	}
 }
+
+// A relative reference resolves from each entry's own directory, so two entries for one file in
+// different directories keep the finding that only one of them has, in either order.
+func TestExternalEntriesForOneFileKeepRelativeFindings(t *testing.T) {
+	for _, tc := range []struct {
+		name, present, missing string
+		aliasFirst             bool
+	}{
+		{"real file's link broken, alias first", "notes.md", "sub/notes.md", true},
+		{"real file's link broken, real first", "notes.md", "sub/notes.md", false},
+		{"alias's link broken, alias first", "sub/notes.md", "notes.md", true},
+		{"alias's link broken, real first", "sub/notes.md", "notes.md", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			codex := filepath.Join(home, "codex")
+			externalRefsImport(t, codex, filepath.Join(home, "tree", "CLAUDE.md"), "CLAUDE.md", "# Бюджет\n")
+			if err := Build(codex, false); err != nil {
+				t.Fatalf("build corpus: %v", err)
+			}
+			agent := filepath.Join(home, "sub", "agent.md")
+			if err := os.MkdirAll(filepath.Dir(agent), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(agent, []byte("См. [заметки](notes.md).\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(home, filepath.FromSlash(tc.present)), []byte("x\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(agent, filepath.Join(home, "alias.md")); err != nil {
+				t.Fatal(err)
+			}
+			entries := []string{`"~/alias.md"`, `"` + agent + `"`}
+			if !tc.aliasFirst {
+				entries[0], entries[1] = entries[1], entries[0]
+			}
+			tools := `{"text_refs":{"external":[` + strings.Join(entries, ",") + `]}}`
+			if err := os.WriteFile(filepath.Join(codex, "tools.json"), []byte(tools), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			warnings, err := CheckWithWarnings(codex, CheckOptions{})
+			if err != nil {
+				t.Fatalf("check: %v", err)
+			}
+			var notes []string
+			for _, warning := range warnings {
+				if strings.Contains(warning, "notes.md") {
+					notes = append(notes, warning)
+				}
+			}
+			want := filepath.Join(home, filepath.FromSlash(tc.missing))
+			if len(notes) != 1 || !strings.HasSuffix(notes[0], want) {
+				t.Errorf("want one broken link to %s, got %v", want, notes)
+			}
+		})
+	}
+}

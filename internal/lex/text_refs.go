@@ -100,11 +100,7 @@ func checkTextRefs(codex string, options CheckOptions) ([]string, error) {
 		combined[path], combinedOld[path] = data, data
 	}
 	if len(externalCorpus) > 0 {
-		for _, finding := range findTextRefsWithExcluded(combined, journal, skills, externalPaths) {
-			if externalPaths[finding.path] {
-				findings = append(findings, finding)
-			}
-		}
+		findings = append(findings, distinctExternalFindings(findTextRefsWithExcluded(combined, journal, skills, externalPaths), externalPaths)...)
 	}
 	baseline := map[textRefKey]bool{}
 	if old != nil {
@@ -167,7 +163,6 @@ func loadExternalTextCorpus(codex, outputsUnder string, corpus textCorpus) (text
 		_, ok := corpusReal[resolvePath(path)]
 		return ok
 	}
-	readReal := map[string]bool{} // an external file reached by two entries (one through a symlink) is read once, under the first entry
 	warned := map[string]bool{}
 	warn := func(line string) {
 		if !warned[line] {
@@ -183,8 +178,7 @@ func loadExternalTextCorpus(codex, outputsUnder string, corpus textCorpus) (text
 			}
 		}
 		path := resolveRefTarget(codex, configured)
-		real := resolvePath(path)
-		if paths[path] || readReal[real] || inCorpus(path) {
+		if paths[path] || inCorpus(path) {
 			continue
 		}
 		data, err := os.ReadFile(path)
@@ -200,7 +194,7 @@ func loadExternalTextCorpus(codex, outputsUnder string, corpus textCorpus) (text
 			warn(path + ": external file for text references not read: " + err.Error())
 			continue
 		}
-		external[path], paths[path], readReal[real] = data, true, true
+		external[path], paths[path] = data, true
 	}
 	return external, paths, warnings, nil
 }
@@ -1114,4 +1108,28 @@ func sectionExists(body, title, referenceLine string) bool {
 		}
 	}
 	return false
+}
+
+// distinctExternalFindings keeps the findings of external files and drops a repeat from a second entry
+// that reaches the same file (through a symlink). Both entries are read: a relative reference resolves
+// from the entry's own directory, so only a finding with the same line and the same missing target is a repeat.
+func distinctExternalFindings(all []textRefFinding, externalPaths map[string]bool) []textRefFinding {
+	type key struct {
+		kind, line          int
+		real, text, missing string
+	}
+	seen := map[key]bool{}
+	var out []textRefFinding
+	for _, f := range all {
+		if !externalPaths[f.path] {
+			continue
+		}
+		k := key{f.kind, f.line, resolvePath(f.path), f.text, f.missing}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, f)
+	}
+	return out
 }
