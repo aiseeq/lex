@@ -341,25 +341,16 @@ func printCodexChangeHint(codex string, paths []string) {
 }
 
 // configAddCommand returns the git add line for paths when the codex sits under ~/.claude
-// and ~/.claude-config.git exists; it is empty when there is no such repository or codex.
+// and ~/.claude-config.git exists; it is empty for any other codex, including when the home
+// folder is unknown, since no codex can then be placed under it.
 func configAddCommand(codex string, paths []string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("find home: %w", err)
+	home := os.Getenv("HOME") // as os.UserHomeDir on Unix
+	if home == "" {
+		return "", nil // no home folder: no codex is under ~/.claude, so there is no hint to give
 	}
-	if home, err = filepath.Abs(home); err != nil {
+	home, err := filepath.Abs(home)
+	if err != nil {
 		return "", fmt.Errorf("resolve home: %w", err)
-	}
-	configRepo := filepath.Join(home, ".claude-config.git")
-	info, err := os.Stat(configRepo)
-	if errors.Is(err, fs.ErrNotExist) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("stat %s: %w", configRepo, err)
-	}
-	if !info.IsDir() {
-		return "", nil
 	}
 	if codex, err = filepath.Abs(codex); err != nil {
 		return "", fmt.Errorf("resolve codex: %w", err)
@@ -375,6 +366,17 @@ func configAddCommand(codex string, paths []string) (string, error) {
 		return "", fmt.Errorf("place codex under home: %w", err)
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", nil
+	}
+	configRepo := filepath.Join(home, ".claude-config.git")
+	info, err := os.Stat(configRepo)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("config repository: %w", err)
+	}
+	if !info.IsDir() {
 		return "", nil
 	}
 	words := make([]string, len(paths))
