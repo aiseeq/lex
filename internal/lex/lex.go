@@ -1191,8 +1191,11 @@ func frontMatterOffset(data []byte) int {
 	return offset
 }
 
+// lexMarker opens every lex header line, this codex's or another's.
+var lexMarker = []byte("<!-- lex: собран из ")
+
 func hasGeneratedHeader(data []byte) bool {
-	return bytes.HasPrefix(data[frontMatterOffset(data):], []byte("<!-- lex: собран из "))
+	return bytes.HasPrefix(data[frontMatterOffset(data):], lexMarker)
 }
 
 func expandHeaderCodexPath(path string) string {
@@ -1227,14 +1230,13 @@ func ForeignHeaderPhrase(owner string) string {
 
 // foreignOutputOwner reports the codex named by a lex header that is not this codex's ("unknown codex" when the header names none).
 func foreignOutputOwner(codex string, data []byte) (string, bool) {
-	marker := []byte("<!-- lex: собран из ")
 	offset := frontMatterOffset(data)
 	lineEnd := bytes.IndexByte(data[offset:], '\n')
 	line := data[offset:]
 	if lineEnd >= 0 {
 		line = line[:lineEnd]
 	}
-	value, ok := bytes.CutPrefix(line, marker)
+	value, ok := bytes.CutPrefix(line, lexMarker)
 	if !ok {
 		return "", false
 	}
@@ -1468,9 +1470,62 @@ func textAboveHeaderAdvice(line int, hasFrontMatter bool) string {
 // byteOrderMark is the UTF-8 byte order mark; lex keeps it as text, so before the lex header it hides the header.
 var byteOrderMark = []byte("\xef\xbb\xbf")
 
+// headerLinePrefix finds invisible bytes (a byte order mark, a zero-width or space character) that hide a lex
+// header, this codex's or another's: before the marker on the header line, or before the front matter above it.
+// It returns them and the line they start on.
+func headerLinePrefix(data []byte) ([]byte, int, bool) {
+	firstLine := func(b []byte) []byte {
+		line, _, _ := bytes.Cut(b, []byte{'\n'})
+		return line
+	}
+	offset := frontMatterOffset(data)
+	if index := bytes.Index(firstLine(data[offset:]), lexMarker); index > 0 && invisibleBytes(data[offset:offset+index]) {
+		return data[offset : offset+index], bytes.Count(data[:offset], []byte{'\n'}) + 1, true
+	}
+	if offset > 0 {
+		return nil, 0, false
+	}
+	index := bytes.Index(firstLine(data), []byte("---"))
+	if index <= 0 || !invisibleBytes(data[:index]) {
+		return nil, 0, false
+	}
+	rest := data[index:]
+	if matter := frontMatterOffset(rest); matter > 0 && bytes.HasPrefix(rest[matter:], lexMarker) {
+		return data[:index], 1, true
+	}
+	return nil, 0, false
+}
+
+// invisibleBytes reports whether b is only space and format characters, which an editor shows as nothing.
+func invisibleBytes(b []byte) bool {
+	for len(b) > 0 {
+		r, size := utf8.DecodeRune(b)
+		if r == utf8.RuneError || (!unicode.IsSpace(r) && !unicode.Is(unicode.Cf, r)) {
+			return false
+		}
+		b = b[size:]
+	}
+	return true
+}
+
+// headerPrefixRefusal names the bytes headerLinePrefix found and where to delete them.
+func headerPrefixRefusal(prefix []byte, line int) string {
+	what, them := fmt.Sprintf("invisible bytes % X stand", prefix), "them"
+	if n := bytes.Count(prefix, byteOrderMark); n*len(byteOrderMark) == len(prefix) {
+		what = fmt.Sprintf("%d byte order marks (bytes EF BB BF each) stand", n)
+		if n == 1 {
+			what, them = "a byte order mark (bytes EF BB BF) stands", "it"
+		}
+	}
+	return fmt.Sprintf("%s at the start of line %d, before the lex header, so the header is not recognised; delete %s from line %d", what, line, them, line)
+}
+
 // textAboveHeaderRefusal returns the shared refusal when a lex header stands below text other
 // than front matter. A header in its place ends the check, so a copy quoted further down does not count.
 func textAboveHeaderRefusal(selected string, m manifest, actual []byte) string {
+	if prefix, line, ok := headerLinePrefix(actual); ok {
+		return headerPrefixRefusal(prefix, line)
+	}
 	if !m.header {
 		return ""
 	}
@@ -1479,13 +1534,6 @@ func textAboveHeaderRefusal(selected string, m manifest, actual []byte) string {
 	for _, form := range forms {
 		if bytes.HasPrefix(top, form) {
 			return ""
-		}
-	}
-	if afterMark, ok := bytes.CutPrefix(actual, byteOrderMark); ok {
-		for _, form := range forms {
-			if bytes.HasPrefix(afterMark[frontMatterOffset(afterMark):], form) {
-				return "a byte order mark (bytes EF BB BF) stands before the lex header, so the header is not recognised; delete the mark from the start of the file"
-			}
 		}
 	}
 	first := -1
