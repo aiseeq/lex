@@ -1371,15 +1371,28 @@ func absorbBuiltBody(codex, target, selected string, paths []string, m manifest,
 	return built, nil
 }
 
+// rejectTextAboveHeader refuses a file whose lex header line, with either line ending, stands
+// below text other than front matter. A header in its place ends the check, so a copy of the
+// header quoted further down the file does not count.
 func rejectTextAboveHeader(file, selected string, m manifest, actual []byte) error {
-	if m.header {
-		for _, marker := range generatedMarkerForms(selected) {
-			for _, ending := range [][]byte{[]byte("\n"), []byte("\r\n")} {
-				form := append(append([]byte(nil), bytes.TrimSuffix(marker, []byte("\n"))...), ending...)
-				if index := bytes.Index(actual, form); index > 0 && actual[index-1] == '\n' && index != frontMatterOffset(actual) {
-					return fmt.Errorf("%s: text above lex header; move the text below the header", file)
-				}
-			}
+	if !m.header {
+		return nil
+	}
+	var forms [][]byte
+	for _, marker := range generatedMarkerForms(selected) {
+		for _, ending := range [][]byte{[]byte("\n"), []byte("\r\n")} {
+			forms = append(forms, append(append([]byte(nil), bytes.TrimSuffix(marker, []byte("\n"))...), ending...))
+		}
+	}
+	top := actual[frontMatterOffset(actual):]
+	for _, form := range forms {
+		if bytes.HasPrefix(top, form) {
+			return nil
+		}
+	}
+	for _, form := range forms {
+		if index := bytes.Index(actual, form); index > 0 && actual[index-1] == '\n' {
+			return fmt.Errorf("%s: text above lex header; move the text below the header", file)
 		}
 	}
 	return nil

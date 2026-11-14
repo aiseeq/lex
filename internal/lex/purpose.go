@@ -228,7 +228,7 @@ func (p purposeLayout) strip(actual []byte, output string) ([]byte, error) {
 		matchedNew[pair[1]] = true
 		newToOld[pair[1]] = pair[0]
 	}
-	if err, _ := p.checkMovedGoals(oldLines, matches, newLines, newToOld, nil); err != nil {
+	if _, err := p.checkMovedGoals(oldLines, matches, newLines, newToOld, nil); err != nil {
 		return nil, err
 	}
 	if err := p.checkRemovedGoals(oldLines, newLines, matchedOld); err != nil {
@@ -247,7 +247,7 @@ func (p purposeLayout) strip(actual []byte, output string) ([]byte, error) {
 	return clean, nil
 }
 
-func (p purposeLayout) checkMovedGoals(oldLines [][]byte, matches [][2]int, newLines [][]byte, newToOld map[int]int, only map[int]bool) (error, bool) {
+func (p purposeLayout) checkMovedGoals(oldLines [][]byte, matches [][2]int, newLines [][]byte, newToOld map[int]int, only map[int]bool) (bool, error) {
 	for _, pair := range matches {
 		id, isGoal := p.owners[pair[0]]
 		if !isGoal || (only != nil && !only[pair[0]]) {
@@ -261,12 +261,12 @@ func (p purposeLayout) checkMovedGoals(oldLines [][]byte, matches [][2]int, newL
 		oldIndex, ok := newToOld[previous]
 		if previous < 0 || (ok && (oldIndex < span.start || oldIndex >= span.end)) {
 			if !p.ruleTextPresent(span, oldLines, newLines, matches) {
-				return fmt.Errorf("%s: цель line %q has no rule text; delete the line or restore its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n")), false
+				return false, fmt.Errorf("%s: цель line %q has no rule text; delete the line or restore its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n"))
 			}
-			return fmt.Errorf("%s: цель moved to another fragment; put the line %q back under its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n")), true
+			return true, fmt.Errorf("%s: цель moved to another fragment; put the line %q back under its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n"))
 		}
 	}
-	return nil, false
+	return false, nil
 }
 
 func (p purposeLayout) ruleTextPresent(span purposeSpan, oldLines, newLines [][]byte, matches [][2]int) bool {
@@ -417,8 +417,8 @@ func (p purposeLayout) refuseRemovedGoals(oldLines, newLines [][]byte, failed []
 					continue
 				}
 				candidate, newToOld := purposeMatchesWithCandidate(matches, index, i)
-				if err, moved := p.checkMovedGoals(oldLines, candidate, normalized, newToOld, map[int]bool{index: true}); moved {
-					return fmt.Errorf("purpose line has CRLF line endings; %w", err)
+				if moved, err := p.checkMovedGoals(oldLines, candidate, normalized, newToOld, map[int]bool{index: true}); moved {
+					return fmt.Errorf("purpose line has CRLF line endings; restore its line ending; %w", err)
 				}
 			}
 		}

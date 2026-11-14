@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -174,6 +175,48 @@ func TestAbsorbRefusesTextAboveHeader(t *testing.T) {
 			}
 			if !bytes.Equal(data, after) || !bytes.Equal(before, treeBytes(t, codex)) {
 				t.Fatal("refusal changed file or codex")
+			}
+		})
+	}
+}
+
+// TestAbsorbKeepsHeaderCopyBelow: the lex header stands in its place and a copy of it, with
+// either line ending, is quoted in a code block further down; absorb takes the edit.
+func TestAbsorbKeepsHeaderCopyBelow(t *testing.T) {
+	for _, ending := range []string{"\n", "\r\n"} {
+		t.Run(strconv.Quote(ending), func(t *testing.T) {
+			dir := t.TempDir()
+			out := filepath.Join(dir, "a.md")
+			codex := filepath.Join(dir, "cx")
+			data := []byte("# A\n\n- one\n\n- two\n")
+			mustWrite(t, out, data)
+			if err := importData(codex, out, "a.md", data, false); err != nil {
+				t.Fatal(err)
+			}
+			path := manifestOf(t, codex, "a.md")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, path, bytes.Replace(raw, []byte("header: false\n"), []byte("header: true\n"), 1))
+			if err := BuildWithOptions(codex, BuildOptions{Force: true}); err != nil {
+				t.Fatal(err)
+			}
+			built, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			header := built[:bytes.IndexByte(built, '\n')]
+			edited := append(append([]byte(nil), built...), "\n```\n"+string(header)+ending+"```\n"...)
+			mustWrite(t, out, edited)
+			if err := Absorb(codex, out, AbsorbOptions{DraftDir: codex}); err != nil {
+				t.Fatalf("absorb refused a header copy below the header: %v", err)
+			}
+			if err := BuildWithOptions(codex, BuildOptions{Force: true}); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := os.ReadFile(out); err != nil || !bytes.Equal(got, edited) {
+				t.Fatalf("rebuilt file = %q, %v; want %q", got, err, edited)
 			}
 		})
 	}
