@@ -1236,6 +1236,15 @@ func ForeignHeaderPhrase(owner string) string {
 // foreignOutputOwner reports the codex named by a lex header that is not this codex's ("unknown codex" when the header names none).
 func foreignOutputOwner(codex string, data []byte) (string, bool) {
 	offset := frontMatterOffset(data)
+	if offset == 0 {
+		// An invisible prefix before the front matter fence hides the header under it as well.
+		first, _, _ := bytes.Cut(data, []byte{'\n'})
+		if index := bytes.Index(first, []byte("---")); index > 0 && invisibleHeaderPrefix(data[:index]) {
+			if matter := frontMatterOffset(data[index:]); matter > 0 {
+				offset = index + matter
+			}
+		}
+	}
 	lineEnd := bytes.IndexByte(data[offset:], '\n')
 	line := data[offset:]
 	if lineEnd >= 0 {
@@ -1262,10 +1271,10 @@ func foreignOutputOwner(codex string, data []byte) (string, bool) {
 	return owner, true
 }
 
-// invisibleHeaderPrefix recognizes hidden header prefixes while preserving
-// indented code: ordinary ASCII spaces and tabs make the marker document text.
+// invisibleHeaderPrefix reports a prefix that hides a lex header: invisible bytes with at least one
+// that is not an ASCII space or tab. A prefix of spaces and tabs alone makes the marker document text (indented code).
 func invisibleHeaderPrefix(prefix []byte) bool {
-	return len(prefix) > 0 && invisibleBytes(prefix) && !bytes.ContainsAny(prefix, " \t")
+	return invisibleBytes(prefix) && bytes.IndexFunc(prefix, func(r rune) bool { return r != ' ' && r != '\t' }) >= 0
 }
 
 func withoutGeneratedHeader(data []byte, manifestPath string) []byte {

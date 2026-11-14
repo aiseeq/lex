@@ -13,6 +13,8 @@ func TestForeignHeaderBehindInvisiblePrefixRefused(t *testing.T) {
 	}{
 		{name: "BOM", data: []byte("\xef\xbb\xbf")},
 		{name: "ZWSP", data: []byte("\xe2\x80\x8b")},
+		{name: "BOM and space", data: []byte("\xef\xbb\xbf ")},
+		{name: "BOM before front matter", data: []byte("\xef\xbb\xbf---\nname: x\n---\n")},
 	}
 	for _, prefix := range prefixes {
 		t.Run(prefix.name, func(t *testing.T) {
