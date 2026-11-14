@@ -1,7 +1,6 @@
 package lex
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
@@ -21,29 +20,13 @@ func TestAbsorbAppendLeavesNoBlankFragment(t *testing.T) {
 				input += "\n"
 			}
 			codex, out, manifestPath, _ := purposeFixture(t, input)
-			if err := Build(codex, false); err != nil {
-				t.Fatal(err)
-			}
-			data, err := os.ReadFile(out)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !tc.trailingNewline {
-				data = []byte(strings.TrimSuffix(string(data), "\n"))
-			}
-			want := append(append([]byte(nil), data...), []byte("\n- four\n")...)
-			mustWrite(t, out, want)
-			if err := Absorb(codex, out, AbsorbOptions{DraftDir: codex}); err != nil {
-				t.Fatal(err)
-			}
-			updated := mustReadManifest(t, manifestPath)
-			for _, id := range updated.parts {
-				body := readFragmentBody(t, codex, id)
-				if len(body) > 0 && len(strings.TrimSpace(string(body))) == 0 {
-					t.Errorf("fragment %q contains only blank lines: %q", id, body)
+			want := prepareBlankAbsorbEdit(t, codex, out, func(data []byte) []byte {
+				if !tc.trailingNewline {
+					data = []byte(strings.TrimSuffix(string(data), "\n"))
 				}
-			}
-			assertAbsorbedOutputEquals(t, codex, out, want)
+				return append(append([]byte(nil), data...), []byte("\n- four\n")...)
+			})
+			finishBlankAbsorb(t, codex, out, manifestPath, want)
 		})
 	}
 }

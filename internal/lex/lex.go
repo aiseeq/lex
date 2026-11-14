@@ -1898,7 +1898,35 @@ func headingLines(lines [][]byte) bool {
 	return found
 }
 
+// mergeTextWithBlankInsertions joins a text insertion and a blank-line insertion separated only by an unchanged blank gap,
+// so the blank lines stay with the new text: given to the old neighbour fragment, they would land on the wrong side of it.
+func mergeTextWithBlankInsertions(oldLines, newLines [][]byte, hunks []lineHunk) []lineHunk {
+	merged := make([]lineHunk, 0, len(hunks))
+	for i := 0; i < len(hunks); i++ {
+		current := hunks[i]
+		if i+1 < len(hunks) && joinsBlankInsertion(oldLines, newLines, current, hunks[i+1]) {
+			current.oldEnd, current.newEnd = hunks[i+1].oldStart, hunks[i+1].newEnd
+			i++
+		}
+		merged = append(merged, current)
+	}
+	return merged
+}
+
+func joinsBlankInsertion(oldLines, newLines [][]byte, first, second lineHunk) bool {
+	insertion := func(h lineHunk) bool { return h.oldStart == h.oldEnd && h.newStart < h.newEnd }
+	if !insertion(first) || !insertion(second) {
+		return false
+	}
+	if onlyBlankLines(newLines[first.newStart:first.newEnd]) == onlyBlankLines(newLines[second.newStart:second.newEnd]) {
+		return false
+	}
+	gapOld, gapNew := oldLines[first.oldEnd:second.oldStart], newLines[first.newEnd:second.newStart]
+	return onlyBlankLines(gapOld) && bytes.Equal(bytes.Join(gapOld, nil), bytes.Join(gapNew, nil))
+}
+
 func assignAbsorbHunks(bounds [][2]int, parts []string, oldLines, newLines [][]byte, hunks []lineHunk, draftDir, key, output string, fileBytes []byte) ([]int, []int, map[int][]lineHunk, error) {
+	hunks = mergeTextWithBlankInsertions(oldLines, newLines, hunks)
 	owners := make([]int, 0, len(hunks))
 	deltas := make([]int, len(parts))
 	additions := make(map[int][]lineHunk)
@@ -1932,9 +1960,17 @@ type absorbHunkAssignment struct {
 
 func assignAbsorbHunk(bounds [][2]int, oldLines, newLines [][]byte, hunk lineHunk) (absorbHunkAssignment, bool) {
 	if hunk.oldStart == hunk.oldEnd && hunk.newEnd > hunk.newStart {
+		if onlyBlankLines(newLines[hunk.newStart:hunk.newEnd]) && len(bounds) > 0 {
+			part := 0
+			if hunk.oldStart > 0 {
+				part = fragmentOwnerForLines(bounds, hunk.oldStart-1, hunk.oldStart)
+			}
+			if part >= 0 {
+				return absorbHunkAssignment{owners: []int{part}, deltas: map[int]int{part: hunk.newEnd - hunk.newStart}}, true
+			}
+		}
 		if hunk.oldStart == len(oldLines) && len(bounds) > 0 && onlyBlankLines(newLines[hunk.newStart:hunk.newEnd]) {
-			// Trailing whitespace belongs to the last existing fragment. Treat it as
-			// an edit so shared-fragment validation applies as usual.
+			// Trailing blank lines remain an edit to the final existing fragment.
 			part := len(bounds) - 1
 			return absorbHunkAssignment{owners: []int{part}, deltas: map[int]int{part: hunk.newEnd - hunk.newStart}}, true
 		}
