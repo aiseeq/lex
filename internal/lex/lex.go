@@ -1706,7 +1706,7 @@ type absorbPlan struct {
 }
 
 func planAbsorbEdits(codex string, paths []string, selected string, m manifest, bounds [][2]int, oldLines, newLines [][]byte, hunks []lineHunk, fileBytes []byte, options AbsorbOptions, printedPurpose bool) ([]preparedFragmentEdit, []int, map[int][]lineHunk, error) {
-	owners, deltas, additions, err := assignAbsorbHunks(bounds, m.parts, oldLines, hunks, options.DraftDir, manifestKey(selected), m.out, fileBytes)
+	owners, deltas, additions, err := assignAbsorbHunks(bounds, m.parts, oldLines, newLines, hunks, options.DraftDir, manifestKey(selected), m.out, fileBytes)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1916,12 +1916,12 @@ func headingLines(lines [][]byte) bool {
 	return found
 }
 
-func assignAbsorbHunks(bounds [][2]int, parts []string, oldLines [][]byte, hunks []lineHunk, draftDir, key, output string, fileBytes []byte) ([]int, []int, map[int][]lineHunk, error) {
+func assignAbsorbHunks(bounds [][2]int, parts []string, oldLines, newLines [][]byte, hunks []lineHunk, draftDir, key, output string, fileBytes []byte) ([]int, []int, map[int][]lineHunk, error) {
 	owners := make([]int, 0, len(hunks))
 	deltas := make([]int, len(parts))
 	additions := make(map[int][]lineHunk)
 	for _, hunk := range hunks {
-		assignment, ok := assignAbsorbHunk(bounds, oldLines, hunk)
+		assignment, ok := assignAbsorbHunk(bounds, oldLines, newLines, hunk)
 		if !ok {
 			return nil, nil, nil, writeAbsorbDraft(draftDir, key, output, fileBytes, "boundary conflict")
 		}
@@ -1948,8 +1948,14 @@ type absorbHunkAssignment struct {
 	addition         *lineHunk
 }
 
-func assignAbsorbHunk(bounds [][2]int, oldLines [][]byte, hunk lineHunk) (absorbHunkAssignment, bool) {
+func assignAbsorbHunk(bounds [][2]int, oldLines, newLines [][]byte, hunk lineHunk) (absorbHunkAssignment, bool) {
 	if hunk.oldStart == hunk.oldEnd && hunk.newEnd > hunk.newStart {
+		if hunk.oldStart == len(oldLines) && len(bounds) > 0 && onlyBlankLines(newLines[hunk.newStart:hunk.newEnd]) {
+			// Trailing whitespace belongs to the last existing fragment. Treat it as
+			// an edit so shared-fragment validation applies as usual.
+			part := len(bounds) - 1
+			return absorbHunkAssignment{owners: []int{part}, deltas: map[int]int{part: hunk.newEnd - hunk.newStart}}, true
+		}
 		if part, tail, ok := insertionBoundaryPart(bounds, oldLines, hunk.oldStart); ok {
 			hunk.newEnd += tail
 			position := bounds[part][1]
@@ -1981,6 +1987,15 @@ func assignAbsorbHunk(bounds [][2]int, oldLines [][]byte, hunk lineHunk) (absorb
 	}
 	delta := (hunk.newEnd - hunk.newStart) - (hunk.oldEnd - hunk.oldStart)
 	return absorbHunkAssignment{owners: []int{owner}, deltas: map[int]int{owner: delta}}, true
+}
+
+func onlyBlankLines(lines [][]byte) bool {
+	for _, line := range lines {
+		if len(bytes.TrimSpace(line)) != 0 {
+			return false
+		}
+	}
+	return len(lines) > 0
 }
 
 func appendUniqueInt(values []int, value int) []int {
@@ -2160,7 +2175,7 @@ func planInsertedFragments(codex, selected string, parts []string, additions map
 		for _, hunk := range hunks {
 			body := bytes.Join(newLines[hunk.newStart:hunk.newEnd], nil)
 			units := split(body)
-			if hunk.oldStart == hunk.oldEnd && hunk.oldEnd == position && hunk.newEnd == len(newLines) {
+			if hunk.oldStart == hunk.oldEnd && hunk.oldEnd == position {
 				units = attachLeadingBlankUnits(units)
 			}
 			for _, unit := range units {
@@ -2179,8 +2194,8 @@ func planInsertedFragments(codex, selected string, parts []string, additions map
 	return created, nil
 }
 
-// attachLeadingBlankUnits joins the blank separator units that open text appended at the end of a
-// file to the first unit with text, so the separator does not become a fragment of its own.
+// attachLeadingBlankUnits joins leading blank separator units to the first unit with text, so the
+// separator does not become a fragment of its own.
 func attachLeadingBlankUnits(units [][]byte) [][]byte {
 	leading := 0
 	for leading < len(units) && len(bytes.TrimSpace(units[leading])) == 0 {
@@ -2623,7 +2638,7 @@ func sharedOutputEdits(codex string, m manifest, actual []byte, sharedParts map[
 	for i, span := range layout.spans {
 		bounds[i] = [2]int{span.start, span.end}
 	}
-	owners, _, _, err := assignAbsorbHunks(bounds, m.parts, oldLines, hunks, "", manifestKey(m.out), m.out, actual)
+	owners, _, _, err := assignAbsorbHunks(bounds, m.parts, oldLines, newLines, hunks, "", manifestKey(m.out), m.out, actual)
 	if err != nil {
 		return false, false, err
 	}
