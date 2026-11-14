@@ -43,8 +43,9 @@ func TestUserQuoteDetectorBranches(t *testing.T) {
 		count int
 		want  bool
 	}{
-		{"b14_window_date_30", 30, true},
-		{"b14_window_date_31", 31, true},
+		// The quote comes after the date and is held to 110 characters, so the date limit shows only when lowered.
+		{"b14_window_date_104_quote_110", 104, true},
+		{"b14_window_date_105_quote_111", 105, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			text := "пользователь " + strings.Repeat("а", tc.count-len([]rune("пользователь "))) + "03.02 «сад»"
@@ -134,6 +135,24 @@ func TestTextReferenceDetectorBranches(t *testing.T) {
 			t.Fatalf("historical removal was treated as a section reference: %+v", findings)
 		}
 	})
+
+	for _, tc := range []struct {
+		name  string
+		span  int
+		found int
+	}{
+		{"b25_historical_removal_window_180", 180, 0},
+		{"b25_historical_removal_window_181", 181, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text := "Снимает " + strings.Repeat("я", tc.span-1) + " правило «сухой погреб»"
+			path := filepath.Join(t.TempDir(), "source.md")
+			findings := withoutOrphanSkillFindings(findTextRefs(textCorpus{path: []byte(text)}, journal))
+			if len(findings) != tc.found {
+				t.Fatalf("%d characters between «Снимает» and «правило»: findings %+v, want %d", tc.span, findings, tc.found)
+			}
+		})
+	}
 
 	t.Run("b28_register_from_section", func(t *testing.T) {
 		dir := t.TempDir()
