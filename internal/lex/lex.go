@@ -707,6 +707,133 @@ func buildManifests(codex string, paths []string, options BuildOptions) ([]strin
 	return differences, manualEdits, nil
 }
 
+type editWarningSnapshot struct {
+	mtime    string
+	fileGit  string
+	partsGit string
+}
+
+// gitLocalEnv lists the variables of `git rev-parse --local-env-vars`: inherited from a hook or another repository, they would make git report the state of the wrong repository.
+var gitLocalEnv = map[string]bool{"GIT_ALTERNATE_OBJECT_DIRECTORIES": true, "GIT_CONFIG": true, "GIT_CONFIG_PARAMETERS": true, "GIT_CONFIG_COUNT": true, "GIT_OBJECT_DIRECTORY": true, "GIT_DIR": true, "GIT_WORK_TREE": true, "GIT_IMPLICIT_WORK_TREE": true, "GIT_GRAFT_FILE": true, "GIT_INDEX_FILE": true, "GIT_NO_REPLACE_OBJECTS": true, "GIT_REPLACE_REF_BASE": true, "GIT_PREFIX": true, "GIT_SHALLOW_FILE": true, "GIT_COMMON_DIR": true}
+
+// gitStatusEnv runs git for the warning in the repository around the path, with English messages and without taking the index lock another session may need.
+func gitStatusEnv() []string {
+	env := []string{"LC_ALL=C", "GIT_OPTIONAL_LOCKS=0"}
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if !gitLocalEnv[key] && key != "LC_ALL" && key != "GIT_OPTIONAL_LOCKS" {
+			env = append(env, entry)
+		}
+	}
+	return env
+}
+
+func gitStatus(cwd string, paths ...string) (string, string, error) {
+	git, err := exec.LookPath("git")
+	if errors.Is(err, exec.ErrNotFound) {
+		return "", "", errors.New("git not found")
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("find git: %w", err)
+	}
+	args := append([]string{"--literal-pathspecs", "-C", cwd, "status", "--porcelain=v1", "--untracked-files=all", "--ignored", "--"}, paths...)
+	cmd := exec.Command(git, args...)
+	cmd.Env = gitStatusEnv()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err == nil {
+		return string(output), "", nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 128 && strings.Contains(strings.ToLower(stderr.String()), "not a git repository") {
+		return "", "not in a git repository", nil
+	}
+	reason := strings.TrimSpace(stderr.String())
+	if reason == "" {
+		reason = err.Error()
+	}
+	reason = strings.NewReplacer("\r", " ", "\n", " ").Replace(reason)
+	return "", "", errors.New(reason)
+}
+
+func fileGitState(path string) string {
+	dir, base := filepath.Dir(path), filepath.Base(path)
+	output, absentRepo, err := gitStatus(dir, base)
+	if absentRepo != "" {
+		return absentRepo
+	}
+	if err != nil {
+		return "unknown (" + err.Error() + ")"
+	}
+	if output == "" {
+		return "committed"
+	}
+	line := strings.TrimRight(output, "\n")
+	if strings.HasPrefix(line, "??") {
+		return "untracked"
+	}
+	if strings.HasPrefix(line, "!!") {
+		return "ignored"
+	}
+	x, y := line[0], line[1]
+	if x != ' ' && y != ' ' {
+		return "staged and modified"
+	}
+	if x != ' ' {
+		return "staged"
+	}
+	if y != ' ' {
+		return "modified"
+	}
+	return "committed"
+}
+
+func fragmentsGitState(codex string, m manifest, manifestPath string) string {
+	paths := make([]string, 0, len(m.parts)+1)
+	for _, id := range m.parts {
+		paths = append(paths, filepath.Join(codex, "frag", filepath.FromSlash(id)+".md"))
+	}
+	paths = append(paths, manifestPath)
+	output, absentRepo, err := gitStatus(codex, paths...)
+	if absentRepo != "" {
+		return absentRepo
+	}
+	if err != nil {
+		return "unknown (" + err.Error() + ")"
+	}
+	if output == "" {
+		return "committed"
+	}
+	if files := strings.Count(strings.TrimSuffix(output, "\n"), "\n") + 1; files > 1 {
+		return fmt.Sprintf("uncommitted changes in %d files", files)
+	}
+	return "uncommitted changes in 1 file"
+}
+
+func snapshotEditWarning(output, codex, manifestPath string, m manifest) *editWarningSnapshot {
+	info, err := os.Stat(output)
+	mtime := ""
+	if err != nil {
+		mtime = "unknown (" + err.Error() + ")"
+	} else {
+		mtime = info.ModTime().In(time.Local).Format("2006-01-02 15:04:05 MST")
+	}
+	return &editWarningSnapshot{
+		mtime:    mtime,
+		fileGit:  fileGitState(output),
+		partsGit: fragmentsGitState(codex, m, manifestPath),
+	}
+}
+
+func printEditWarning(kind, output string, s *editWarningSnapshot) {
+	if kind == "build" {
+		fmt.Fprintf(os.Stderr, "warning: %s: --force replaced an edit that was not in the fragments (file changed %s; git: %s; fragments: %s); if you did not make that edit, another session may have been working on this file\n", output, s.mtime, s.fileGit, s.partsGit)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: %s: absorb moved an edit into the fragments (file changed %s; git: %s; fragments: %s); if you did not make that edit, another session may still be working on this file — let it finish before you commit\n", output, s.mtime, s.fileGit, s.partsGit)
+}
+
 func buildManifest(codex, path string, options BuildOptions) (string, error) {
 	m, err := readManifest(path)
 	if err != nil {
@@ -731,6 +858,10 @@ func buildManifest(codex, path string, options BuildOptions) (string, error) {
 	if m.builtHash == "" && !options.Force {
 		return "", fmt.Errorf("%s: manifest has no built_sha256; use lex absorb or --force", path)
 	}
+	var warnSnapshot *editWarningSnapshot
+	if options.Force && outputHasManualEdits(e, actual, out, m, path, false) {
+		warnSnapshot = snapshotEditWarning(m.out, codex, path, m)
+	}
 	if outputHasManualEdits(e, actual, out, m, path, options.Force) {
 		return "", fmt.Errorf("%s: %w", m.out, errManualOutputEdits)
 	}
@@ -745,6 +876,9 @@ func buildManifest(codex, path string, options BuildOptions) (string, error) {
 	}
 	if e = updateManifestField(path, "built_sha256", sha(out)); e != nil {
 		return "", fmt.Errorf("%s: update manifest: %w", path, e)
+	}
+	if warnSnapshot != nil {
+		printEditWarning("build", m.out, warnSnapshot)
 	}
 	return "", nil
 }
@@ -1170,6 +1304,7 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 	if bytes.Equal(actual, built) {
 		return nil
 	}
+	warnSnapshot := snapshotAbsorbEditWarning(target, codex, selected, m, fileBytes)
 	purposeEnabled, err := readPurposeSetting(codex, read)
 	if err != nil {
 		return err
@@ -1192,8 +1327,24 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 			return err
 		}
 	}
-	return absorbEditedFragment(codex, paths, selected, m, built, actual, fileBytes, options, purpose)
+	return warnAfterAbsorb(absorbEditedFragment(codex, paths, selected, m, built, actual, fileBytes, options, purpose), target, warnSnapshot)
 }
+
+// warnAfterAbsorb prints the edit warning only when the absorb succeeded.
+func warnAfterAbsorb(err error, target string, warning *editWarningSnapshot) error {
+	if err == nil && warning != nil {
+		printEditWarning("absorb", target, warning)
+	}
+	return err
+}
+
+func snapshotAbsorbEditWarning(target, codex, selected string, m manifest, fileBytes []byte) *editWarningSnapshot {
+	if !statusFileChanged(fileBytes, selected, m) {
+		return nil
+	}
+	return snapshotEditWarning(target, codex, selected, m)
+}
+
 func findOutputManifest(paths []string, target string) (string, manifest, error) {
 	for _, path := range paths {
 		m, err := readManifest(path)
