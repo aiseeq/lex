@@ -165,6 +165,47 @@ type refreshAssessment struct {
 	noChange       bool
 }
 
+func refreshRemovedSharedOutputs(codex, topic string, m manifest, cleanData []byte, purposeEnabled bool) ([]string, error) {
+	headers, err := readFragmentHeaders(codex, m.parts)
+	if err != nil {
+		return nil, err
+	}
+	units := split(cleanData)
+	if purposeEnabled {
+		units, err = refreshPurposeUnits(cleanData, headers)
+		if err != nil {
+			return nil, err
+		}
+	}
+	newParts, _, _ := matchImportedHeaders(topic, units, headers)
+	newPartSet := make(map[string]bool, len(newParts))
+	for _, id := range newParts {
+		newPartSet[id] = true
+	}
+	paths, err := filepath.Glob(filepath.Join(codex, "manifest", "*.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("list manifests: %w", err)
+	}
+	sort.Strings(paths)
+	var otherOutputs []string
+	for _, id := range m.parts {
+		if newPartSet[id] {
+			continue
+		}
+		outputs, err := manifestsUsing(paths, id)
+		if err != nil {
+			return nil, err
+		}
+		for _, output := range outputs {
+			if output != m.out {
+				otherOutputs = append(otherOutputs, output)
+			}
+		}
+	}
+	sort.Strings(otherOutputs)
+	return slices.Compact(otherOutputs), nil
+}
+
 func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byte) (refreshAssessment, error) {
 	sourceData := diskData
 	if m.header {
@@ -180,6 +221,31 @@ func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byt
 		cleanData:      cleanData,
 		purposeEnabled: purposeEnabled,
 		noChange:       sha(sourceData) == m.hash,
+	}
+	if !assessment.noChange {
+		var layout purposeLayout
+		if purposeEnabled {
+			layout, err = readPurposeLayout(codex, m)
+		} else {
+			layout, err = readPlainPartLayout(codex, m)
+		}
+		if err != nil {
+			return assessment, err
+		}
+		sharedFlag, sharedHint, hintErr := codexSharedForceHint(codex, m, layout.rendered, sourceData)
+		if hintErr != nil {
+			return assessment, hintErr
+		}
+		if sharedFlag != "" {
+			return assessment, fmt.Errorf("%s: refresh would edit a shared fragment%s; run `lex absorb%s --codex %s %s`", m.out, sharedHint, sharedFlag, ShellQuoteArg(codex), ShellQuoteArg(m.out))
+		}
+		otherOutputs, err := refreshRemovedSharedOutputs(codex, topic, m, assessment.cleanData, purposeEnabled)
+		if err != nil {
+			return assessment, err
+		}
+		if len(otherOutputs) > 0 {
+			return assessment, fmt.Errorf("%s: refresh would remove a fragment still used by %s; run `lex absorb --codex %s %s`", m.out, strings.Join(otherOutputs, ", "), ShellQuoteArg(codex), ShellQuoteArg(m.out))
+		}
 	}
 	if !assessment.noChange && validationErr != nil {
 		return assessment, validationErr
@@ -3484,7 +3550,16 @@ func builtDiffers(codex string, m manifest, manifestPath string, want, actual []
 		}
 		return fmt.Sprintf("%s: built output differs from its fragments — run `lex absorb --force%s --codex %s %s` to keep the file, or `lex build --force --codex %s %s` to keep the fragments%s", out, sharedFlag, codexArg, fileArg, codexArg, fileArg, sharedHint), true
 	}
-	return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`, or keep this edit with `lex absorb --codex %s %s`", out, codexArg, codexArg, fileArg), true
+	var sharedFlag, sharedHint string
+	if _, err := os.Stat(manifestPath); err == nil {
+		sharedFlag, sharedHint, err = codexSharedForceHint(codex, m, want, actual)
+		if err != nil {
+			return fmt.Sprintf("%s: %v", out, err), false
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Sprintf("%s: %v", out, err), false
+	}
+	return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`, or keep this edit with `lex absorb%s --codex %s %s`%s", out, codexArg, sharedFlag, codexArg, fileArg, sharedHint), true
 }
 
 func finishCheck(warnings, problems []string) ([]string, error) {
@@ -4142,6 +4217,14 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 	}
 	if m.header || refreshErr != nil || assessment.noChange {
 		entry.Command = "lex absorb --codex " + target
+	}
+	sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual)
+	if err != nil {
+		return err
+	}
+	if sharedFlag != "" {
+		entry.Command = "lex absorb" + sharedFlag + " --codex " + target
+		entry.SharedHint = sharedHint
 	}
 	return nil
 }
