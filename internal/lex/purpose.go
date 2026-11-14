@@ -319,17 +319,29 @@ func (p purposeLayout) existingRuleText(span purposeSpan, oldLines, newLines [][
 }
 
 // A changed rule can remain after its goal was moved above it. Only unmatched
-// lines within this rule's anchors can represent that edit.
+// lines within this rule's anchors can represent that edit, and only when the
+// rule's text is the longest old rule text the line starts with: a line that
+// extends a neighbour's longer text is the neighbour's edit.
 func (p purposeLayout) editedRuleInWindow(span purposeSpan, oldLines, newLines [][]byte, matchedNew map[int]bool, start, end int) bool {
 	for index := start; index < end; index++ {
 		if matchedNew[index] {
 			continue
 		}
 		text := bytes.TrimSpace(newLines[index])
-		for oldIndex := span.start; oldIndex < span.end; oldIndex++ {
-			if p.isRuleText(oldIndex, oldLines) && bytes.HasPrefix(text, bytes.TrimSpace(oldLines[oldIndex])) {
-				return true
+		own, other := -1, -1
+		for oldIndex := range oldLines {
+			rule := bytes.TrimSpace(oldLines[oldIndex])
+			if !p.isRuleText(oldIndex, oldLines) || !bytes.HasPrefix(text, rule) {
+				continue
 			}
+			if p.spanAt(oldIndex) == span {
+				own = max(own, len(rule))
+			} else {
+				other = max(other, len(rule))
+			}
+		}
+		if own >= 0 && own >= other {
+			return true
 		}
 	}
 	return false
@@ -418,7 +430,7 @@ func (p purposeLayout) refuseRemovedGoals(oldLines, newLines [][]byte, failed []
 				}
 				candidate, newToOld := purposeMatchesWithCandidate(matches, index, i)
 				if moved, err := p.checkMovedGoals(oldLines, candidate, normalized, newToOld, map[int]bool{index: true}); moved {
-					return fmt.Errorf("purpose line has CRLF line endings; restore its line ending; %w", err)
+					return fmt.Errorf("%w; the line has CRLF line endings, restore its line ending", err)
 				}
 			}
 		}
