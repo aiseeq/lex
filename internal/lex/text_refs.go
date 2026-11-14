@@ -492,6 +492,38 @@ type refScanner struct {
 	found          []textRefFinding
 	last, headings map[int]int
 	steps          map[string]bool
+	realKeys       map[string]string
+}
+
+// resolve is resolveRefTarget that also finds a corpus file reached through a
+// symlink: a path that is not a corpus key but has the real path of one is that key.
+func (s *refScanner) resolve(ref string) string {
+	target := resolveRefTarget(s.path, ref)
+	if _, ok := s.corpus[target]; ok {
+		return target
+	}
+	// A target that does not resolve is not reached through a symlink; it stays as written.
+	if real, err := filepath.EvalSymlinks(target); err == nil {
+		if key, ok := s.realCorpusKeys()[real]; ok {
+			return key
+		}
+	}
+	return target
+}
+
+// realCorpusKeys maps the real path of each corpus file to its key, built once per scan.
+func (s *refScanner) realCorpusKeys() map[string]string {
+	if s.realKeys == nil {
+		s.realKeys = make(map[string]string, len(s.corpus))
+		for _, key := range slices.Sorted(maps.Keys(s.corpus)) {
+			if keyReal, err := filepath.EvalSymlinks(key); err == nil {
+				if _, taken := s.realKeys[keyReal]; !taken {
+					s.realKeys[keyReal] = key
+				}
+			}
+		}
+	}
+	return s.realKeys
 }
 
 func (s *refScanner) add(kind int, missing string) {
@@ -666,7 +698,7 @@ func (s *refScanner) quotedSections() {
 		}
 		target := s.path
 		if ref := nearestFileRef(s.line, indexes[2]); ref != "" {
-			target = resolveRefTarget(s.path, ref)
+			target = s.resolve(ref)
 		}
 		if body, ok := s.corpus[target]; ok && !s.external[target] && !sectionExists(string(body), title, s.line) {
 			if !sectionExistsInSiblingFiles(s.corpus, filepath.Dir(s.path), target, title, s.external) {
@@ -707,7 +739,7 @@ func (s *refScanner) registerSections() {
 		if strings.Contains(strings.ToLower(match[0]), "из раздела") {
 			target = filepath.Join(filepath.Dir(s.path), "SKILL.md")
 		} else if len(refs) > 0 {
-			target = resolveRefTarget(s.path, refs[0][1])
+			target = s.resolve(refs[0][1])
 		}
 		if body, ok := s.corpus[target]; ok && !s.external[target] {
 			text := strings.ToLower(strings.ReplaceAll(string(body), "ё", "е"))
@@ -735,7 +767,7 @@ func (s *refScanner) files() {
 		if strings.Contains(match[1], "://") {
 			continue
 		}
-		target := resolveRefTarget(s.path, match[1])
+		target := s.resolve(match[1])
 		if s.missingFile(target) {
 			s.add(3, "нет файла "+target)
 			continue
@@ -746,7 +778,7 @@ func (s *refScanner) files() {
 		}
 	}
 	for _, match := range nearbyRef.FindAllStringSubmatch(s.line, -1) {
-		target := resolveRefTarget(s.path, match[1])
+		target := s.resolve(match[1])
 		if s.missingFile(target) {
 			s.add(3, "нет файла "+target)
 		}
