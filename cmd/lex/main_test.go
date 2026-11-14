@@ -135,12 +135,12 @@ func TestCommandHelpFlags(t *testing.T) {
 
 func TestStatusLineForms(t *testing.T) {
 	plain := lex.StatusEntry{Manifest: "m.yaml", Output: "out.md", Command: "lex absorb --codex c out.md"}
-	if got := statusLine(plain); got != "m.yaml: out.md; run lex absorb --codex c out.md" {
+	if got := statusLine(&plain); got != "m.yaml: out.md; run lex absorb --codex c out.md" {
 		t.Errorf("plain line = %q", got)
 	}
 	both := plain
 	both.KeepFragments = "lex build --force --codex c out.md"
-	got := statusLine(both)
+	got := statusLine(&both)
 	for _, want := range []string{
 		"m.yaml: out.md; the file and its fragments both changed since the last build",
 		"run lex absorb --codex c out.md to keep the file's text and drop the fragment text edits that are not in the file",
@@ -151,12 +151,12 @@ func TestStatusLineForms(t *testing.T) {
 		}
 	}
 	problem := lex.StatusEntry{Manifest: "m.yaml", Output: "out.md", Problem: "frag/a.md: no such file"}
-	if got := statusLine(problem); got != "m.yaml: out.md; cannot build from the fragments: frag/a.md: no such file" {
+	if got := statusLine(&problem); got != "m.yaml: out.md; cannot build from the fragments: frag/a.md: no such file" {
 		t.Errorf("fragment problem line = %q", got)
 	}
 	fileProblem := problem
 	fileProblem.ProblemFile = true
-	if got := statusLine(fileProblem); got != "m.yaml: out.md; cannot read the file: frag/a.md: no such file" {
+	if got := statusLine(&fileProblem); got != "m.yaml: out.md; cannot read the file: frag/a.md: no such file" {
 		t.Errorf("file problem line = %q", got)
 	}
 }

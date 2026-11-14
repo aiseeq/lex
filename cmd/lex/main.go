@@ -385,8 +385,8 @@ func statusCommand(o cliOptions) error {
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		fmt.Println(statusLine(entry))
+	for i := range entries {
+		fmt.Println(statusLine(&entries[i]))
 	}
 	if len(entries) > 0 {
 		return errors.New("files differ from the codex")
@@ -394,7 +394,7 @@ func statusCommand(o cliOptions) error {
 	return nil
 }
 
-func statusLine(entry lex.StatusEntry) string {
+func statusLine(entry *lex.StatusEntry) string {
 	prefix := entry.Manifest + ": " + entry.Output + "; "
 	switch {
 	case entry.Problem != "":

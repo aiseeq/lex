@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -97,7 +98,7 @@ func commandFromHint(hint string) ([]string, error) {
 			}
 			value, err := strconv.Unquote(hint[:end+1])
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("unquote %s: %w", hint[:end+1], err)
 			}
 			args = append(args, value)
 			hint = hint[end+1:]
@@ -333,7 +334,7 @@ func TestReadmeNamesAbsorbForce(t *testing.T) {
 func firstFragment(codex string) (string, error) {
 	paths, err := filepath.Glob(filepath.Join(codex, "frag", "*", "*.md"))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("list fragments: %w", err)
 	}
 	if len(paths) == 0 {
 		return "", os.ErrNotExist
@@ -360,7 +361,7 @@ func fragmentContaining(t *testing.T, codex, text string) (string, error) {
 	t.Helper()
 	paths, err := filepath.Glob(filepath.Join(codex, "frag", "*", "*.md"))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("list fragments: %w", err)
 	}
 	for _, path := range paths {
 		data, readErr := os.ReadFile(path)

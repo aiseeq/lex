@@ -1308,24 +1308,7 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 	}
 	fragmentsChanged := fragmentsChangedSinceBuild(codex, selected, m, built)
 	if fragmentsChanged && !outputMatchesGenerated(actual, built, m.header, selected) && !options.Force {
-		codexArg, fileArg := strconv.Quote(codex), strconv.Quote(target)
-		sharedFlag, sharedHint, hintErr := sharedForceHint(paths, m.out, m.parts)
-		if hintErr != nil {
-			return hintErr
-		}
-		fileChanged := statusFileChanged(actual, selected, m)
-		if fileChanged {
-			conflict := "file and fragments both changed since the last build"
-			if m.builtHash == "" {
-				conflict = "the file differs from its recorded source and the fragments differ from the manifest"
-			}
-			return fmt.Errorf("%s: %s; run `lex absorb --force%s --codex %s %s` to keep the file and lose fragment text edits not in it, or `lex build --force --codex %s %s` to keep the fragments and lose file edits%s", target, conflict, sharedFlag, codexArg, fileArg, codexArg, fileArg, sharedHint)
-		}
-		conflict := "fragments changed since the last build"
-		if m.builtHash == "" {
-			conflict = "the fragments differ from the manifest"
-		}
-		return fmt.Errorf("%s: %s; run `lex build --codex %s %s` to carry fragment edits into the file, or `lex absorb --force%s --codex %s %s` to discard them%s", target, conflict, codexArg, fileArg, sharedFlag, codexArg, fileArg, sharedHint)
+		return forceRefusal(codex, target, selected, paths, actual, m)
 	}
 	fileBytes := actual
 	if m.header {
@@ -2205,6 +2188,28 @@ func manifestsUsing(paths []string, part string) ([]string, error) {
 		}
 	}
 	return outputs, nil
+}
+
+// forceRefusal says why absorb refuses a file whose fragments changed since the build, with the commands that keep either side.
+func forceRefusal(codex, target, selected string, paths []string, actual []byte, m manifest) error {
+	codexArg, fileArg := strconv.Quote(codex), strconv.Quote(target)
+	sharedFlag, sharedHint, hintErr := sharedForceHint(paths, m.out, m.parts)
+	if hintErr != nil {
+		return hintErr
+	}
+	fileChanged := statusFileChanged(actual, selected, m)
+	if fileChanged {
+		conflict := "file and fragments both changed since the last build"
+		if m.builtHash == "" {
+			conflict = "the file differs from its recorded source and the fragments differ from the manifest"
+		}
+		return fmt.Errorf("%s: %s; run `lex absorb --force%s --codex %s %s` to keep the file and lose fragment text edits not in it, or `lex build --force --codex %s %s` to keep the fragments and lose file edits%s", target, conflict, sharedFlag, codexArg, fileArg, codexArg, fileArg, sharedHint)
+	}
+	conflict := "fragments changed since the last build"
+	if m.builtHash == "" {
+		conflict = "the fragments differ from the manifest"
+	}
+	return fmt.Errorf("%s: %s; run `lex build --codex %s %s` to carry fragment edits into the file, or `lex absorb --force%s --codex %s %s` to discard them%s", target, conflict, codexArg, fileArg, sharedFlag, codexArg, fileArg, sharedHint)
 }
 
 // sharedForceHint returns " --shared" and the sentence naming the other outputs
