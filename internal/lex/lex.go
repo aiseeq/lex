@@ -165,6 +165,47 @@ type refreshAssessment struct {
 	noChange       bool
 }
 
+func refreshRemovedSharedOutputs(codex, topic string, m manifest, cleanData []byte, purposeEnabled bool) ([]string, error) {
+	headers, err := readFragmentHeaders(codex, m.parts)
+	if err != nil {
+		return nil, err
+	}
+	units := split(cleanData)
+	if purposeEnabled {
+		units, err = refreshPurposeUnits(cleanData, headers)
+		if err != nil {
+			return nil, err
+		}
+	}
+	newParts, _, _ := matchImportedHeaders(topic, units, headers)
+	newPartSet := make(map[string]bool, len(newParts))
+	for _, id := range newParts {
+		newPartSet[id] = true
+	}
+	paths, err := filepath.Glob(filepath.Join(codex, "manifest", "*.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("list manifests: %w", err)
+	}
+	sort.Strings(paths)
+	var otherOutputs []string
+	for _, id := range m.parts {
+		if newPartSet[id] {
+			continue
+		}
+		outputs, err := manifestsUsing(paths, id)
+		if err != nil {
+			return nil, err
+		}
+		for _, output := range outputs {
+			if output != m.out {
+				otherOutputs = append(otherOutputs, output)
+			}
+		}
+	}
+	sort.Strings(otherOutputs)
+	return slices.Compact(otherOutputs), nil
+}
+
 func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byte) (refreshAssessment, error) {
 	sourceData := diskData
 	if m.header {
@@ -197,6 +238,13 @@ func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byt
 		}
 		if sharedFlag != "" {
 			return assessment, fmt.Errorf("%s: refresh would edit a shared fragment%s; run `lex absorb%s --codex %s %s`", m.out, sharedHint, sharedFlag, ShellQuoteArg(codex), ShellQuoteArg(m.out))
+		}
+		otherOutputs, err := refreshRemovedSharedOutputs(codex, topic, m, assessment.cleanData, purposeEnabled)
+		if err != nil {
+			return assessment, err
+		}
+		if len(otherOutputs) > 0 {
+			return assessment, fmt.Errorf("%s: refresh would remove a fragment still used by %s; run `lex absorb --codex %s %s`", m.out, strings.Join(otherOutputs, ", "), ShellQuoteArg(codex), ShellQuoteArg(m.out))
 		}
 	}
 	if !assessment.noChange && validationErr != nil {

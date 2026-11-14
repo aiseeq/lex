@@ -1,6 +1,7 @@
 package lex
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,5 +104,61 @@ func TestRefreshRefusesSharedEdit(t *testing.T) {
 	err := ImportWithOptions(codex, a, ImportOptions{Refresh: true, Home: root})
 	if err == nil || !strings.Contains(err.Error(), b) || !strings.Contains(err.Error(), "lex absorb --shared") {
 		t.Fatalf("refresh error = %v", err)
+	}
+}
+
+func TestRefreshKeepsFragmentOtherFileBuilds(t *testing.T) {
+	for _, tc := range []struct {
+		name, content string
+	}{
+		{name: "deleted", content: "# A\n"},
+		{name: "tail added", content: "# A\n\nshared para\ntail line\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, codex, a, b := sharedEditFixture(t)
+			mustWrite(t, a, []byte(tc.content))
+			before, err := snapshotCodexFiles(codex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = ImportWithOptions(codex, a, ImportOptions{Refresh: true, Home: root})
+			if err == nil || !strings.Contains(err.Error(), b) || !strings.Contains(err.Error(), "lex absorb --codex") {
+				t.Fatalf("refresh error = %v", err)
+			}
+			after, err := snapshotCodexFiles(codex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(before) != len(after) {
+				t.Fatalf("refused refresh changed codex file set")
+			}
+			for path, data := range before {
+				if !bytes.Equal(data, after[path]) {
+					t.Fatalf("refused refresh changed %s", path)
+				}
+			}
+			entries, err := StatusWithHome(codex, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, entry := range entries {
+				if entry.Output == a {
+					found = true
+					if !strings.HasPrefix(entry.Command, "lex absorb --codex ") {
+						t.Fatalf("status command = %q", entry.Command)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("status has no entry for %s", a)
+			}
+			if err := Absorb(codex, a, AbsorbOptions{}); err != nil {
+				t.Fatalf("absorb own edit: %v", err)
+			}
+			if _, err := CheckWithWarnings(codex, CheckOptions{}); err != nil {
+				t.Fatalf("check after absorb: %v", err)
+			}
+		})
 	}
 }
