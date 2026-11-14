@@ -1241,10 +1241,11 @@ func foreignOutputOwner(codex string, data []byte) (string, bool) {
 	if lineEnd >= 0 {
 		line = line[:lineEnd]
 	}
-	value, ok := bytes.CutPrefix(line, lexMarker)
-	if !ok {
+	markerOffset := bytes.Index(line, lexMarker)
+	if markerOffset < 0 || markerOffset > 0 && !invisibleHeaderPrefix(line[:markerOffset]) {
 		return "", false
 	}
+	value := line[markerOffset+len(lexMarker):]
 	codex = resolvePath(codex)
 	owner := unknownCodex
 	if before, _, ok0 := bytes.Cut(value, []byte(".yaml. Правь фрагменты в ")); ok0 {
@@ -1259,6 +1260,12 @@ func foreignOutputOwner(codex string, data []byte) (string, bool) {
 		}
 	}
 	return owner, true
+}
+
+// invisibleHeaderPrefix recognizes hidden header prefixes while preserving
+// indented code: ordinary ASCII spaces and tabs make the marker document text.
+func invisibleHeaderPrefix(prefix []byte) bool {
+	return len(prefix) > 0 && invisibleBytes(prefix) && !bytes.ContainsAny(prefix, " \t")
 }
 
 func withoutGeneratedHeader(data []byte, manifestPath string) []byte {
