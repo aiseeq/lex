@@ -3947,8 +3947,7 @@ func stagedDiskMissingFragments(commit *stagedPaths, paths, ids []string, manife
 		if _, err := os.Stat(diskPath); err == nil {
 			continue
 		} else if errors.Is(err, fs.ErrNotExist) {
-			id := ids[i]
-			missing = append(missing, missingFragmentAdvice(path, id, manifestPath))
+			missing = append(missing, missingFragmentAdvice(diskPath, ids[i], commit.treePath(manifestPath)))
 		} else {
 			missing = append(missing, fmt.Sprintf("%s: stat fragment on disk: %v", diskPath, err))
 		}

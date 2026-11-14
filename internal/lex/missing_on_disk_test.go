@@ -240,3 +240,31 @@ func TestCheckMissingFragmentAdvice(t *testing.T) {
 		})
 	}
 }
+
+// In a worktree whose codex is named by the main checkout's path, the advice
+// for a fragment missing from the worktree names the worktree copy and its
+// repository, so following it restores the file the staged check reads.
+func TestStagedWorktreeMissingFragmentNamesTreeCopy(t *testing.T) {
+	main, worktree, codex, git := codexInsideProjectWorktree(t)
+	output := filepath.Join(worktree, "CLAUDE.md")
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, output, []byte(manualInstruction(string(data))))
+	if err := git(worktree, "add", "CLAUDE.md"); err != nil {
+		t.Fatal(err)
+	}
+	fragment := worktreeFragment(t, worktree)
+	if err := os.Remove(fragment); err != nil {
+		t.Fatal(err)
+	}
+	err = checkIn(t, worktree, codex)
+	if err == nil {
+		t.Fatal("expected the missing fragment")
+	}
+	mainFragment := filepath.Join(main, strings.TrimPrefix(fragment, worktree+string(filepath.Separator)))
+	if !strings.Contains(err.Error(), fragment+": missing fragment") || strings.Contains(err.Error(), mainFragment+": missing fragment") || !strings.Contains(err.Error(), "git -C "+ShellQuoteArg(worktree)) {
+		t.Fatalf("advice must name the worktree copy %s and restore it in %s: %v", fragment, worktree, err)
+	}
+}
