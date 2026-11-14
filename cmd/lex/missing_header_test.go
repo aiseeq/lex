@@ -89,6 +89,16 @@ func TestCheckHintRestoresDeletedHeader(t *testing.T) {
 
 // After a restore the manifest knows the file lex wrote, so the next fragment edit builds without --force.
 func TestRestoredHeaderRecordsBuiltHash(t *testing.T) {
+	checkRestoreRecordsHash(t, false)
+}
+
+// A restore whose manifest write failed says so, and the next absorb records the hash it missed.
+func TestRestoreRetryRecordsHashAfterManifestWriteFailure(t *testing.T) {
+	checkRestoreRecordsHash(t, true)
+}
+
+func checkRestoreRecordsHash(t *testing.T, failManifestWrite bool) {
+	t.Helper()
 	codex, output, built := headerFixture(t)
 	fragments, err := filepath.Glob(filepath.Join(codex, "frag", "*", "*.md"))
 	if err != nil || len(fragments) == 0 {
@@ -120,7 +130,25 @@ func TestRestoredHeaderRecordsBuiltHash(t *testing.T) {
 	if err = os.WriteFile(output, []byte(strings.Replace(string(withoutFirstLine(t, built)), "at dawn.", "at noon.", 1)), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = captureRun(t, "absorb", "--codex", codex, "--force", output); err != nil {
+	if failManifestWrite {
+		manifests, globErr := filepath.Glob(filepath.Join(codex, "manifest", "*.yaml"))
+		if globErr != nil || len(manifests) != 1 {
+			t.Fatalf("find manifest: %v, %v", manifests, globErr)
+		}
+		if err = os.Chmod(manifests[0], 0444); err != nil {
+			t.Fatal(err)
+		}
+		_, err = captureRun(t, "absorb", "--codex", codex, "--force", output)
+		if chmodErr := os.Chmod(manifests[0], 0644); chmodErr != nil {
+			t.Fatal(chmodErr)
+		}
+		if err == nil || !strings.Contains(err.Error(), "the manifest was not updated") {
+			t.Fatalf("absorb with a read-only manifest should say the manifest was not updated: %v", err)
+		}
+		if _, err = captureRun(t, "absorb", "--codex", codex, output); err != nil {
+			t.Fatalf("absorb after the failed manifest write: %v", err)
+		}
+	} else if _, err = captureRun(t, "absorb", "--codex", codex, "--force", output); err != nil {
 		t.Fatalf("absorb --force: %v", err)
 	}
 	replaceIn(fragment, "at noon.", "at dusk.")

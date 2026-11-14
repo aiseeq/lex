@@ -1202,6 +1202,10 @@ func restoreDeletedHeader(manifestPath string, m manifest, fileBytes, body []byt
 	}
 	full := generatedHeader(manifestPath, body)
 	if outputMatchesGenerated(fileBytes, full, true, manifestPath) {
+		// A restore whose manifest write failed left the file right and the hash stale: record it now.
+		if m.builtHash != "" && bytes.Equal(fileBytes, full) && sha(full) != m.builtHash {
+			return updateManifestField(manifestPath, "built_sha256", sha(full))
+		}
 		return nil
 	}
 	if info, err := os.Lstat(m.out); err == nil && info.Mode()&os.ModeSymlink != 0 {
@@ -1211,7 +1215,7 @@ func restoreDeletedHeader(manifestPath string, m manifest, fileBytes, body []byt
 		return fmt.Errorf("%s: %w", m.out, err)
 	}
 	if err := updateManifestField(manifestPath, "built_sha256", sha(full)); err != nil {
-		return fmt.Errorf("%s: update manifest: %w", manifestPath, err)
+		return fmt.Errorf("%s: restored the lex header line, but the manifest was not updated: %w; run lex absorb again to record the file", m.out, err)
 	}
 	fmt.Fprintf(os.Stderr, "%s: restored the lex header line; the text already matched the fragments\n", m.out)
 	return nil
