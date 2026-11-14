@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -218,4 +219,20 @@ func TestAbsorbTrailingBlankLinesSharedLastFragment(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertAbsorbedOutputEquals(t, codex, outA, want)
+}
+
+func TestAbsorbReplacedLeadingBlankEditsItsFragment(t *testing.T) {
+	for _, blank := range []string{" \n", "\r\n"} {
+		t.Run(strconv.Quote(blank), func(t *testing.T) {
+			codex, out, manifestPath, _ := purposeFixture(t, "# T\n\n- one\n\n- two\n\n- three\n")
+			want := prepareBlankAbsorbEdit(t, codex, out, func(data []byte) []byte {
+				return bytes.Replace(data, []byte("- one\n\n"), []byte("- one\n\n\n- new\n\n"), 1)
+			})
+			finishBlankAbsorb(t, codex, out, manifestPath, want)
+			want = prepareBlankAbsorbEdit(t, codex, out, func(data []byte) []byte {
+				return bytes.Replace(data, []byte("- one\n\n\n- new"), []byte("- one\n\n"+blank+"- new"), 1)
+			})
+			finishBlankAbsorb(t, codex, out, manifestPath, want)
+		})
+	}
 }

@@ -1985,7 +1985,8 @@ func assignBlankReplacement(bounds [][2]int, oldLines, newLines [][]byte, hunk l
 		!onlyBlankLines(oldLines[hunk.oldStart:hunk.oldEnd]) || !onlyBlankLines(newLines[hunk.newStart:hunk.newEnd]) {
 		return absorbHunkAssignment{}, false
 	}
-	part := blankNeighbourPart(bounds, hunk.oldStart)
+	// The replaced blank lines already belong to a fragment: that fragment takes the edit.
+	part := fragmentOwnerForLines(bounds, hunk.oldStart, hunk.oldEnd)
 	if part < 0 {
 		return absorbHunkAssignment{}, false
 	}
