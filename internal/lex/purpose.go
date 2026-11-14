@@ -536,6 +536,10 @@ func allLinesCRLF(lines [][]byte) bool {
 	return uniformLineEnding(lines) == lineEndingCRLF
 }
 
+func wholeFileCRLFRefusal(file, command string) error {
+	return fmt.Errorf("%s: line endings changed to CRLF, but the fragments use LF; convert the file back to LF and run `%s` again", file, command)
+}
+
 func (p purposeLayout) ownerBefore(matches [][2]int, line int, fallback string) string {
 	owner := fallback
 	for _, pair := range matches {

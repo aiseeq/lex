@@ -227,6 +227,9 @@ func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byt
 		if err != nil {
 			return assessment, err
 		}
+		if turnedWhollyCRLF(layout.rendered, sourceData) {
+			return assessment, wholeFileCRLFRefusal(m.out, "lex import --refresh")
+		}
 		sharedFlag, sharedHint, hintErr := codexSharedForceHint(codex, m, layout.rendered, sourceData, catalog)
 		if hintErr != nil {
 			return assessment, hintErr
@@ -1402,7 +1405,7 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 		actual = withoutGeneratedHeader(actual, selected)
 	}
 	if turnedWhollyCRLF(built, actual) {
-		return fmt.Errorf("%s: line endings changed to CRLF, but the fragments use LF; convert the file back to LF and run `lex absorb` again", file)
+		return wholeFileCRLFRefusal(file, "lex absorb")
 	}
 	if bytes.Equal(actual, built) {
 		return restoreDeletedHeader(selected, m, fileBytes, built)
