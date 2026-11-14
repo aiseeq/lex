@@ -2725,13 +2725,13 @@ func TestStatusMissingOutputContinues(t *testing.T) {
 	for _, entry := range entries {
 		switch entry.Output {
 		case missing:
-			foundMissing = strings.Contains(entry.Problem, missing)
+			foundMissing = entry.Problem != "" && !strings.Contains(entry.Problem, missing)
 		case present:
 			foundPresent = strings.HasPrefix(entry.Command, "lex absorb --codex ")
 		}
 	}
 	if !foundMissing || !foundPresent {
-		t.Fatalf("status entries = %#v; missing output path or other output command not reported", entries)
+		t.Fatalf("status entries = %#v; want the missing output's reason without its path and the other output's command", entries)
 	}
 	for _, entry := range entries {
 		if entry.Output == missing && !entry.ProblemFile {
