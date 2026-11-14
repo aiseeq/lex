@@ -2940,6 +2940,16 @@ func sharedHintPlanRefusal(err error) bool {
 	return errors.As(err, &draftErr) && draftErr.reason == "boundary conflict" || errors.Is(err, errInvalidEditedFragmentLineBounds)
 }
 
+type purposeAdviceRefusal struct{ err error }
+
+func (e *purposeAdviceRefusal) Error() string { return e.err.Error() }
+func (e *purposeAdviceRefusal) Unwrap() error { return e.err }
+
+func isPurposeAdviceRefusal(err error) bool {
+	var refusal *purposeAdviceRefusal
+	return errors.As(err, &refusal)
+}
+
 func codexSharedForceHint(codex string, m manifest, built, actual []byte, catalog *manifestCatalog) (string, string, error) {
 	selected, parts := m.out, m.parts
 	manifestPath, manifest, err := catalog.findOutputManifest(selected)
@@ -2998,6 +3008,11 @@ func codexSharedForceHint(codex string, m manifest, built, actual []byte, catalo
 	sort.Strings(others)
 	if len(others) == 0 {
 		return "", "", nil
+	}
+	if purpose != nil {
+		if _, err := purpose.strip(actual, selected); err != nil {
+			return "", "", &purposeAdviceRefusal{err: err}
+		}
 	}
 	return " --shared", "; --shared lets this file replace the fragments shared with " + strings.Join(others, ", ") + ": their edits there that are not in this file are lost", nil
 }
@@ -3740,6 +3755,11 @@ func stagedOrphans(commit *stagedPaths, codex string, referenced map[string]bool
 func builtDiffers(codex string, m manifest, manifestPath string, want, actual []byte, catalog *manifestCatalog) (problem string, fileEdited bool) {
 	out := m.out
 	codexArg, fileArg := ShellQuoteArg(codex), ShellQuoteArg(out)
+	if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
+		return fmt.Sprintf("%s: built output differs from its fragments; manifest %s is missing on disk — restore it to disk", out, manifestPath), false
+	} else if err != nil {
+		return fmt.Sprintf("%s: %v", out, err), false
+	}
 	if owner, foreign := foreignOutputOwner(codex, actual); foreign {
 		return fmt.Sprintf("%s: the file carries %s, so lex import and lex absorb refuse it — if this codex owns the file, run `lex build --force --codex %s %s` to rebuild it from the fragments (edits in the file are lost)", out, ForeignHeaderPhrase(owner), codexArg, fileArg), false
 	}
@@ -3758,13 +3778,8 @@ func builtDiffers(codex string, m manifest, manifestPath string, want, actual []
 		}
 		return fmt.Sprintf("%s: built output differs from its fragments — run `lex absorb --force%s --codex %s %s` to keep the file, or `lex build --force --codex %s %s` to keep the fragments%s", out, sharedFlag, codexArg, fileArg, codexArg, fileArg, sharedHint), true
 	}
-	var sharedFlag, sharedHint string
-	if _, err := os.Stat(manifestPath); err == nil {
-		sharedFlag, sharedHint, err = codexSharedForceHint(codex, m, want, actual, catalog)
-		if err != nil {
-			return fmt.Sprintf("%s: %v", out, err), false
-		}
-	} else if !os.IsNotExist(err) {
+	sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual, catalog)
+	if err != nil {
 		return fmt.Sprintf("%s: %v", out, err), false
 	}
 	return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`, or keep this edit with `lex absorb%s --codex %s %s`%s", out, codexArg, sharedFlag, codexArg, fileArg, sharedHint), true
@@ -4411,6 +4426,11 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 		entry.KeepFragments = "lex build --force --codex " + target
 		sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual, catalog)
 		if err != nil {
+			if isPurposeAdviceRefusal(err) {
+				entry.Command = ""
+				entry.Refusal = err.Error()
+				return nil
+			}
 			return err
 		}
 		entry.Command = "lex absorb --force" + sharedFlag + " --codex " + target
@@ -4427,6 +4447,11 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 	}
 	sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual, catalog)
 	if err != nil {
+		if isPurposeAdviceRefusal(err) {
+			entry.Command = ""
+			entry.Refusal = err.Error()
+			return nil
+		}
 		return err
 	}
 	if sharedFlag != "" {
