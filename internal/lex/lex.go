@@ -2478,11 +2478,11 @@ func unstagedFragmentHints(commit *stagedPaths, fragPaths []string, indexed map[
 		disk, err := os.ReadFile(diskPath)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
-			hints = append(hints, diskPath+": fragment deleted on disk but not staged — git add it together with "+out)
+			hints = append(hints, diskPath+": fragment deleted on disk but not staged — git add it together with "+commit.treePath(out))
 		case err != nil:
 			hints = append(hints, fmt.Sprintf("%s: read fragment from disk: %v", diskPath, err))
 		case !bytes.Equal(staged, disk):
-			hints = append(hints, diskPath+": fragment changed on disk but not staged — git add it together with "+out)
+			hints = append(hints, diskPath+": fragment changed on disk but not staged — git add it together with "+commit.treePath(out))
 		}
 	}
 	return hints

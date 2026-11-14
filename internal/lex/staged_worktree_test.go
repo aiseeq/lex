@@ -68,7 +68,9 @@ func TestStagedWorktreeChecksOutputOfCurrentTree(t *testing.T) {
 	}
 }
 
-func TestStagedWorktreeCodexInsideProjectReportsOnce(t *testing.T) {
+// codexInsideProjectWorktree commits a project with its codex inside and returns the main checkout, a new worktree, the codex and a git runner.
+func codexInsideProjectWorktree(t *testing.T) (string, string, string, func(string, ...string) error) {
+	t.Helper()
 	base := t.TempDir()
 	main, worktree := filepath.Join(base, "main"), filepath.Join(base, "worktree")
 	codex := filepath.Join(main, "codex")
@@ -99,6 +101,12 @@ func TestStagedWorktreeCodexInsideProjectReportsOnce(t *testing.T) {
 	if err := git(main, "worktree", "add", "-q", "-b", "test-worktree", worktree); err != nil {
 		t.Fatal(err)
 	}
+	return main, worktree, codex, git
+}
+
+func TestStagedWorktreeCodexInsideProjectReportsOnce(t *testing.T) {
+	main, worktree, codex, git := codexInsideProjectWorktree(t)
+	output := filepath.Join(main, "CLAUDE.md")
 	wTO := filepath.Join(worktree, filepath.Base(output))
 	data, err := os.ReadFile(wTO)
 	if err != nil {
@@ -252,5 +260,58 @@ func TestStagedWorktreeSkipsNestedRepositoryOfMainCheckout(t *testing.T) {
 	}
 	if err := checkIn(t, worktree, codex); err != nil {
 		t.Fatalf("output inside a repository nested in the main checkout is not a file of the worktree index, got %v", err)
+	}
+}
+
+func TestStagedWorktreeFragmentHintNamesWorktree(t *testing.T) {
+	_, worktree, codex, git := codexInsideProjectWorktree(t)
+	wTO := filepath.Join(worktree, "CLAUDE.md")
+	if err := os.WriteFile(wTO, []byte("# Guide\n\nManual instruction.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := git(worktree, "add", "CLAUDE.md"); err != nil {
+		t.Fatal(err)
+	}
+	fragments, err := filepath.Glob(filepath.Join(worktree, "codex", "frag", "*", "*.md"))
+	if err != nil || len(fragments) == 0 {
+		t.Fatalf("find worktree fragments: %v, %v", fragments, err)
+	}
+	data, err := os.ReadFile(fragments[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(fragments[0], append(data, []byte("Unstaged line.\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = checkIn(t, worktree, codex)
+	if err == nil {
+		t.Fatal("expected output mismatch")
+	}
+	want := fragments[0] + ": fragment changed on disk but not staged — git add it together with " + wTO
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("hint %q missing from %v", want, err)
+	}
+}
+
+func TestStagedWorktreeManifestErrorNamesWorktree(t *testing.T) {
+	_, worktree, codex, git := codexInsideProjectWorktree(t)
+	manifests, err := filepath.Glob(filepath.Join(worktree, "codex", "manifest", "*.yaml"))
+	if err != nil || len(manifests) != 1 {
+		t.Fatalf("find worktree manifest: %v, %v", manifests, err)
+	}
+	rel, err := filepath.Rel(worktree, manifests[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = git(worktree, "rm", "-q", "--cached", rel); err != nil {
+		t.Fatal(err)
+	}
+	err = checkIn(t, worktree, codex)
+	if err == nil {
+		t.Fatal("expected a problem for the manifest removed from the index")
+	}
+	want := manifests[0] + ": removed from the index in this commit"
+	if !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "built by the codex as") {
+		t.Fatalf("want %q without the build mark in %v", want, err)
 	}
 }
