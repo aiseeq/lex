@@ -2940,6 +2940,16 @@ func sharedHintPlanRefusal(err error) bool {
 	return errors.As(err, &draftErr) && draftErr.reason == "boundary conflict" || errors.Is(err, errInvalidEditedFragmentLineBounds)
 }
 
+type sharedPurposeAdviceRefusal struct{ err error }
+
+func (e *sharedPurposeAdviceRefusal) Error() string { return e.err.Error() }
+func (e *sharedPurposeAdviceRefusal) Unwrap() error { return e.err }
+
+func sharedAdvicePurposeRefusal(err error) bool {
+	var refusal *sharedPurposeAdviceRefusal
+	return errors.As(err, &refusal)
+}
+
 func codexSharedForceHint(codex string, m manifest, built, actual []byte, catalog *manifestCatalog) (string, string, error) {
 	selected, parts := m.out, m.parts
 	manifestPath, manifest, err := catalog.findOutputManifest(selected)
@@ -2998,6 +3008,11 @@ func codexSharedForceHint(codex string, m manifest, built, actual []byte, catalo
 	sort.Strings(others)
 	if len(others) == 0 {
 		return "", "", nil
+	}
+	if purpose != nil {
+		if _, err := purpose.strip(actual, selected); err != nil {
+			return "", "", &sharedPurposeAdviceRefusal{err: err}
+		}
 	}
 	return " --shared", "; --shared lets this file replace the fragments shared with " + strings.Join(others, ", ") + ": their edits there that are not in this file are lost", nil
 }
@@ -3512,7 +3527,7 @@ func checkStaged(codex string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	commit, err := readStagedPaths()
+	commit, err := readStagedPaths(codex)
 	if err != nil {
 		return nil, err
 	}
@@ -3740,6 +3755,11 @@ func stagedOrphans(commit *stagedPaths, codex string, referenced map[string]bool
 func builtDiffers(codex string, m manifest, manifestPath string, want, actual []byte, catalog *manifestCatalog) (problem string, fileEdited bool) {
 	out := m.out
 	codexArg, fileArg := ShellQuoteArg(codex), ShellQuoteArg(out)
+	if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
+		return fmt.Sprintf("%s: built output differs from its fragments; manifest %s is missing on disk — restore it to disk", out, manifestPath), false
+	} else if err != nil {
+		return fmt.Sprintf("%s: %v", out, err), false
+	}
 	if owner, foreign := foreignOutputOwner(codex, actual); foreign {
 		return fmt.Sprintf("%s: the file carries %s, so lex import and lex absorb refuse it — if this codex owns the file, run `lex build --force --codex %s %s` to rebuild it from the fragments (edits in the file are lost)", out, ForeignHeaderPhrase(owner), codexArg, fileArg), false
 	}
@@ -3758,13 +3778,8 @@ func builtDiffers(codex string, m manifest, manifestPath string, want, actual []
 		}
 		return fmt.Sprintf("%s: built output differs from its fragments — run `lex absorb --force%s --codex %s %s` to keep the file, or `lex build --force --codex %s %s` to keep the fragments%s", out, sharedFlag, codexArg, fileArg, codexArg, fileArg, sharedHint), true
 	}
-	var sharedFlag, sharedHint string
-	if _, err := os.Stat(manifestPath); err == nil {
-		sharedFlag, sharedHint, err = codexSharedForceHint(codex, m, want, actual, catalog)
-		if err != nil {
-			return fmt.Sprintf("%s: %v", out, err), false
-		}
-	} else if !os.IsNotExist(err) {
+	sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual, catalog)
+	if err != nil {
 		return fmt.Sprintf("%s: %v", out, err), false
 	}
 	return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`, or keep this edit with `lex absorb%s --codex %s %s`%s", out, codexArg, sharedFlag, codexArg, fileArg, sharedHint), true
@@ -3842,16 +3857,15 @@ type stagedPaths struct {
 
 type stagedFragment struct{ abs, id string }
 
-func readStagedPaths() (*stagedPaths, error) {
+func readStagedPaths(codex string) (*stagedPaths, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("get current directory: %w", err)
 	}
-	rootBytes, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	root, err := stagedRepositoryRoot(cwd, codex)
 	if err != nil {
-		return nil, fmt.Errorf("git rev-parse current directory: %w", err)
+		return nil, err
 	}
-	root := resolvePath(strings.TrimSpace(string(rootBytes)))
 	gitDir, err := exec.Command("git", "-C", root, "rev-parse", "--path-format=absolute", "--git-dir").Output()
 	if err != nil {
 		return nil, fmt.Errorf("git rev-parse git-dir in %s: %w", root, err)
@@ -3904,6 +3918,56 @@ func readStagedPaths() (*stagedPaths, error) {
 		}
 	}
 	return &stagedPaths{root: root, mainRoot: mainRoot, paths: set, index: index, modes: modes, blobs: map[string][]byte{}}, nil
+}
+
+func stagedRepositoryRoot(cwd, codex string) (string, error) {
+	root, err := gitTopLevel(cwd)
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse current directory: %w", err)
+	}
+	codexAbs, err := filepath.Abs(codex)
+	if err != nil {
+		return "", fmt.Errorf("resolve codex path: %w", err)
+	}
+	codexRoot, err := gitTopLevel(codexAbs)
+	if err != nil {
+		return "", err
+	}
+	if codexRoot == "" {
+		return root, nil
+	}
+	currentCommon, err := gitCommonDir(root)
+	if err != nil {
+		return "", err
+	}
+	codexCommon, err := gitCommonDir(codexRoot)
+	if err != nil {
+		return "", err
+	}
+	if currentCommon != codexCommon {
+		return codexRoot, nil
+	}
+	return root, nil
+}
+
+func gitTopLevel(path string) (string, error) {
+	data, err := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel").Output()
+	if err == nil {
+		return resolvePath(strings.TrimSpace(string(data))), nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 128 {
+		return "", nil
+	}
+	return "", fmt.Errorf("git rev-parse --show-toplevel in %s: %w", path, err)
+}
+
+func gitCommonDir(root string) (string, error) {
+	data, err := exec.Command("git", "-C", root, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse git-common-dir in %s: %w", root, err)
+	}
+	return resolvePath(strings.TrimSpace(string(data))), nil
 }
 
 // prefetch - блобы индекса для путей одним вызовом git cat-file --batch.
@@ -4411,6 +4475,11 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 		entry.KeepFragments = "lex build --force --codex " + target
 		sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual, catalog)
 		if err != nil {
+			if sharedAdvicePurposeRefusal(err) {
+				entry.Command = ""
+				entry.Refusal = err.Error()
+				return nil
+			}
 			return err
 		}
 		entry.Command = "lex absorb --force" + sharedFlag + " --codex " + target
@@ -4427,6 +4496,11 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 	}
 	sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual, catalog)
 	if err != nil {
+		if sharedAdvicePurposeRefusal(err) {
+			entry.Command = ""
+			entry.Refusal = err.Error()
+			return nil
+		}
 		return err
 	}
 	if sharedFlag != "" {

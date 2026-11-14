@@ -84,7 +84,7 @@ func checkTextRefs(codex string, options CheckOptions) ([]string, error) {
 	}
 	var staged *stagedPaths
 	if options.Staged {
-		staged, err = readStagedPaths()
+		staged, err = readStagedPaths(codex)
 		if err != nil {
 			return nil, err
 		}
@@ -441,7 +441,7 @@ func loadTextCorpus(codex string, o CheckOptions) (textCorpus, textCorpus, strin
 	}
 	r := corpusReader{current: textCorpus{}}
 	if o.Staged {
-		r.staged, err = readStagedPaths()
+		r.staged, err = readStagedPaths(codex)
 		if err != nil {
 			return nil, nil, "", nil, nil, err
 		}
