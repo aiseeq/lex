@@ -47,7 +47,7 @@ var (
 	historicalRuleStatus     = regexp.MustCompile(`(?i)^\s*(?:снят[а-я]*|отмен[а-я]*|упраздн[а-я]*)`)
 	// interfaceSection is a section of a screen, bot or site named right before it («в журнале раздела «Сводка»»), not of a
 	// document. Page and appendix are left out: a document has them too.
-	interfaceSection = regexp.MustCompile(`(?i)(?:^|[^а-яё])(?:(?:журнал|экран|интерфейс|сайт|бот)(?:а|у|ом|е|ы|ов|ах|ам|ами)?|меню|вкладк(?:а|и|е|у|ой|ах|ам)|вкладок|панел(?:ь|и|ью|ей|ях|ям))\s+раздела\s+«[^«»]+»$`)
+	interfaceSection = regexp.MustCompile(`(?i)(?:^|[^а-яё])(?:(?:журнал|экран|интерфейс|сайт|бот)(?:а|у|ом|е|ы|ов|ах|ам|ами)?|меню|вкладк(?:а|и|е|у|ой|ах|ам|ами)|вкладок|панел(?:ь|и|ью|ей|ях|ям|ями))\s+раздела\s+«[^«»]+»$`)
 	skillSection     = regexp.MustCompile("`([a-z0-9][a-z0-9-]*)`\\s*,\\s*«([^«»]+)»")
 	registerSection  = regexp.MustCompile(`(?i)регистр\s*(?:из\s+раздела\s+)?[—-]?\s*«([^«»]+)»`)
 	fileRef          = regexp.MustCompile("`([^`\\n]+\\.md)`")
