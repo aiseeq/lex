@@ -498,18 +498,36 @@ func hasCRLFPurposeCounterpart(oldLines, newLines [][]byte, failed []int) bool {
 	return len(failed) > 0
 }
 
-func allLinesCRLF(lines [][]byte) bool {
-	seen := false
+type lineEndingKind uint8
+
+const (
+	lineEndingNone lineEndingKind = iota
+	lineEndingLF
+	lineEndingCRLF
+	lineEndingMixed
+)
+
+func uniformLineEnding(lines [][]byte) lineEndingKind {
+	ending := lineEndingNone
 	for _, line := range lines {
+		var lineEnding lineEndingKind
 		if bytes.HasSuffix(line, []byte("\r\n")) {
-			seen = true
+			lineEnding = lineEndingCRLF
+		} else if bytes.HasSuffix(line, []byte("\n")) {
+			lineEnding = lineEndingLF
+		} else {
 			continue
 		}
-		if bytes.HasSuffix(line, []byte("\n")) {
-			return false
+		if ending != lineEndingNone && ending != lineEnding {
+			return lineEndingMixed
 		}
+		ending = lineEnding
 	}
-	return seen
+	return ending
+}
+
+func allLinesCRLF(lines [][]byte) bool {
+	return uniformLineEnding(lines) == lineEndingCRLF
 }
 
 func (p purposeLayout) ownerBefore(matches [][2]int, line int, fallback string) string {
