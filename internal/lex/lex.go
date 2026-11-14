@@ -202,6 +202,9 @@ func refreshRemovedSharedOutputs(codex, topic string, m manifest, cleanData []by
 }
 
 func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byte, catalog *manifestCatalog) (refreshAssessment, error) {
+	if refusal := textAboveHeaderRefusal(manifestPath, m, diskData); refusal != "" {
+		return refreshAssessment{}, fmt.Errorf("%s: %s", m.out, refusal)
+	}
 	sourceData := diskData
 	if m.header {
 		sourceData = withoutGeneratedHeader(diskData, manifestPath)
@@ -1462,6 +1465,9 @@ func textAboveHeaderAdvice(line int, hasFrontMatter bool) string {
 	return advice + "as the first line"
 }
 
+// byteOrderMark is the UTF-8 byte order mark; lex keeps it as text, so before the lex header it hides the header.
+var byteOrderMark = []byte("\xef\xbb\xbf")
+
 // textAboveHeaderRefusal returns the shared refusal when a lex header stands below text other
 // than front matter. A header in its place ends the check, so a copy quoted further down does not count.
 func textAboveHeaderRefusal(selected string, m manifest, actual []byte) string {
@@ -1473,6 +1479,13 @@ func textAboveHeaderRefusal(selected string, m manifest, actual []byte) string {
 	for _, form := range forms {
 		if bytes.HasPrefix(top, form) {
 			return ""
+		}
+	}
+	if afterMark, ok := bytes.CutPrefix(actual, byteOrderMark); ok {
+		for _, form := range forms {
+			if bytes.HasPrefix(afterMark, form) {
+				return "a byte order mark (bytes EF BB BF) stands before the lex header, so the header is not recognised; delete the mark from the start of the file"
+			}
 		}
 	}
 	first := -1
