@@ -3048,7 +3048,13 @@ func checkSelectedOutputs(codex, tree string, selected []*selectedManifestUnder,
 			continue
 		}
 		if !outputMatchesGenerated(data, body, entry.m.header, entry.path) {
-			problem, _ := builtDiffers(out, codex, entry.m, entry.path, body, data)
+			problem, fileEdited := builtDiffers(entry.m.out, codex, entry.m, entry.path, body, data)
+			if tree != "" {
+				problem = labelTreeOutputProblem(problem, entry.m.out, out)
+				if fileEdited {
+					problem = treeOutputAdvice(problem, entry.m.out, out, false)
+				}
+			}
 			problems = append(problems, problem)
 		}
 	}
@@ -3695,23 +3701,35 @@ func (s *stagedPaths) stagedOutputAdvice(problem, codex, out string) string {
 	if tree == out {
 		return problem
 	}
+	abs, err := filepath.Abs(codex)
+	return treeOutputAdvice(problem, out, tree, err == nil && s.inMainCheckout(resolvePath(abs)))
+}
+
+// treeOutputAdvice adds to advice that keeps an edit of tree, the copy of the manifest output out in another tree,
+// that lex absorb reads and lex build rewrites out; codexInMain says the codex lies in the main checkout.
+func treeOutputAdvice(problem, out, tree string, codexInMain bool) string {
 	mainOut, treeOut := strconv.Quote(out), strconv.Quote(tree)
 	problem += "; lex builds " + mainOut + " and the edit is in " + treeOut + ": carry the edit into " + mainOut + " before running `lex absorb`"
-	if abs, err := filepath.Abs(codex); err == nil && s.inMainCheckout(resolvePath(abs)) {
+	if codexInMain {
 		problem += ", which changes the fragments in the main checkout"
 	}
 	return problem + "; `lex build` rewrites " + mainOut + ", not " + treeOut
 }
 
-func (s *stagedPaths) labelProblem(problem, out string) string {
-	if s.treePath(out) == out {
+// labelTreeOutputProblem names tree, the copy of the manifest output out that was read, at the start of a problem about out.
+func labelTreeOutputProblem(problem, out, tree string) string {
+	if tree == out {
 		return problem
 	}
 	prefix := out + ": "
 	if after, ok := strings.CutPrefix(problem, prefix); ok {
-		return s.treePath(out) + " (built by the codex as " + out + "): " + after
+		return tree + " (built by the codex as " + out + "): " + after
 	}
 	return problem
+}
+
+func (s *stagedPaths) labelProblem(problem, out string) string {
+	return labelTreeOutputProblem(problem, out, s.treePath(out))
 }
 
 // treeProblem names the worktree copy of a codex file at the start of a problem.
