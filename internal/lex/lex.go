@@ -1521,13 +1521,14 @@ func headerPrefixRefusal(prefix []byte, line int) string {
 }
 
 // textAboveHeaderRefusal returns the shared refusal when a lex header stands below text other
-// than front matter. A header in its place ends the check, so a copy quoted further down does not count.
+// than front matter or behind invisible bytes. A header in its place ends the check, so a copy quoted
+// further down does not count. A file built without a header keeps such a line as its own text.
 func textAboveHeaderRefusal(selected string, m manifest, actual []byte) string {
-	if prefix, line, ok := headerLinePrefix(actual); ok {
-		return headerPrefixRefusal(prefix, line)
-	}
 	if !m.header {
 		return ""
+	}
+	if prefix, line, ok := headerLinePrefix(actual); ok {
+		return headerPrefixRefusal(prefix, line)
 	}
 	forms := headerLineForms(selected)
 	top := actual[frontMatterOffset(actual):]

@@ -122,3 +122,23 @@ func TestInvisiblePrefixBeforeHeaderRefused(t *testing.T) {
 		})
 	}
 }
+
+// A file built without a lex header may hold a marker line behind spaces as
+// its own text - an indented code block quoting a header - and absorb takes
+// an edit in it as before.
+func TestIndentedMarkerWithoutHeaderAbsorbs(t *testing.T) {
+	dir := t.TempDir()
+	out, codex := filepath.Join(dir, "a.md"), filepath.Join(dir, "cx")
+	original := "    <!-- lex: собран из ~/x/manifest/a.yaml. Правь фрагменты в ~/x/frag -->\n\n- one\n"
+	mustWrite(t, out, []byte(original))
+	if err := importData(codex, out, "a.md", []byte(original), false); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, out, []byte(strings.Replace(original, "- one", "- ONE", 1)))
+	if err := Absorb(codex, out, AbsorbOptions{}); err != nil {
+		t.Fatalf("absorb = %v, want the edit taken", err)
+	}
+	if _, err := CheckWithWarnings(codex, CheckOptions{}); err != nil {
+		t.Fatalf("check after absorb = %v", err)
+	}
+}
