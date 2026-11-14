@@ -93,6 +93,14 @@ func TestAbsorbRefusalKeepsMainCause(t *testing.T) {
 			want: "moved",
 		},
 		{
+			name: "edit-rule3-move-goal3-top-of-rule2",
+			edit: func(data []byte) []byte {
+				data = bytes.Replace(data, []byte("- rule three\n  Зачем: g3\n"), []byte("- rule three edited\n"), 1)
+				return bytes.Replace(data, []byte("  Зачем: g2\n"), []byte("  Зачем: g3\n  Зачем: g2\n"), 1)
+			},
+			want: "moved",
+		},
+		{
 			name: "edit-rule3-goal3-before-it",
 			edit: func(data []byte) []byte {
 				return bytes.Replace(data, []byte("- rule three\n  Зачем: g3\n"), []byte("  Зачем: g3\n- rule three edited\n"), 1)

@@ -261,7 +261,7 @@ func (p purposeLayout) checkMovedGoals(oldLines [][]byte, matches [][2]int, newL
 		if oldIndex, ok := newToOld[previous]; ok {
 			span := p.spanAt(pair[0])
 			if oldIndex < span.start || oldIndex >= span.end {
-				if !p.ruleTextPresent(span, oldLines, newLines, pair[1]) {
+				if !p.ruleTextPresent(span, oldLines, newLines, matches) {
 					return fmt.Errorf("%s: цель line %q has no rule text; delete the line or restore its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n"))
 				}
 				return fmt.Errorf("%s: цель moved to another fragment; put the line %q back under its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n"))
@@ -271,7 +271,7 @@ func (p purposeLayout) checkMovedGoals(oldLines [][]byte, matches [][2]int, newL
 	return nil
 }
 
-func (p purposeLayout) ruleTextPresent(span purposeSpan, oldLines, newLines [][]byte, movedGoal int) bool {
+func (p purposeLayout) ruleTextPresent(span purposeSpan, oldLines, newLines [][]byte, matches [][2]int) bool {
 	for index := span.start; index < span.end; index++ {
 		if _, isGoal := p.owners[index]; isGoal || strings.TrimSpace(string(oldLines[index])) == "" {
 			continue
@@ -283,15 +283,23 @@ func (p purposeLayout) ruleTextPresent(span purposeSpan, oldLines, newLines [][]
 		}
 	}
 	matchedNew := make(map[int]bool)
-	for _, pair := range myersLineMatches(absorbLines(p.rendered), newLines) {
+	beforeOld, beforeNew := -1, -1
+	afterOld, afterNew := len(oldLines), len(newLines)
+	for _, pair := range matches {
 		matchedNew[pair[1]] = true
-	}
-	for _, direction := range []int{-1, 1} {
-		neighbor := movedGoal + direction
-		for neighbor >= 0 && neighbor < len(newLines) && strings.TrimSpace(string(newLines[neighbor])) == "" {
-			neighbor += direction
+		if pair[0] < span.start && pair[0] > beforeOld {
+			beforeOld, beforeNew = pair[0], pair[1]
 		}
-		if neighbor >= 0 && neighbor < len(newLines) && !matchedNew[neighbor] && !strings.HasPrefix(string(newLines[neighbor]), purposeMarker) {
+		if pair[0] >= span.end && pair[0] < afterOld {
+			afterOld, afterNew = pair[0], pair[1]
+		}
+	}
+	start, end := beforeNew+1, afterNew
+	if start > end {
+		start, end = end, start
+	}
+	for index := start; index < end; index++ {
+		if !matchedNew[index] && strings.TrimSpace(string(newLines[index])) != "" && !strings.HasPrefix(string(newLines[index]), purposeMarker) {
 			return true
 		}
 	}
