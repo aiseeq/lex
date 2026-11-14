@@ -154,6 +154,19 @@ func loadExternalTextCorpus(codex, outputsUnder string, corpus textCorpus) (text
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	var corpusReal map[string]string
+	// inCorpus also finds an entry that reaches a corpus file through a symlink: that file is read once, as a corpus file.
+	inCorpus := func(path string) bool {
+		if _, ok := corpus[path]; ok {
+			return true
+		}
+		if corpusReal == nil {
+			corpusReal = realCorpusPaths(corpus)
+		}
+		// a missing entry resolves to itself, matches no corpus file and is reported as not found below
+		_, ok := corpusReal[resolvePath(path)]
+		return ok
+	}
 	warned := map[string]bool{}
 	warn := func(line string) {
 		if !warned[line] {
@@ -169,7 +182,7 @@ func loadExternalTextCorpus(codex, outputsUnder string, corpus textCorpus) (text
 			}
 		}
 		path := resolveRefTarget(codex, configured)
-		if _, inCorpus := corpus[path]; inCorpus || paths[path] {
+		if paths[path] || inCorpus(path) {
 			continue
 		}
 		data, err := os.ReadFile(path)
@@ -513,16 +526,22 @@ func (s *refScanner) resolve(ref string) string {
 // realCorpusKeys maps the real path of each corpus file to its key, built once per scan.
 func (s *refScanner) realCorpusKeys() map[string]string {
 	if s.realKeys == nil {
-		s.realKeys = make(map[string]string, len(s.corpus))
-		for _, key := range slices.Sorted(maps.Keys(s.corpus)) {
-			if keyReal, err := filepath.EvalSymlinks(key); err == nil {
-				if _, taken := s.realKeys[keyReal]; !taken {
-					s.realKeys[keyReal] = key
-				}
+		s.realKeys = realCorpusPaths(s.corpus)
+	}
+	return s.realKeys
+}
+
+// realCorpusPaths maps the symlink-free path of each corpus key to the first key, in sorted order, that reaches it.
+func realCorpusPaths(corpus textCorpus) map[string]string {
+	real := make(map[string]string, len(corpus))
+	for _, key := range slices.Sorted(maps.Keys(corpus)) {
+		if keyReal, err := filepath.EvalSymlinks(key); err == nil {
+			if _, taken := real[keyReal]; !taken {
+				real[keyReal] = key
 			}
 		}
 	}
-	return s.realKeys
+	return real
 }
 
 func (s *refScanner) add(kind int, missing string) {
