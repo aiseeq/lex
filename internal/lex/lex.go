@@ -2279,7 +2279,8 @@ func planInsertedFragments(codex, selected string, parts []string, additions map
 			}
 		}
 	}
-	for position, hunks := range additions {
+	for _, position := range slices.Sorted(maps.Keys(additions)) {
+		hunks := additions[position]
 		sort.Slice(hunks, func(i, j int) bool { return hunks[i].newStart < hunks[j].newStart })
 		for _, hunk := range hunks {
 			body := bytes.Join(newLines[hunk.newStart:hunk.newEnd], nil)
