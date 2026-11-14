@@ -161,7 +161,7 @@ func TestTextRefsForms(t *testing.T) {
 			t.Errorf("не найдена битая форма %q: %v", line, findings)
 		}
 	}
-	namedBelow := filepath.Join(root, "skills", "sample", "addressees.md")
+	namedBelow := filepath.Join(root, "skills", "sample", "seed-list.md")
 	withFullName := findTextRefs(textCorpus{namedBelow: []byte("Фамилия, ниже\n- Имя Фамилия (учётная запись)\n")}, journal)
 	if len(withFullName) != 0 {
 		t.Errorf("фамилия не сопоставилась с полным именем в пункте ниже: %v", withFullName)
@@ -188,7 +188,7 @@ func TestTextRefsForms(t *testing.T) {
 			t.Errorf("ссылка %q дала kind %d, ожидался %d: %+v", slugCases[i], finding.kind, slugKinds[i], finding)
 		}
 	}
-	registerSource := filepath.Join(root, "skills", "sample", "glossary.md")
+	registerSource := filepath.Join(root, "skills", "sample", "shelf-terms.md")
 	registerTarget := filepath.Join(root, "skills", "sample", "SKILL.md")
 	registerFindings := findTextRefs(textCorpus{
 		registerSource: []byte("Регистр - «начальство» в `SKILL.md`\n"),
@@ -198,7 +198,7 @@ func TestTextRefsForms(t *testing.T) {
 	if len(registerFindings) != 1 || registerFindings[0].kind != 2 {
 		t.Errorf("битый регистр в соседнем SKILL.md не найден: %v", registerFindings)
 	}
-	registerForm := filepath.Join(root, "skills", "sample", "addressees.md")
+	registerForm := filepath.Join(root, "skills", "sample", "seed-list.md")
 	registerSkill := filepath.Join(root, "skills", "sample", "SKILL.md")
 	goodRegister := findTextRefs(textCorpus{
 		registerForm:  []byte("Регистр из раздела «Температура погреба» для хранения корнеплодов зимой\n"),
@@ -230,7 +230,7 @@ func TestTextRefsForms(t *testing.T) {
 	if len(interfaceFindings) != 5 {
 		t.Errorf("раздел интерфейса после «журнале», «экране» или «бота» не должен быть ссылкой: %v", interfaceFindings)
 	}
-	removedRule := "Снимает в `sample-entry-one` и поправке 2 `sample-entry-two` правило «после выкопки сушить гладиолусы под навесом, затем убрать плетёные корзины в сухой погреб до первых заморозков»"
+	removedRule := "Снимает в `sample-entry-one` правило «после выкопки сушить гладиолусы под навесом, затем убрать плетёные корзины в сухой погреб до первых заморозков»"
 	decisionPath := filepath.Join(root, "decisions.md")
 	quotedCorpus := removedRule + "\nПравило «несуществующее»\nПравила «историческая цитата»\nПравило «снятое» снято 25.04\n"
 	quotedFindings := findTextRefs(textCorpus{decisionPath: []byte(quotedCorpus)}, decisionPath)
@@ -241,7 +241,7 @@ func TestTextRefsForms(t *testing.T) {
 
 func TestTextRefsExceptions(t *testing.T) {
 	root := filepath.Join(t.TempDir(), ".claude")
-	chat := filepath.Join(root, "skills", "sample", "SKILL.md")
+	mainSkill := filepath.Join(root, "skills", "sample", "SKILL.md")
 	other := filepath.Join(root, "skills", "other", "SKILL.md")
 	settings, err := (&corpusReader{}).textRefSettings(filepath.Join("testdata", "text-refs-codex"))
 	if err != nil {
@@ -270,22 +270,22 @@ func TestTextRefsExceptions(t *testing.T) {
 	}
 	exception := settings.TextRefs.Exceptions[2]
 	body := []byte(strings.Repeat("\n", 18) + exception.Contains + "\n")
-	corpus := textCorpus{chat: body, other: body}
+	corpus := textCorpus{mainSkill: body, other: body}
 	findings := []textRefFinding{
-		{kind: exception.Kind, path: chat, line: 19, text: exception.Contains},
+		{kind: exception.Kind, path: mainSkill, line: 19, text: exception.Contains},
 		{kind: exception.Kind, path: other, line: 19, text: exception.Contains},
 	}
 	filtered, unused := applyTextRefExceptions(corpus, findings, []textRefException{exception}, root)
-	chatFinding, otherFinding := false, false
+	mainFinding, otherFinding := false, false
 	for _, finding := range filtered {
-		if finding.kind == exception.Kind && finding.path == chat {
-			chatFinding = true
+		if finding.kind == exception.Kind && finding.path == mainSkill {
+			mainFinding = true
 		}
 		if finding.kind == exception.Kind && finding.path == other {
 			otherFinding = true
 		}
 	}
-	if chatFinding {
+	if mainFinding {
 		t.Fatal("исключение не погасило свою находку")
 	}
 	if !otherFinding {
@@ -295,22 +295,22 @@ func TestTextRefsExceptions(t *testing.T) {
 		t.Fatalf("сработавшее исключение помечено неиспользованным: %v", unused)
 	}
 
-	shifted := textCorpus{chat: append([]byte("заголовок перечня\n"), body...), other: body}
+	shifted := textCorpus{mainSkill: append([]byte("заголовок перечня\n"), body...), other: body}
 	shiftedFindings := []textRefFinding{
-		{kind: exception.Kind, path: chat, line: 20, text: exception.Contains},
+		{kind: exception.Kind, path: mainSkill, line: 20, text: exception.Contains},
 		{kind: exception.Kind, path: other, line: 19, text: exception.Contains},
 	}
 	shiftedFiltered, shiftedUnused := applyTextRefExceptions(shifted, shiftedFindings, []textRefException{exception}, root)
 	if len(shiftedUnused) != 0 {
 		t.Fatalf("исключение не пережило сдвиг строки: %v", shiftedUnused)
 	}
-	chatFinding = false
+	mainFinding = false
 	for _, finding := range shiftedFiltered {
-		if finding.path == chat && finding.kind == exception.Kind {
-			chatFinding = true
+		if finding.path == mainSkill && finding.kind == exception.Kind {
+			mainFinding = true
 		}
 	}
-	if chatFinding {
+	if mainFinding {
 		t.Fatal("после сдвига строк исключение перестало гасить свою находку")
 	}
 
@@ -320,13 +320,13 @@ func TestTextRefsExceptions(t *testing.T) {
 		t.Fatalf("неиспользованное исключение должно выдать warning с ключом: %v", unused)
 	}
 
-	otherKind := []textRefFinding{{kind: exception.Kind%4 + 1, path: chat, line: 19, text: exception.Contains}}
+	otherKind := []textRefFinding{{kind: exception.Kind%4 + 1, path: mainSkill, line: 19, text: exception.Contains}}
 	kept, unused := applyTextRefExceptions(corpus, otherKind, []textRefException{exception}, root)
 	if len(kept) != 1 || len(unused) != 1 {
 		t.Fatalf("исключение погасило находку другого вида: остаток %v, мёртвые %v", kept, unused)
 	}
 
-	twice := textCorpus{chat: append(append([]byte(nil), body...), body...), other: body}
+	twice := textCorpus{mainSkill: append(append([]byte(nil), body...), body...), other: body}
 	kept, unused = applyTextRefExceptions(twice, findings[:1], []textRefException{exception}, root)
 	if len(kept) != 1 || len(unused) != 1 {
 		t.Fatalf("подстрока исключения встречается в файле дважды — исключение не должно гасить: остаток %v, мёртвые %v", kept, unused)
