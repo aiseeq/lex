@@ -278,3 +278,48 @@ func TestAbsorbPurposeRefusalNamesOnlyLinesOfFirstHunk(t *testing.T) {
 		return bytes.Replace(data, []byte("  Зачем: reason three\n"), nil, 1)
 	}, `put the line "  Зачем: reason one" back`)
 }
+
+func TestAbsorbRefusesEditedRuleLosingPurposeNextToDeletedHeading(t *testing.T) {
+	codex, out, manifestPath, _ := goalDeleteFixture(t, "## Alpha\n- rule one text\n## Beta\n- rule two text\n", []string{"", "reason one", "", "reason two"})
+	refuseGoalDelete(t, codex, out, manifestPath, func(data []byte) []byte {
+		data = bytes.Replace(data, []byte("## Alpha\n"), nil, 1)
+		return bytes.Replace(data, []byte("- rule one text\n  Зачем: reason one\n"), []byte("- rule one text typo\n"), 1)
+	}, "missing or edited цель")
+}
+
+func TestAbsorbRefusesEditedRuleLosingPurposeNextToDeletedRuleWithoutGoal(t *testing.T) {
+	codex, out, manifestPath, _ := goalDeleteFixture(t, "- rule four text\n- rule five text\n- rule six text\n", []string{"reason four", "", "reason six"})
+	refuseGoalDelete(t, codex, out, manifestPath, func(data []byte) []byte {
+		data = bytes.Replace(data, []byte("- rule five text\n"), nil, 1)
+		return bytes.Replace(data, []byte("- rule four text\n  Зачем: reason four\n"), []byte("- rule four text typo\n"), 1)
+	}, "missing or edited цель")
+}
+
+func TestAbsorbPurposeRefusalAdvisesTwoPassesForEditWithoutGoal(t *testing.T) {
+	codex, out, manifestPath, _ := goalDeleteFixture(t, "- rule four text\n- rule five text\n- rule six text\n", []string{"reason four", "", "reason six"})
+	refuseGoalDelete(t, codex, out, manifestPath, func(data []byte) []byte {
+		data = bytes.Replace(data, []byte("- rule four text\n  Зачем: reason four\n"), nil, 1)
+		return bytes.Replace(data, []byte("- rule five text\n"), []byte("- rule five text EDITED\n"), 1)
+	}, "make the edit next to it in another")
+}
+
+func TestAbsorbRefusesHeadingWrittenOverRuleWithoutGoalNextToDeletedRule(t *testing.T) {
+	codex, out, manifestPath, _ := goalDeleteFixture(t, "- rule four text\n- rule five text\n- rule six text\n", []string{"reason four", "", "reason six"})
+	refuseGoalDelete(t, codex, out, manifestPath, func(data []byte) []byte {
+		data = bytes.Replace(data, []byte("- rule four text\n  Зачем: reason four\n"), nil, 1)
+		return bytes.Replace(data, []byte("- rule five text\n"), []byte("## Five\n"), 1)
+	}, "missing or edited цель")
+}
+
+func TestAbsorbPurposeRefusalForKeptRuleDoesNotAdviseTwoPasses(t *testing.T) {
+	codex, out, _, _ := goalDeleteFixture(t, "- rule one\n- rule two\n", []string{"one", "two"})
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, out, bytes.Replace(data, []byte("  Зачем: one\n"), []byte("  more about one\n"), 1))
+	err = Absorb(codex, out, AbsorbOptions{DraftDir: codex})
+	if err == nil || !strings.Contains(err.Error(), `"  Зачем: one"`) || strings.Contains(err.Error(), "deleted on purpose") {
+		t.Fatalf("refusal for a kept rule = %v; want the line named without the advice for a deleted rule", err)
+	}
+}

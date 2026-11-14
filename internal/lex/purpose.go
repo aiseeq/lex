@@ -305,10 +305,14 @@ func (p purposeLayout) checkRemovedGoals(oldLines, newLines [][]byte, matchedOld
 			quoted = append(quoted, fmt.Sprintf("%q", strings.TrimRight(string(oldLines[index]), "\r\n")))
 		}
 	}
-	if len(quoted) == 1 {
-		return fmt.Errorf("%s: missing or edited цель; put the line %s back under its rule or delete the rule together with it", id, quoted[0])
+	apart := ""
+	if hi := failedHunk[first]; hi >= 0 && purposeSpanCovered(p.owners, oldLines, p.span(id), hunks[hi].oldStart, hunks[hi].oldEnd) {
+		apart = "; if the rule was deleted on purpose, delete it in one pass and make the edit next to it in another"
 	}
-	return fmt.Errorf("%s: missing or edited цель; put each of the lines %s back under its rule or delete that rule together with it", id, strings.Join(quoted, ", "))
+	if len(quoted) == 1 {
+		return fmt.Errorf("%s: missing or edited цель; put the line %s back under its rule or delete the rule together with it%s", id, quoted[0], apart)
+	}
+	return fmt.Errorf("%s: missing or edited цель; put each of the lines %s back under its rule or delete that rule together with it%s", id, strings.Join(quoted, ", "), apart)
 }
 
 func (p purposeLayout) ownerBefore(matches [][2]int, line int, fallback string) string {

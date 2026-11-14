@@ -1406,7 +1406,12 @@ func splitPurposeHunk(spans []purposeSpan, owners map[int]string, oldLines, newL
 		}
 		end = max(start, span.start)
 	}
-	if start == hunk.oldStart && end == hunk.oldEnd || start >= end || !onePurposeSpan(spans, start, end) || len(split(bytes.Join(newLines[hunk.newStart:hunk.newEnd], nil))) > len(split(bytes.Join(oldLines[start:end], nil))) {
+	if start == hunk.oldStart && end == hunk.oldEnd || start >= end {
+		return []lineHunk{hunk}
+	}
+	receiver, ok := purposeReceiverSpan(spans, start, end)
+	added := newLines[hunk.newStart:hunk.newEnd]
+	if !ok || len(split(bytes.Join(added, nil))) > len(split(bytes.Join(oldLines[start:end], nil))) || !purposeReceiverAccepts(owners, oldLines[receiver.start:receiver.end], added, receiver) {
 		return []lineHunk{hunk}
 	}
 	result := make([]lineHunk, 0, 3)
@@ -1441,13 +1446,40 @@ func ownerForPurposeSpan(owners map[int]string, span purposeSpan) (string, bool)
 	return "", false
 }
 
-func onePurposeSpan(spans []purposeSpan, start, end int) bool {
+// purposeReceiverSpan returns the one fragment that holds the rest [start, end) of a split hunk.
+func purposeReceiverSpan(spans []purposeSpan, start, end int) (purposeSpan, bool) {
 	for _, span := range spans {
 		if span.start <= start && end <= span.end {
-			return true
+			return span, true
 		}
 	}
-	return false
+	return purposeSpan{}, false
+}
+
+// purposeReceiverAccepts tells whether the new lines can belong only to the receiving fragment: its own purpose line
+// anchors it, or it is a heading and every new line is a heading. Otherwise the same text could be the removed
+// neighbour's rule, edited and stripped of its purpose line.
+func purposeReceiverAccepts(owners map[int]string, receiverLines, added [][]byte, receiver purposeSpan) bool {
+	if _, ok := ownerForPurposeSpan(owners, receiver); ok {
+		return true
+	}
+	return headingLines(receiverLines) && headingLines(added)
+}
+
+// headingLines reports whether the lines hold at least one heading and nothing else but blank lines.
+func headingLines(lines [][]byte) bool {
+	found := false
+	for _, line := range lines {
+		text := bytes.TrimSpace(line)
+		if len(text) == 0 {
+			continue
+		}
+		if text[0] != '#' {
+			return false
+		}
+		found = true
+	}
+	return found
 }
 
 func assignAbsorbHunks(bounds [][2]int, parts []string, oldLines [][]byte, hunks []lineHunk, draftDir, key, output string, actual []byte) ([]int, []int, map[int][]lineHunk, error) {
