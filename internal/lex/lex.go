@@ -1308,12 +1308,7 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 	}
 	fragmentsChanged := fragmentsChangedSinceBuild(codex, selected, m, built)
 	if fragmentsChanged && !outputMatchesGenerated(actual, built, m.header, selected) && !options.Force {
-		codexArg, fileArg := strconv.Quote(codex), strconv.Quote(target)
-		fileChanged := statusFileChanged(actual, selected, m)
-		if fileChanged {
-			return fmt.Errorf("%s: file and fragments both changed since the last build; run `lex absorb --force --codex %s %s` to keep the file and lose fragment text edits not in it, or `lex build --force --codex %s %s` to keep the fragments and lose file edits", target, codexArg, fileArg, codexArg, fileArg)
-		}
-		return fmt.Errorf("%s: fragments changed since the last build; run `lex build --codex %s %s` to carry fragment edits into the file, or `lex absorb --force --codex %s %s` to discard them", target, codexArg, fileArg, codexArg, fileArg)
+		return forceRefusal(codex, target, selected, paths, actual, m)
 	}
 	fileBytes := actual
 	if m.header {
@@ -2195,6 +2190,63 @@ func manifestsUsing(paths []string, part string) ([]string, error) {
 	return outputs, nil
 }
 
+// forceRefusal says why absorb refuses a file whose fragments changed since the build, with the commands that keep either side.
+func forceRefusal(codex, target, selected string, paths []string, actual []byte, m manifest) error {
+	codexArg, fileArg := strconv.Quote(codex), strconv.Quote(target)
+	sharedFlag, sharedHint, hintErr := sharedForceHint(paths, m.out, m.parts)
+	if hintErr != nil {
+		return hintErr
+	}
+	fileChanged := statusFileChanged(actual, selected, m)
+	if fileChanged {
+		conflict := "file and fragments both changed since the last build"
+		if m.builtHash == "" {
+			conflict = "the file differs from its recorded source and the fragments differ from the manifest"
+		}
+		return fmt.Errorf("%s: %s; run `lex absorb --force%s --codex %s %s` to keep the file and lose fragment text edits not in it, or `lex build --force --codex %s %s` to keep the fragments and lose file edits%s", target, conflict, sharedFlag, codexArg, fileArg, codexArg, fileArg, sharedHint)
+	}
+	conflict := "fragments changed since the last build"
+	if m.builtHash == "" {
+		conflict = "the fragments differ from the manifest"
+	}
+	return fmt.Errorf("%s: %s; run `lex build --codex %s %s` to carry fragment edits into the file, or `lex absorb --force%s --codex %s %s` to discard them%s", target, conflict, codexArg, fileArg, sharedFlag, codexArg, fileArg, sharedHint)
+}
+
+// sharedForceHint returns " --shared" and the sentence naming the other outputs
+// when a part of the output is in another manifest too, so that the absorb
+// --force command named beside it runs as written; both are empty otherwise.
+func sharedForceHint(paths []string, selected string, parts []string) (string, string, error) {
+	var others []string
+	seen := make(map[string]bool)
+	for _, part := range parts {
+		outputs, err := manifestsUsing(paths, part)
+		if err != nil {
+			return "", "", err
+		}
+		for _, output := range outputs {
+			if output != selected && !seen[output] {
+				seen[output] = true
+				others = append(others, output)
+			}
+		}
+	}
+	sort.Strings(others)
+	if len(others) == 0 {
+		return "", "", nil
+	}
+	return " --shared", "; --shared lets this file replace the fragments shared with " + strings.Join(others, ", ") + ": their edits there that are not in this file are lost", nil
+}
+
+// codexSharedForceHint is sharedForceHint over the manifests of codex.
+func codexSharedForceHint(codex string, m manifest) (string, string, error) {
+	paths, err := filepath.Glob(filepath.Join(codex, "manifest", "*.yaml"))
+	if err != nil {
+		return "", "", fmt.Errorf("list manifests: %w", err)
+	}
+	sort.Strings(paths)
+	return sharedForceHint(paths, m.out, m.parts)
+}
+
 func manifestKey(path string) string { return strings.TrimSuffix(filepath.Base(path), ".yaml") }
 func replaceFragmentBody(file, old, repl []byte) []byte {
 	header := bytes.TrimSuffix(file, old)
@@ -2807,7 +2859,11 @@ func builtDiffers(out, codex string, m manifest, manifestPath string, want, actu
 		return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`", out, codexArg)
 	}
 	if fragmentsChanged && fileChanged {
-		return fmt.Sprintf("%s: built output differs from its fragments — run `lex absorb --force --codex %s %s` to keep the file, or `lex build --force --codex %s %s` to keep the fragments", out, codexArg, fileArg, codexArg, fileArg)
+		sharedFlag, sharedHint, err := codexSharedForceHint(codex, m)
+		if err != nil {
+			return fmt.Sprintf("%s: %v", out, err)
+		}
+		return fmt.Sprintf("%s: built output differs from its fragments — run `lex absorb --force%s --codex %s %s` to keep the file, or `lex build --force --codex %s %s` to keep the fragments%s", out, sharedFlag, codexArg, fileArg, codexArg, fileArg, sharedHint)
 	}
 	return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`, or keep this edit with `lex absorb --codex %s %s`", out, codexArg, codexArg, fileArg)
 }
@@ -3290,6 +3346,8 @@ type StatusEntry struct {
 	// KeepFragments is set when the fragments changed after the last build too:
 	// the command that keeps them and drops the file's edits.
 	KeepFragments string
+	// SharedHint is printed after the status recommendation's full sentence.
+	SharedHint string
 	// ConflictSummary describes which versions are known to differ.
 	ConflictSummary string
 	// ProblemFile distinguishes an unreadable output from fragment errors.
@@ -3400,8 +3458,13 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 	}
 	entry.Command = "lex import --refresh --codex " + target
 	if fragmentsChanged {
-		entry.Command = "lex absorb --force --codex " + target
 		entry.KeepFragments = "lex build --force --codex " + target
+		sharedFlag, sharedHint, err := codexSharedForceHint(codex, m)
+		if err != nil {
+			return err
+		}
+		entry.Command = "lex absorb --force" + sharedFlag + " --codex " + target
+		entry.SharedHint = sharedHint
 		if m.builtHash == "" {
 			entry.ConflictSummary = "the file differs from its recorded source and the fragments differ from the manifest"
 		} else {
