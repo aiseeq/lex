@@ -1099,6 +1099,18 @@ func generatedMarkerForms(manifestPath string) [][]byte {
 	return forms
 }
 
+// headerLineForms lists each generated marker line ending in LF and in CRLF: an editor may rewrite the header line's ending.
+func headerLineForms(manifestPath string) [][]byte {
+	var forms [][]byte
+	for _, marker := range generatedMarkerForms(manifestPath) {
+		line := bytes.TrimSuffix(marker, []byte("\n"))
+		for _, ending := range []string{"\n", "\r\n"} {
+			forms = append(forms, append(append([]byte(nil), line...), ending...))
+		}
+	}
+	return forms
+}
+
 func frontMatterOffset(data []byte) int {
 	lines := bytes.SplitAfter(data, []byte("\n"))
 	offset := 0
@@ -1181,7 +1193,7 @@ func withoutGeneratedHeader(data []byte, manifestPath string) []byte {
 
 func stripGeneratedHeader(data []byte, manifestPath string) ([]byte, bool) {
 	offset := frontMatterOffset(data)
-	for _, marker := range generatedMarkerForms(manifestPath) {
+	for _, marker := range headerLineForms(manifestPath) {
 		if bytes.HasPrefix(data[offset:], marker) {
 			return append(append([]byte{}, data[:offset]...), data[offset+len(marker):]...), true
 		}
@@ -1378,12 +1390,7 @@ func rejectTextAboveHeader(file, selected string, m manifest, actual []byte) err
 	if !m.header {
 		return nil
 	}
-	var forms [][]byte
-	for _, marker := range generatedMarkerForms(selected) {
-		for _, ending := range [][]byte{[]byte("\n"), []byte("\r\n")} {
-			forms = append(forms, append(append([]byte(nil), bytes.TrimSuffix(marker, []byte("\n"))...), ending...))
-		}
-	}
+	forms := headerLineForms(selected)
 	top := actual[frontMatterOffset(actual):]
 	for _, form := range forms {
 		if bytes.HasPrefix(top, form) {
@@ -3335,6 +3342,9 @@ func stagedOrphans(commit *stagedPaths, codex string, referenced map[string]bool
 // builtDiffers explains why out differs from its fragments; fileEdited reports advice that keeps an edit made in the file with lex absorb.
 func builtDiffers(out, codex string, m manifest, manifestPath string, want, actual []byte) (problem string, fileEdited bool) {
 	codexArg, fileArg := ShellQuoteArg(codex), ShellQuoteArg(out)
+	if err := rejectTextAboveHeader(out, manifestPath, m, actual); err != nil {
+		return err.Error(), false
+	}
 	if owner, foreign := foreignOutputOwner(codex, actual); foreign {
 		return fmt.Sprintf("%s: the file carries %s, so lex import and lex absorb refuse it — if this codex owns the file, run `lex build --force --codex %s %s` to rebuild it from the fragments (edits in the file are lost)", out, ForeignHeaderPhrase(owner), codexArg, fileArg), false
 	}
@@ -3969,6 +3979,10 @@ func statusFileChanged(actual []byte, manifestPath string, m manifest) bool {
 }
 
 func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath string, m manifest, actual, want []byte) error {
+	if err := rejectTextAboveHeader(m.out, manifestPath, m, actual); err != nil {
+		entry.Problem = err.Error()
+		return nil
+	}
 	assessment, refreshErr := assessRefresh(codex, manifestKey(manifestPath), manifestPath, m, actual)
 	fragmentsChanged := fragmentsChangedSinceBuild(codex, manifestPath, m, want)
 	rel, err := filepath.Rel(home, m.out)
