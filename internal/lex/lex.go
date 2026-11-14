@@ -1596,9 +1596,11 @@ type lineHunk struct {
 }
 
 type preparedFragmentEdit struct {
-	part, path string
-	updated    []byte
-	hash       string
+	part, path  string
+	updated     []byte
+	hash        string
+	startLine   int
+	replacement []byte
 }
 
 func planEditedFragment(codex string, paths []string, selected string, m manifest, built, actual, fileBytes []byte, options AbsorbOptions, purpose *purposeLayout) ([][2]int, []int, []preparedFragmentEdit, map[int][]lineHunk, error) {
@@ -1829,7 +1831,7 @@ func planAbsorbEdits(codex string, paths []string, selected string, m manifest, 
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	edits, err = validateAndCollapseRepeatedPartEdits(codex, m.parts, owners, edits)
+	edits, err = validateAndCollapseRepeatedPartEdits(codex, m.parts, owners, edits, bounds, deltas, additions)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -2440,7 +2442,7 @@ func changedLineRanges(oldLines, newLines [][]byte) (int, int, int, int) {
 	return prefix, len(oldLines) - suffix, prefix, len(newLines) - suffix
 }
 
-func validateAndCollapseRepeatedPartEdits(codex string, parts []string, owners []int, edits []preparedFragmentEdit) ([]preparedFragmentEdit, error) {
+func validateAndCollapseRepeatedPartEdits(codex string, parts []string, owners []int, edits []preparedFragmentEdit, bounds [][2]int, deltas []int, additions map[int][]lineHunk) ([]preparedFragmentEdit, error) {
 	partCounts := make(map[string]int, len(parts))
 	for _, part := range parts {
 		partCounts[part]++
@@ -2461,7 +2463,7 @@ func validateAndCollapseRepeatedPartEdits(codex string, parts []string, owners [
 		}
 		if previous, ok := editByPart[edit.part]; ok && !bytes.Equal(previous.updated, edit.updated) {
 			path := filepath.Join(codex, "frag", filepath.FromSlash(edit.part)+".md")
-			return nil, fmt.Errorf("%s: fragment occurs more than once in manifest; cannot absorb distinct edits", path)
+			return nil, repeatedEditRefusal(path, previous.startLine, previous.replacement, edit.startLine, edit.replacement, true)
 		}
 		editByPart[edit.part] = edit
 	}
@@ -2474,7 +2476,14 @@ func validateAndCollapseRepeatedPartEdits(codex string, parts []string, owners [
 		}
 		if ownerCounts[edit.part] != partCounts[edit.part] {
 			path := filepath.Join(codex, "frag", filepath.FromSlash(edit.part)+".md")
-			return nil, fmt.Errorf("%s: fragment occurs more than once in manifest; cannot absorb distinct edits", path)
+			other := -1
+			for i, part := range parts {
+				if part == edit.part && !editedOccurrences[i] {
+					other = i
+					break
+				}
+			}
+			return nil, repeatedUneditedCopyRefusal(path, edit, other, bounds, deltas, additions)
 		}
 		if !seen[edit.part] {
 			result = append(result, edit)
@@ -2482,6 +2491,88 @@ func validateAndCollapseRepeatedPartEdits(codex string, parts []string, owners [
 		}
 	}
 	return result, nil
+}
+
+func repeatedUneditedCopyRefusal(path string, edit preparedFragmentEdit, occurrence int, bounds [][2]int, deltas []int, additions map[int][]lineHunk) error {
+	start := editedPartStartLine(occurrence, bounds, deltas, additions)
+	raw, err := os.ReadFile(edit.path)
+	if err != nil {
+		return fmt.Errorf("%s: %w", edit.path, err)
+	}
+	body, err := fragmentBody(raw)
+	if err != nil {
+		return fmt.Errorf("%s: %w", edit.path, err)
+	}
+	return repeatedEditRefusal(path, edit.startLine, edit.replacement, start+1, body, false)
+}
+
+func editedPartStartLine(occurrence int, bounds [][2]int, deltas []int, additions map[int][]lineHunk) int {
+	shift := 0
+	for i := range occurrence {
+		shift += deltas[i]
+	}
+	for position, hunks := range additions {
+		if position > bounds[occurrence][0] {
+			continue
+		}
+		for _, hunk := range hunks {
+			shift += hunk.newEnd - hunk.newStart
+		}
+	}
+	return bounds[occurrence][0] + shift
+}
+
+func repeatedEditRefusal(path string, lineA int, textA []byte, lineB int, textB []byte, preferLaterText bool) error {
+	if lineB < lineA {
+		lineA, lineB = lineB, lineA
+		textA, textB = textB, textA
+	}
+	a, b := absorbLines(textA), absorbLines(textB)
+	difference := "end of copy"
+	if trailingNewlines(textA) != trailingNewlines(textB) {
+		difference = "blank line"
+	}
+	for i, j := 0, 0; i < len(a) || j < len(b); {
+		left, right := "", ""
+		if i < len(a) {
+			left = strings.TrimSuffix(string(a[i]), "\n")
+		}
+		if j < len(b) {
+			right = strings.TrimSuffix(string(b[j]), "\n")
+		}
+		if i < len(a) && j < len(b) && left == right {
+			i++
+			j++
+			continue
+		}
+		if left == "" && i < len(a) {
+			i++
+			continue
+		}
+		if right == "" && j < len(b) {
+			j++
+			continue
+		}
+		if i >= len(a) || j >= len(b) {
+			remaining := left
+			if i >= len(a) {
+				remaining = right
+			}
+			if remaining == "" {
+				difference = "blank line"
+			} else {
+				difference = fmt.Sprintf("%q", remaining)
+			}
+		} else {
+			if preferLaterText {
+				difference = fmt.Sprintf("%q", right)
+			} else {
+				difference = fmt.Sprintf("%q", left)
+			}
+		}
+		break
+	}
+	return fmt.Errorf("%s: fragment occurs more than once in manifest; cannot absorb distinct edits — the copies at line %d and line %d differ at %s; make every copy the same, or edit the fragment and run lex build", path, lineA, lineB, difference)
 }
 
 func validateSharedEdits(paths []string, parts []string, owners []int, shared bool) error {
@@ -2517,21 +2608,11 @@ func firstSharedEdit(paths []string, parts []string, owners []int) ([]string, er
 
 func prepareFragmentEdits(codex string, parts []string, bounds [][2]int, owners, deltas []int, newLines [][]byte, additions map[int][]lineHunk, printedPurpose bool) ([]preparedFragmentEdit, error) {
 	edits := make([]preparedFragmentEdit, 0)
-	lineShift := 0
-	appliedAdditions := make(map[int]bool, len(additions))
 	for i, part := range parts {
-		for position, hunks := range additions {
-			if position <= bounds[i][0] && !appliedAdditions[position] {
-				for _, hunk := range hunks {
-					lineShift += hunk.newEnd - hunk.newStart
-				}
-				appliedAdditions[position] = true
-			}
-		}
 		if !slices.Contains(owners, i) {
 			continue
 		}
-		lo := bounds[i][0] + lineShift
+		lo := editedPartStartLine(i, bounds, deltas, additions)
 		hi := lo + (bounds[i][1] - bounds[i][0]) + deltas[i]
 		path := filepath.Join(codex, "frag", filepath.FromSlash(part)+".md")
 		if lo < 0 || hi < lo || hi > len(newLines) {
@@ -2550,8 +2631,7 @@ func prepareFragmentEdits(codex string, parts []string, bounds [][2]int, owners,
 			replacement = stripPurposeLines(replacement)
 		}
 		updated := absorbReplaceFragmentBody(raw, body, replacement)
-		edits = append(edits, preparedFragmentEdit{part: part, path: path, updated: updated, hash: sha(updated)})
-		lineShift += deltas[i]
+		edits = append(edits, preparedFragmentEdit{part: part, path: path, updated: updated, hash: sha(updated), startLine: lo + 1, replacement: replacement})
 	}
 	return edits, nil
 }
