@@ -1733,10 +1733,11 @@ func planAbsorbEdits(codex string, paths []string, selected string, m manifest, 
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if err := validateEditedPartOccurrences(codex, m.parts, owners); err != nil {
+	edits, err := prepareFragmentEdits(codex, m.parts, bounds, owners, deltas, newLines, additions, printedPurpose)
+	if err != nil {
 		return nil, nil, nil, err
 	}
-	edits, err := prepareFragmentEdits(codex, m.parts, bounds, owners, deltas, newLines, additions, printedPurpose)
+	edits, err = validateAndCollapseRepeatedPartEdits(codex, m.parts, owners, edits)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -2346,19 +2347,48 @@ func changedLineRanges(oldLines, newLines [][]byte) (int, int, int, int) {
 	return prefix, len(oldLines) - suffix, prefix, len(newLines) - suffix
 }
 
-func validateEditedPartOccurrences(codex string, parts []string, owners []int) error {
-	counts := make(map[string]int, len(parts))
+func validateAndCollapseRepeatedPartEdits(codex string, parts []string, owners []int, edits []preparedFragmentEdit) ([]preparedFragmentEdit, error) {
+	partCounts := make(map[string]int, len(parts))
 	for _, part := range parts {
-		counts[part]++
+		partCounts[part]++
 	}
+	// owners index occurrences in parts: a repeated part is absorbed only when every occurrence is edited
+	editedOccurrences := make(map[int]bool, len(owners))
+	ownerCounts := make(map[string]int, len(owners))
 	for _, owner := range owners {
-		part := parts[owner]
-		if counts[part] > 1 {
-			path := filepath.Join(codex, "frag", filepath.FromSlash(part)+".md")
-			return fmt.Errorf("%s: fragment occurs more than once in manifest; cannot absorb distinct edits", path)
+		if !editedOccurrences[owner] {
+			editedOccurrences[owner] = true
+			ownerCounts[parts[owner]]++
 		}
 	}
-	return nil
+	editByPart := make(map[string]preparedFragmentEdit, len(edits))
+	for _, edit := range edits {
+		if partCounts[edit.part] < 2 {
+			continue
+		}
+		if previous, ok := editByPart[edit.part]; ok && !bytes.Equal(previous.updated, edit.updated) {
+			path := filepath.Join(codex, "frag", filepath.FromSlash(edit.part)+".md")
+			return nil, fmt.Errorf("%s: fragment occurs more than once in manifest; cannot absorb distinct edits", path)
+		}
+		editByPart[edit.part] = edit
+	}
+	result := make([]preparedFragmentEdit, 0, len(edits))
+	seen := make(map[string]bool, len(editByPart))
+	for _, edit := range edits {
+		if partCounts[edit.part] < 2 {
+			result = append(result, edit)
+			continue
+		}
+		if ownerCounts[edit.part] != partCounts[edit.part] {
+			path := filepath.Join(codex, "frag", filepath.FromSlash(edit.part)+".md")
+			return nil, fmt.Errorf("%s: fragment occurs more than once in manifest; cannot absorb distinct edits", path)
+		}
+		if !seen[edit.part] {
+			result = append(result, edit)
+			seen[edit.part] = true
+		}
+	}
+	return result, nil
 }
 
 func validateSharedEdits(paths []string, parts []string, owners []int, shared bool) error {
