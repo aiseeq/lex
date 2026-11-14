@@ -213,6 +213,22 @@ func TestTextRefsForms(t *testing.T) {
 	if len(badRegister) != 1 || badRegister[0].kind != 2 {
 		t.Errorf("битая форма «Регистр из раздела» не найдена: %v", badRegister)
 	}
+	interfaceLines := "В списке таких записей нет: они видны в журнале раздела «Сводка урожая» и в отчёте.\nКнопка на экране раздела «Полив».\nОтвет Telegram-бота раздела «Теплицы».\n"
+	documentLines := "См. раздела «Нет такого раздела» в начале.\nТаблица в приложении раздела «Нет приложения».\nНа странице раздела «Нет страницы».\nЖурналист раздела «Нет журналиста» пишет.\nБотаника раздела «Нет ботаники».\n"
+	interfacePath := filepath.Join(root, "rules", "greenhouse.md")
+	interfaceFindings := findTextRefs(textCorpus{interfacePath: []byte("## Теплица\n" + interfaceLines + documentLines)}, journal)
+	for _, missing := range []string{"Нет такого раздела", "Нет приложения", "Нет страницы", "Нет журналиста", "Нет ботаники"} {
+		found := false
+		for _, f := range interfaceFindings {
+			found = found || f.kind == 2 && strings.Contains(f.text, missing)
+		}
+		if !found {
+			t.Errorf("ссылка на раздел документа «%s» не найдена: %v", missing, interfaceFindings)
+		}
+	}
+	if len(interfaceFindings) != 5 {
+		t.Errorf("раздел интерфейса после «журнале», «экране» или «бота» не должен быть ссылкой: %v", interfaceFindings)
+	}
 	removedRule := "Снимает в `sample-entry-one` и поправке 2 `sample-entry-two` правило «после выкопки сушить гладиолусы под навесом, затем убрать плетёные корзины в сухой погреб до первых заморозков»"
 	decisionPath := filepath.Join(root, "decisions.md")
 	quotedCorpus := removedRule + "\nПравило «несуществующее»\nПравила «историческая цитата»\nПравило «снятое» снято 25.04\n"

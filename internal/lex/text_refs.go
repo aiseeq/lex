@@ -41,17 +41,20 @@ var (
 	quotedSection            = regexp.MustCompile(`(?i)(?:раздел[а-я]*|пункт[а-я]*|правил(?:о|у|е|ом)|подраздел[а-я]*)\s+«([^«»]+)»`)
 	historicalRuleRemoval    = regexp.MustCompile(`(?i)снима[а-я]*\s+.{0,180}правил[а-я]*\s+«[^«»]+»\s*$`)
 	historicalRuleStatus     = regexp.MustCompile(`(?i)^\s*(?:снят[а-я]*|отмен[а-я]*|упраздн[а-я]*)`)
-	skillSection             = regexp.MustCompile("`([a-z0-9][a-z0-9-]*)`\\s*,\\s*«([^«»]+)»")
-	registerSection          = regexp.MustCompile(`(?i)регистр\s*(?:из\s+раздела\s+)?[—-]?\s*«([^«»]+)»`)
-	fileRef                  = regexp.MustCompile("`([^`\\n]+\\.md)`")
-	markdownRef              = regexp.MustCompile(`\[[^\]]+\]\(([^)]+\.md)(?:#([^)]+))?\)`)
-	listItem                 = regexp.MustCompile(`^(\s*)([0-9]{1,6})([a-zа-я]?)[.)]\s+`)
-	numberedHeading          = regexp.MustCompile(`^#{2,6}\s+([0-9]{1,6})([a-zа-я]?)\.\s+`)
-	stepRef                  = regexp.MustCompile(`(?i)шаг[а-я]*\s+([0-9]+[a-z]?(?:\s*[–—-]\s*[0-9]+[a-z]?)?(?:\s+и\s+[0-9]+[a-z]?)*)`)
-	stepNumber               = regexp.MustCompile(`([0-9]+[a-z]?)(?:\s*[–—-]\s*([0-9]+[a-z]?))?`)
-	skillNameRef             = regexp.MustCompile("(?i)скилл[а-я]*\\s+`([a-z0-9-]+)`")
-	nearbyRef                = regexp.MustCompile("`([^`\\n]+\\.md)`\\s+рядом")
-	backDecision             = regexp.MustCompile("`([a-z0-9]+(?:-[a-z0-9]+)+)`\\s+в\\s+`[^`]*decisions\\.md`")
+	// interfaceSection is a section of a screen, bot or site named right before it («в журнале раздела «Сводка»»), not of a
+	// document. Page and appendix are left out: a document has them too.
+	interfaceSection = regexp.MustCompile(`(?i)(?:^|[^а-яё])(?:(?:журнал|экран|интерфейс|сайт|бот)(?:а|у|ом|е|ы|ов|ах|ам|ами)?|меню|вкладк(?:а|и|е|у|ой|ах|ам)|вкладок|панел(?:ь|и|ью|ей|ях|ям))\s+раздела\s+«[^«»]+»$`)
+	skillSection     = regexp.MustCompile("`([a-z0-9][a-z0-9-]*)`\\s*,\\s*«([^«»]+)»")
+	registerSection  = regexp.MustCompile(`(?i)регистр\s*(?:из\s+раздела\s+)?[—-]?\s*«([^«»]+)»`)
+	fileRef          = regexp.MustCompile("`([^`\\n]+\\.md)`")
+	markdownRef      = regexp.MustCompile(`\[[^\]]+\]\(([^)]+\.md)(?:#([^)]+))?\)`)
+	listItem         = regexp.MustCompile(`^(\s*)([0-9]{1,6})([a-zа-я]?)[.)]\s+`)
+	numberedHeading  = regexp.MustCompile(`^#{2,6}\s+([0-9]{1,6})([a-zа-я]?)\.\s+`)
+	stepRef          = regexp.MustCompile(`(?i)шаг[а-я]*\s+([0-9]+[a-z]?(?:\s*[–—-]\s*[0-9]+[a-z]?)?(?:\s+и\s+[0-9]+[a-z]?)*)`)
+	stepNumber       = regexp.MustCompile(`([0-9]+[a-z]?)(?:\s*[–—-]\s*([0-9]+[a-z]?))?`)
+	skillNameRef     = regexp.MustCompile("(?i)скилл[а-я]*\\s+`([a-z0-9-]+)`")
+	nearbyRef        = regexp.MustCompile("`([^`\\n]+\\.md)`\\s+рядом")
+	backDecision     = regexp.MustCompile("`([a-z0-9]+(?:-[a-z0-9]+)+)`\\s+в\\s+`[^`]*decisions\\.md`")
 )
 
 type textRefException struct {
@@ -538,7 +541,7 @@ func (s *refScanner) quotedSections() {
 		if strings.HasSuffix(strings.ToLower(prefix), "регистр из") {
 			continue
 		}
-		if historicalRuleRemoval.MatchString(prefix + " " + match) {
+		if historicalRuleRemoval.MatchString(prefix+" "+match) || interfaceSection.MatchString(prefix+" "+match) {
 			continue
 		}
 		title := s.line[indexes[2]:indexes[3]]
