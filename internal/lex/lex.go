@@ -4581,6 +4581,8 @@ func appendOrphanProblem(codex string, referenced map[string]bool) error {
 // StatusEntry describes one output file that differs from the codex.
 type StatusEntry struct {
 	Manifest, Output string
+	// Message is the whole status line for a problem that belongs to no manifest on disk.
+	Message string
 	// Command settles the difference. When KeepFragments is set as well,
 	// Command keeps the file's text and drops the fragment edits.
 	Command string
@@ -4620,6 +4622,19 @@ func statusFileProblem(err error) string {
 }
 
 func Status(codex string) ([]StatusEntry, error) { return StatusWithHome(codex, "") }
+
+// statusMissingFragments gives the restore advice for every fragment of m missing on disk; other stat errors are left to the build comparison.
+func statusMissingFragments(codex, manifestPath string, m manifest) []string {
+	var advice []string
+	for _, id := range m.parts {
+		fragment := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
+		if _, err := os.Stat(fragment); errors.Is(err, fs.ErrNotExist) {
+			advice = append(advice, missingFragmentAdvice(fragment, id, manifestPath))
+		}
+	}
+	return advice
+}
+
 func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 	codex, err := canonicalCodex(codex, false)
 	if err != nil {
@@ -4637,10 +4652,20 @@ func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 		return nil, err
 	}
 	var changed []StatusEntry
+	referenced := map[string]bool{}
 	for _, p := range catalog.paths {
 		m, err := catalog.read(p)
 		if err != nil {
 			return nil, err
+		}
+		for _, id := range m.parts {
+			referenced[id] = true
+		}
+		if advice := statusMissingFragments(codex, p, m); len(advice) > 0 {
+			for _, problem := range advice {
+				changed = append(changed, StatusEntry{Manifest: p, Output: m.out, Problem: problem})
+			}
+			continue
 		}
 		entry := StatusEntry{Manifest: p, Output: m.out}
 		actual, err := os.ReadFile(m.out)
@@ -4669,6 +4694,13 @@ func StatusWithHome(codex, home string) ([]StatusEntry, error) {
 			return nil, err
 		}
 		changed = append(changed, entry)
+	}
+	missingManifests, err := missingOnDiskManifestProblems(codex, referenced)
+	if err != nil {
+		return nil, err
+	}
+	for _, message := range missingManifests {
+		changed = append(changed, StatusEntry{Message: message, Problem: message})
 	}
 	return changed, nil
 }
