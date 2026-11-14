@@ -207,6 +207,11 @@ func TestEditWarningNamesEachGitState(t *testing.T) {
 		want  string
 	}{
 		{"outside git", func(t *testing.T, root, output string) { edit(t, output) }, "git: not in a git repository; fragments: not in a git repository)"},
+		{"outside git, translated git messages", func(t *testing.T, root, output string) {
+			t.Setenv("LC_ALL", "ru_RU.UTF-8")
+			t.Setenv("LANGUAGE", "ru")
+			edit(t, output)
+		}, "git: not in a git repository; fragments: not in a git repository)"},
 		{"untracked", func(t *testing.T, root, output string) {
 			gitCommand(t, root, "init", "-q")
 			gitCommand(t, root, append(append([]string{}, config...), "add", "codex")...)
@@ -360,5 +365,60 @@ func TestAbsorbRefusalDoesNotWarn(t *testing.T) {
 	}
 	if strings.Contains(stderr, "warning:") || strings.Contains(err.Error(), "warning:") {
 		t.Errorf("refused absorb warned: %q, %v", stderr, err)
+	}
+}
+
+func TestEditWarningTakesPathsLiterally(t *testing.T) {
+	unsetGitEnvironment(t)
+	config := []string{"-c", "user.name=Fixture User", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"}
+	cases := []struct {
+		name, file, neighbor string
+		commitEdit           bool
+		want                 string
+	}{
+		{"leading colon", ":notes.md", "", false, "git: modified; fragments: committed)"},
+		{"glob character", "notes?.md", "notes1.md", true, "git: committed; fragments: committed)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			codex := filepath.Join(root, "codex")
+			output := filepath.Join(root, tc.file)
+			if err := os.WriteFile(output, []byte("# Sample\n\nOriginal rule.\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := lex.ImportWithOptions(codex, output, lex.ImportOptions{Home: root}); err != nil {
+				t.Fatalf("import fixture: %v", err)
+			}
+			if err := lex.Build(codex, false); err != nil {
+				t.Fatalf("build fixture: %v", err)
+			}
+			if tc.neighbor != "" {
+				if err := os.WriteFile(filepath.Join(root, tc.neighbor), []byte("neighbor\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gitCommand(t, root, "init", "-q")
+			gitCommand(t, root, append(append([]string{}, config...), "add", "-A")...)
+			gitCommand(t, root, append(append([]string{}, config...), "commit", "-qm", "fixture")...)
+			if err := os.WriteFile(output, []byte("# Sample\n\nForeign edit.\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.commitEdit {
+				gitCommand(t, root, append(append([]string{}, config...), "commit", "-qam", "edit")...)
+			}
+			if tc.neighbor != "" {
+				if err := os.WriteFile(filepath.Join(root, tc.neighbor), []byte("neighbor edit\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, stderr, err := captureRunWithStderr(t, "build", "--codex", codex, "--force", output)
+			if err != nil {
+				t.Fatalf("build --force failed: %v", err)
+			}
+			if !strings.Contains(stderr, tc.want) {
+				t.Errorf("warning %q does not contain %q", stderr, tc.want)
+			}
+		})
 	}
 }

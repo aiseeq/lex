@@ -736,7 +736,7 @@ func gitStatus(cwd string, paths ...string) (string, string, error) {
 	if err != nil {
 		return "", "", fmt.Errorf("find git: %w", err)
 	}
-	args := append([]string{"-C", cwd, "status", "--porcelain=v1", "--untracked-files=all", "--ignored", "--"}, paths...)
+	args := append([]string{"--literal-pathspecs", "-C", cwd, "status", "--porcelain=v1", "--untracked-files=all", "--ignored", "--"}, paths...)
 	cmd := exec.Command(git, args...)
 	cmd.Env = gitStatusEnv()
 	var stderr bytes.Buffer
