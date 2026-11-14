@@ -1270,19 +1270,6 @@ func planAbsorbEdits(codex string, paths []string, selected string, m manifest, 
 	if err != nil {
 		return nil, nil, err
 	}
-	remaining := append([]string(nil), m.parts...)
-	for _, edit := range edits {
-		body, err := fragmentBody(edit.updated)
-		if err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", edit.path, err)
-		}
-		if len(body) == 0 {
-			remaining = slices.DeleteFunc(remaining, func(id string) bool { return id == edit.part })
-		}
-	}
-	if err := validateAbsorbedInsertionBounds(codex, m.out, bounds, additions, remaining, m.parts); err != nil {
-		return nil, nil, err
-	}
 	editable, err := nonemptyEditedOwners(owners, m.parts, edits)
 	if err != nil {
 		return nil, nil, err
@@ -1603,22 +1590,6 @@ func applyAbsorbedEdits(paths []string, m manifest, edits []preparedFragmentEdit
 	}
 	updated.builtHash = sha(fileBytes)
 	return updated, removePaths, nil
-}
-
-func validateAbsorbedInsertionBounds(codex, output string, bounds [][2]int, additions map[int][]lineHunk, remainingParts, originalParts []string) error {
-	positions := slices.Sorted(maps.Keys(additions))
-	for _, position := range positions {
-		at := survivingInsertionIndex(position, bounds, originalParts, remainingParts)
-		if at > len(remainingParts) {
-			fragment := "unknown fragment"
-			if len(originalParts) > 0 {
-				partAt := min(at, len(originalParts)-1)
-				fragment = filepath.Join(codex, "frag", filepath.FromSlash(originalParts[partAt])+".md")
-			}
-			return fmt.Errorf("%s: fragment %s was not updated: invalid edited fragment line bounds for insertion at line %d", output, fragment, position+1)
-		}
-	}
-	return nil
 }
 
 // survivingInsertionIndex translates a boundary in the original rendered line
