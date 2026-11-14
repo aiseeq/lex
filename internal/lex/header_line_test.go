@@ -23,6 +23,21 @@ func TestAdviceNamesHeaderLine(t *testing.T) {
 			want: "text above lex header (found at line 4); move the text below the header, or if the header line was deleted, restore it as the first line",
 		},
 		{
+			name:     "первая копия среди разных форм",
+			original: "# A\n\n- one\n\n- two\n",
+			edit: func(data []byte) []byte {
+				header, body, _ := bytes.Cut(data, []byte("\n"))
+				later := bytes.Index(body, []byte("- one"))
+				edited := append([]byte(nil), body[:later]...)
+				edited = append(edited, header...)
+				edited = append(edited, '\r', '\n')
+				edited = append(edited, body[later:]...)
+				edited = append(edited, header...)
+				return append(edited, '\n')
+			},
+			want: "text above lex header (found at line 3); move the text below the header, or if the header line was deleted, restore it as the first line",
+		},
+		{
 			name:     "строка над шапкой",
 			original: "# A\n\n- one\n",
 			edit: func(data []byte) []byte {
