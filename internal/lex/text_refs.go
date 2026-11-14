@@ -902,14 +902,21 @@ func nearestSkillDirectory(path string, skillDirs map[string]bool) (string, bool
 }
 
 func orphanSkillFinding(path, skill string, data []byte) textRefFinding {
-	line, text := 1, ""
-	inCode := false
-	for i, candidate := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(candidate), "```") {
-			inCode = !inCode
+	lines := strings.Split(string(data), "\n")
+	line, text := 1, lines[0]
+	fence := ""
+	for i, candidate := range lines {
+		trimmed := strings.TrimSpace(candidate)
+		if marker := trimmed[:min(3, len(trimmed))]; fence == "" && (marker == "```" || marker == "~~~") {
+			fence = marker
+			continue
+		} else if fence != "" {
+			if strings.HasPrefix(trimmed, fence) {
+				fence = ""
+			}
 			continue
 		}
-		if !inCode && strings.HasPrefix(candidate, "# ") {
+		if strings.HasPrefix(candidate, "# ") {
 			line, text = i+1, candidate
 			break
 		}
