@@ -100,11 +100,7 @@ func checkTextRefs(codex string, options CheckOptions) ([]string, error) {
 		combined[path], combinedOld[path] = data, data
 	}
 	if len(externalCorpus) > 0 {
-		for _, finding := range findTextRefsWithExcluded(combined, journal, skills, externalPaths) {
-			if externalPaths[finding.path] {
-				findings = append(findings, finding)
-			}
-		}
+		findings = append(findings, distinctExternalFindings(findTextRefsWithExcluded(combined, journal, skills, externalPaths), externalPaths)...)
 	}
 	baseline := map[textRefKey]bool{}
 	if old != nil {
@@ -1112,4 +1108,30 @@ func sectionExists(body, title, referenceLine string) bool {
 		}
 	}
 	return false
+}
+
+// distinctExternalFindings keeps the findings of external files and drops a repeat from a second entry
+// that reaches the same file (through a symlink). Both entries are read: a relative reference resolves
+// from the entry's own directory, so only a finding with the same line and the same missing target is a repeat.
+func distinctExternalFindings(all []textRefFinding, externalPaths map[string]bool) []textRefFinding {
+	type key struct {
+		kind, line          int
+		real, text, missing string
+	}
+	seen := map[key]bool{}
+	var out []textRefFinding
+	for _, f := range all {
+		if !externalPaths[f.path] {
+			continue
+		}
+		real := resolvePath(f.path)
+		// a "below"/"above" finding names its own file in missing; through a symlink that name differs
+		k := key{f.kind, f.line, real, f.text, strings.ReplaceAll(f.missing, f.path, real)}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, f)
+	}
+	return out
 }
