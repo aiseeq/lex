@@ -3505,6 +3505,9 @@ func checkDisk(codex string) ([]string, error) {
 		body, missing, draftWarnings := checkedManifestBody(codex, m, referenced, os.ReadFile, purposeEnabled)
 		warnings = append(warnings, draftWarnings...)
 		problems = append(problems, missing...)
+		if len(missing) > 0 {
+			continue
+		}
 		if m.header {
 			body = generatedHeader(path, body)
 		}
@@ -3518,6 +3521,11 @@ func checkDisk(codex string) ([]string, error) {
 			problems = append(problems, problem)
 		}
 	}
+	missingManifestProblems, missingManifestErr := missingOnDiskManifestProblems(codex, referenced)
+	if missingManifestErr != nil {
+		return nil, missingManifestErr
+	}
+	problems = append(problems, missingManifestProblems...)
 	if err := appendOrphanProblem(codex, referenced); err != nil {
 		problems = append(problems, err.Error())
 	}
@@ -3597,6 +3605,15 @@ func checkStaged(codex string) ([]string, error) {
 	return finishCheck(append(warnings, recordWarnings...), append(problems, orphans...))
 }
 
+// stagedManifestTouched determines whether a manifest is affected by staged content.
+func stagedManifestTouched(commit *stagedPaths, codex, path string, m manifest, checker *toolChecker) (bool, error) {
+	touched := commit.touches(m, path, codex)
+	if touched || !checker.purposeChanged {
+		return touched, nil
+	}
+	return stagedHasPurpose(commit, codex, m)
+}
+
 // checkStagedManifest - проверка одного манифеста коммита; части каждого читаемого манифеста индекса
 // помечаются в referenced: манифест, удалённый в коммите, сюда не попадает, и его фрагменты станут сиротами.
 func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map[string]bool, checker *toolChecker, catalog *manifestCatalog) (warnings, problems []string, err error) {
@@ -3620,12 +3637,9 @@ func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map
 	if linkProblems := stagedLinkProblems(commit, m.links); len(linkProblems) > 0 {
 		problems = append(problems, linkProblems...)
 	}
-	touched := commit.touches(m, path, codex)
-	if !touched && checker.purposeChanged {
-		touched, err = stagedHasPurpose(commit, codex, m)
-		if err != nil {
-			return warnings, append(problems, err.Error()), nil
-		}
+	touched, touchErr := stagedManifestTouched(commit, codex, path, m, checker)
+	if touchErr != nil {
+		return warnings, append(problems, touchErr.Error()), nil
 	}
 	if !touched {
 		return warnings, problems, nil // фрагмент в коммите делает свой манифест задетым, так что сироту это не скроет
@@ -3654,6 +3668,14 @@ func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map
 	body, missing, draftWarnings := checkedManifestBody(codex, m, referenced, read, checker.purpose)
 	warnings = append(warnings, draftWarnings...)
 	problems = append(problems, missing...)
+	if len(missing) == 0 {
+		diskMissing := stagedDiskMissingFragments(commit, fragPaths, path)
+		missing = append(missing, diskMissing...)
+		problems = append(problems, diskMissing...)
+	}
+	if len(missing) > 0 {
+		return warnings, problems, nil
+	}
 
 	if m.header {
 		body = generatedHeader(path, body)
@@ -3727,7 +3749,7 @@ func unstagedFragmentHints(commit *stagedPaths, fragPaths []string, indexed map[
 		disk, err := os.ReadFile(diskPath)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
-			hints = append(hints, diskPath+": fragment deleted on disk but not staged — git add it together with "+commit.treePath(out))
+			hints = append(hints, fmt.Sprintf("%s: fragment missing on disk; restore it with `git checkout -- %s` or remove its reference from the manifest", diskPath, ShellQuoteArg(diskPath)))
 		case err != nil:
 			hints = append(hints, fmt.Sprintf("%s: read fragment from disk: %v", diskPath, err))
 		case !bytes.Equal(staged, disk):
@@ -3854,6 +3876,32 @@ func finishCheck(warnings, problems []string) ([]string, error) {
 	return warnings, nil
 }
 
+func missingFragmentAdvice(path, id, manifestPath string) string {
+	return fmt.Sprintf("%s: missing fragment %s; restore it with `git checkout -- %s` or remove %q from manifest %s", path, id, ShellQuoteArg(path), id, manifestPath)
+}
+
+func missingFragmentReadProblem(path, id, manifestPath string, err error) string {
+	if errors.Is(err, fs.ErrNotExist) {
+		return missingFragmentAdvice(path, id, manifestPath)
+	}
+	return fmt.Sprintf("%s: missing fragment: %v", path, err)
+}
+
+func stagedDiskMissingFragments(commit *stagedPaths, paths []string, manifestPath string) (missing []string) {
+	for _, path := range paths {
+		diskPath := commit.treePath(path)
+		if _, err := os.Stat(diskPath); err == nil {
+			continue
+		} else if errors.Is(err, fs.ErrNotExist) {
+			id := strings.TrimSuffix(filepath.ToSlash(filepath.Base(path)), ".md")
+			missing = append(missing, missingFragmentAdvice(path, id, manifestPath))
+		} else {
+			missing = append(missing, fmt.Sprintf("%s: stat fragment on disk: %v", diskPath, err))
+		}
+	}
+	return missing
+}
+
 func checkedManifestBody(codex string, m manifest, referenced map[string]bool, read func(string) ([]byte, error), purposeEnabled bool) ([]byte, []string, []string) {
 	var body []byte
 	var problems, warnings []string
@@ -3862,7 +3910,7 @@ func checkedManifestBody(codex string, m manifest, referenced map[string]bool, r
 		path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
 		raw, err := read(path)
 		if err != nil {
-			problems = append(problems, fmt.Sprintf("%s: missing fragment: %v", path, err))
+			problems = append(problems, missingFragmentReadProblem(path, id, m.out, err))
 			continue
 		}
 		if fragmentIsDraft(raw) {
@@ -4321,6 +4369,67 @@ func (s *stagedPaths) indexedFragments(dir string) []stagedFragment {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].abs < out[j].abs })
 	return out
+}
+
+func missingOnDiskManifestProblems(codex string, referenced map[string]bool) ([]string, error) {
+	rootBytes, err := exec.Command("git", "-C", codex, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find git root for %s: %w", codex, err)
+	}
+	root := strings.TrimSpace(string(rootBytes))
+	manifestDir, err := filepath.Rel(root, filepath.Join(codex, "manifest"))
+	if err != nil {
+		return nil, fmt.Errorf("resolve manifest directory: %w", err)
+	}
+	listing, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
+	if err != nil {
+		return nil, fmt.Errorf("list indexed files in %s: %w", root, err)
+	}
+	prefix := filepath.ToSlash(manifestDir) + "/"
+	var problems []string
+	for rel := range strings.SplitSeq(string(listing), "\x00") {
+		if !strings.HasPrefix(rel, prefix) || !strings.HasSuffix(rel, ".yaml") {
+			continue
+		}
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if _, err := os.Stat(path); err == nil {
+			continue
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("stat manifest %s: %w", path, err)
+		}
+		raw, err := exec.Command("git", "-C", root, "show", ":"+rel).Output()
+		if err != nil {
+			return nil, fmt.Errorf("read indexed manifest %s: %w", path, err)
+		}
+		m, err := parseManifest(path, raw)
+		if err != nil {
+			problems = append(problems, invalidManifestProblem(path, err))
+			continue
+		}
+		var orphaned []string
+		for _, id := range m.parts {
+			if referenced[id] {
+				continue
+			}
+			fragment := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
+			if _, err := os.Stat(fragment); err == nil {
+				orphaned = append(orphaned, id)
+				referenced[id] = true
+			} else if !errors.Is(err, fs.ErrNotExist) {
+				return nil, fmt.Errorf("stat fragment %s: %w", fragment, err)
+			}
+		}
+		if len(orphaned) > 0 {
+			problems = append(problems, fmt.Sprintf("%s: manifest is missing on disk; restore it with `git checkout -- %s`; if it was deleted intentionally, remove its unreferenced fragments from the codex: %s", path, ShellQuoteArg(path), strings.Join(orphaned, ", ")))
+		} else {
+			problems = append(problems, fmt.Sprintf("%s: manifest is missing on disk; restore it with `git checkout -- %s`; if it was deleted intentionally, remove fragments no longer referenced by another manifest", path, ShellQuoteArg(path)))
+		}
+	}
+	return problems, nil
 }
 
 func appendOrphanProblem(codex string, referenced map[string]bool) error {
