@@ -95,6 +95,134 @@ func TestForceSharedNamesOutputsToRebuild(t *testing.T) {
 	}
 }
 
+func TestForceHintPurposeLinesUseAbsorbPlan(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		sharedEdit bool
+		wantShared bool
+	}{
+		{name: "shared", sharedEdit: true, wantShared: true},
+		{name: "private", sharedEdit: false, wantShared: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			codex, _, outB, _ := forceHintFixture(t)
+			manifestData, err := os.ReadFile(filepath.Join(codex, "manifest", "beta.md.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			parts, err := manifestParts(manifestData)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifestA, err := os.ReadFile(filepath.Join(codex, "manifest", "alpha.md.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			sharedParts, err := manifestParts(manifestA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			shared := make(map[string]bool)
+			for _, part := range sharedParts {
+				shared[part] = true
+			}
+			var targetPart string
+			for _, part := range parts {
+				if shared[part] == tc.sharedEdit {
+					targetPart = part
+					break
+				}
+			}
+			if targetPart == "" {
+				t.Fatalf("could not find shared=%v part in %v", tc.sharedEdit, parts)
+			}
+			fragmentPath := filepath.Join(codex, "frag", filepath.FromSlash(targetPart)+".md")
+			fragment, err := os.ReadFile(fragmentPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fragment = bytes.Replace(fragment, []byte("цель: \n"), []byte("цель: purpose\n"), 1)
+			if err := os.WriteFile(fragmentPath, fragment, 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(codex, "purpose.json"), []byte(`{"print":true}`), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := captureRun(t, "build", "--force", "--codex", codex, outB); err != nil {
+				t.Fatalf("build purpose output: %v", err)
+			}
+			fileData, err := os.ReadFile(outB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var oldText string
+			if tc.sharedEdit {
+				oldText = "alpha"
+			} else {
+				oldText = "more"
+			}
+			if !bytes.Contains(fragment, []byte(oldText)) || !bytes.Contains(fileData, []byte(oldText)) {
+				t.Fatalf("target text %q missing from fragment or output: fragment=%q output=%q", oldText, fragment, fileData)
+			}
+			fragment = append(fragment, []byte("\nfragment edit\n")...)
+			if err := os.WriteFile(fragmentPath, fragment, 0644); err != nil {
+				t.Fatal(err)
+			}
+			fileData = bytes.Replace(fileData, []byte(oldText), []byte("file edit"), 1)
+			if err := os.WriteFile(outB, fileData, 0644); err != nil {
+				t.Fatal(err)
+			}
+			_, err = captureRun(t, "absorb", "--codex", codex, outB)
+			if err == nil {
+				t.Fatal("absorb unexpectedly succeeded")
+			}
+			gotShared := strings.Contains(err.Error(), "--shared")
+			if gotShared != tc.wantShared {
+				t.Fatalf("refusal shared advice=%v, want %v: %v", gotShared, tc.wantShared, err)
+			}
+		})
+	}
+}
+
+func TestForceSharedWarningOnlyTracksSharedText(t *testing.T) {
+	t.Run("shared matches despite own edits", func(t *testing.T) {
+		codex, outA, outB, _ := forceHintFixture(t)
+		if err := editFileTextForHintTest(outB, "alpha", "BETA"); err != nil {
+			t.Fatal(err)
+		}
+		if err := editFileTextForHintTest(outA, "alpha", "BETA"); err != nil {
+			t.Fatal(err)
+		}
+		if err := editFileTextForHintTest(outA, "beta", "beta own edits"); err != nil {
+			t.Fatal(err)
+		}
+		_, stderr, err := captureRunWithStderr(t, "absorb", "--force", "--shared", "--codex", codex, outB)
+		if err != nil {
+			t.Fatalf("absorb B: %v", err)
+		}
+		if strings.Contains(stderr, outA) {
+			t.Fatalf("warning for matching shared part: %q", stderr)
+		}
+	})
+	t.Run("shared differs and own edits", func(t *testing.T) {
+		codex, outA, outB, _ := forceHintFixture(t)
+		if err := editFileTextForHintTest(outA, "beta", "beta own edits"); err != nil {
+			t.Fatal(err)
+		}
+		if err := editFileTextForHintTest(outB, "alpha", "BETA"); err != nil {
+			t.Fatal(err)
+		}
+		_, stderr, err := captureRunWithStderr(t, "absorb", "--force", "--shared", "--codex", codex, outB)
+		if err != nil {
+			t.Fatalf("absorb B: %v", err)
+		}
+		want := "warning: " + outA + ": its shared part no longer matches the fragments this absorb wrote, and it has own edits; `lex build --force --codex " + strconv.Quote(codex) + " " + strconv.Quote(outA) + "` will erase its own edits. To keep them, copy the new shared text into the file and run `lex absorb`."
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr %q does not contain warning %q", stderr, want)
+		}
+	})
+}
+
 func manifestParts(data []byte) ([]string, error) {
 	var parts []string
 	inside := false

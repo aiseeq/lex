@@ -1468,7 +1468,7 @@ type preparedFragmentEdit struct {
 	hash       string
 }
 
-func absorbEditedFragment(codex string, paths []string, selected string, m manifest, built, actual, fileBytes []byte, options AbsorbOptions, purpose *purposeLayout) error {
+func planEditedFragment(codex string, paths []string, selected string, m manifest, built, actual, fileBytes []byte, options AbsorbOptions, purpose *purposeLayout) ([][2]int, []int, []preparedFragmentEdit, map[int][]lineHunk, error) {
 	oldLines, newLines := absorbLines(built), absorbLines(actual)
 	var bounds [][2]int
 	var err error
@@ -1481,13 +1481,19 @@ func absorbEditedFragment(codex string, paths []string, selected string, m manif
 		bounds, err = fragmentLineBounds(codex, m.parts)
 	}
 	if err != nil {
-		return err
+		return nil, nil, nil, nil, err
 	}
 	hunks := absorbHunks(oldLines, newLines, bounds)
 	if purpose != nil {
 		hunks = splitPurposeHunks(purpose.spans, purpose.owners, oldLines, newLines, hunks)
 	}
-	edits, additions, err := planAbsorbEdits(codex, paths, selected, m, bounds, oldLines, newLines, hunks, fileBytes, options, purpose != nil)
+	edits, owners, additions, err := planAbsorbEdits(codex, paths, selected, m, bounds, oldLines, newLines, hunks, fileBytes, options, purpose != nil)
+	return bounds, owners, edits, additions, err
+}
+
+func absorbEditedFragment(codex string, paths []string, selected string, m manifest, built, actual, fileBytes []byte, options AbsorbOptions, purpose *purposeLayout) error {
+	newLines := absorbLines(actual)
+	bounds, _, edits, additions, err := planEditedFragment(codex, paths, selected, m, built, actual, fileBytes, options, purpose)
 	if err != nil {
 		return err
 	}
@@ -1510,20 +1516,15 @@ func absorbEditedFragment(codex string, paths []string, selected string, m manif
 // absorbPurePartMove recognizes a file made solely by reordering complete,
 // unique manifest parts. It runs before printed purpose lines are stripped.
 func absorbPurePartMove(codex string, paths []string, selected string, m manifest, layout purposeLayout, actual, fileBytes []byte, options AbsorbOptions) (bool, error) {
-	chunks, compact, ok := purePartMoveChunks(m, layout)
-	if !ok {
-		return false, nil
-	}
-	order, ok := matchPartMove(chunks, actual, compact)
-	if !ok {
-		return false, nil
+	order, changedOwners, compact, ok, err := planPurePartMove(codex, m, layout, actual)
+	if err != nil || !ok {
+		return false, err
 	}
 	updated := m
 	updated.parts = make([]string, len(order))
 	updated.fragmentHashes = maps.Clone(m.fragmentHashes)
 	updated.builtHash = sha(fileBytes)
 	edits := make([]preparedFragmentEdit, 0, len(order))
-	changedOwners := make([]int, 0, len(order))
 	for at, source := range order {
 		id := m.parts[source]
 		updated.parts[at] = id
@@ -1537,9 +1538,6 @@ func absorbPurePartMove(codex string, paths []string, selected string, m manifes
 			return true, err
 		}
 		changed := replaceFragmentBody(raw, body, normalizeMovePosition(body, at < len(order)-1, compact))
-		if !bytes.Equal(raw, changed) {
-			changedOwners = append(changedOwners, source)
-		}
 		updated.fragmentHashes[id] = sha(changed)
 		edits = append(edits, preparedFragmentEdit{part: id, path: path, updated: changed, hash: sha(changed)})
 	}
@@ -1560,6 +1558,34 @@ func absorbPurePartMove(codex string, paths []string, selected string, m manifes
 		return true, err
 	}
 	return true, nil
+}
+
+func planPurePartMove(codex string, m manifest, layout purposeLayout, actual []byte) ([]int, []int, bool, bool, error) {
+	chunks, compact, ok := purePartMoveChunks(m, layout)
+	if !ok {
+		return nil, nil, false, false, nil
+	}
+	order, ok := matchPartMove(chunks, actual, compact)
+	if !ok {
+		return nil, nil, false, false, nil
+	}
+	changedOwners := make([]int, 0, len(order))
+	for at, source := range order {
+		path := filepath.Join(codex, "frag", filepath.FromSlash(m.parts[source])+".md")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, nil, false, false, fmt.Errorf("%s: read fragment for absorb: %w", path, err)
+		}
+		body, err := fragmentBody(raw)
+		if err != nil {
+			return nil, nil, false, false, err
+		}
+		changed := replaceFragmentBody(raw, body, normalizeMovePosition(body, at < len(order)-1, compact))
+		if !bytes.Equal(raw, changed) {
+			changedOwners = append(changedOwners, source)
+		}
+	}
+	return order, changedOwners, compact, true, nil
 }
 
 func purePartMoveChunks(m manifest, layout purposeLayout) ([][]byte, bool, bool) {
@@ -1661,26 +1687,26 @@ type absorbPlan struct {
 	removePaths []string
 }
 
-func planAbsorbEdits(codex string, paths []string, selected string, m manifest, bounds [][2]int, oldLines, newLines [][]byte, hunks []lineHunk, fileBytes []byte, options AbsorbOptions, printedPurpose bool) ([]preparedFragmentEdit, map[int][]lineHunk, error) {
+func planAbsorbEdits(codex string, paths []string, selected string, m manifest, bounds [][2]int, oldLines, newLines [][]byte, hunks []lineHunk, fileBytes []byte, options AbsorbOptions, printedPurpose bool) ([]preparedFragmentEdit, []int, map[int][]lineHunk, error) {
 	owners, deltas, additions, err := assignAbsorbHunks(bounds, m.parts, oldLines, hunks, options.DraftDir, manifestKey(selected), m.out, fileBytes)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := validateEditedPartOccurrences(codex, m.parts, owners); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	edits, err := prepareFragmentEdits(codex, m.parts, bounds, owners, deltas, newLines, additions, printedPurpose)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	editable, err := nonemptyEditedOwners(owners, m.parts, edits)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := validateSharedEdits(paths, m.parts, editable, options.Shared); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return edits, additions, nil
+	return edits, editable, additions, nil
 }
 
 func planAbsorbManifest(codex string, paths []string, selected string, m manifest, bounds [][2]int, edits []preparedFragmentEdit, additions map[int][]lineHunk, newLines [][]byte, fileBytes []byte) (absorbPlan, error) {
@@ -2471,30 +2497,42 @@ func sharedForceHint(paths []string, codex, selected string, parts []string, bui
 		built = withoutGeneratedHeader(built, manifestPath)
 		actual = withoutGeneratedHeader(actual, manifestPath)
 	}
-	bounds, err := fragmentLineBounds(codex, parts)
+	layout, err := readPlainPartLayout(codex, manifest)
 	if err != nil {
 		return "", "", err
 	}
-	oldLines, newLines := absorbLines(built), absorbLines(actual)
-	hunks := absorbHunks(oldLines, newLines, bounds)
-	owners, deltas, additions, err := assignAbsorbHunks(bounds, parts, oldLines, hunks, "", manifestKey(selected), selected, actual)
+	var purpose *purposeLayout
+	if enabled, err := diskPurposeSetting(codex); err != nil {
+		return "", "", err
+	} else if enabled {
+		layout, err = readPurposeLayout(codex, manifest)
+		if err != nil {
+			return "", "", err
+		}
+		purpose = &layout
+		built = layout.rendered
+	}
+	_, moveOwners, _, isMove, err := planPurePartMove(codex, manifest, layout, actual)
+	if err != nil {
+		return "", "", err
+	}
+	if isMove {
+		affected, err := firstSharedEdit(paths, parts, moveOwners)
+		if err != nil {
+			return "", "", err
+		}
+		if len(affected) == 0 {
+			return "", "", nil
+		}
+	}
+	_, owners, _, _, err := planEditedFragment(codex, paths, selected, manifest, built, actual, actual, AbsorbOptions{Shared: true}, purpose)
 	if err != nil {
 		if sharedHintPlanRefusal(err) {
 			return "", "", nil
 		}
 		return "", "", err
 	}
-	edits, err := prepareFragmentEdits(codex, parts, bounds, owners, deltas, newLines, additions, false)
-	if err != nil {
-		if sharedHintPlanRefusal(err) {
-			return "", "", nil
-		}
-		return "", "", err
-	}
-	owners, err = nonemptyEditedOwners(owners, parts, edits)
-	if err != nil {
-		return "", "", err
-	}
+
 	affected, err := firstSharedEdit(paths, parts, owners)
 	if err != nil {
 		return "", "", err
@@ -2522,8 +2560,53 @@ func codexSharedForceHint(codex string, m manifest, built, actual []byte) (strin
 	return sharedForceHint(paths, codex, m.out, m.parts, built, actual)
 }
 
+func sharedOutputEdits(codex string, m manifest, actual []byte, sharedParts map[string]bool) (bool, bool, error) {
+	var layout purposeLayout
+	enabled, err := diskPurposeSetting(codex)
+	if err != nil {
+		return false, false, err
+	}
+	if enabled {
+		layout, err = readPurposeLayout(codex, m)
+	} else {
+		layout, err = readPlainPartLayout(codex, m)
+	}
+	if err != nil {
+		return false, false, err
+	}
+	if m.header {
+		actual = withoutGeneratedHeader(actual, m.out)
+	}
+	oldLines, newLines := absorbLines(layout.rendered), absorbLines(actual)
+	hunks := changedLineHunks(oldLines, newLines)
+	if enabled {
+		hunks = splitPurposeHunks(layout.spans, layout.owners, oldLines, newLines, hunks)
+	}
+	bounds := make([][2]int, len(layout.spans))
+	for i, span := range layout.spans {
+		bounds[i] = [2]int{span.start, span.end}
+	}
+	owners, _, _, err := assignAbsorbHunks(bounds, m.parts, oldLines, hunks, "", manifestKey(m.out), m.out, actual)
+	if err != nil {
+		return false, false, err
+	}
+	sharedChanged, ownChanged := false, false
+	for _, owner := range owners {
+		if sharedParts[m.parts[owner]] {
+			sharedChanged = true
+		} else {
+			ownChanged = true
+		}
+	}
+	return sharedChanged, ownChanged, nil
+}
+
 func warnSharedOutputsToRebuild(codex string, paths []string, selected string, edits []preparedFragmentEdit) {
 	seen := make(map[string]bool)
+	editedParts := make(map[string]bool, len(edits))
+	for _, edit := range edits {
+		editedParts[edit.part] = true
+	}
 	for _, edit := range edits {
 		outputs, err := manifestsUsing(paths, edit.part)
 		if err != nil {
@@ -2535,25 +2618,32 @@ func warnSharedOutputsToRebuild(codex string, paths []string, selected string, e
 				continue
 			}
 			seen[output] = true
-			manifestPath, m, err := findOutputManifest(paths, output)
+			_, m, err := findOutputManifest(paths, output)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: %s: cannot read manifest for shared output: %v\n", output, err)
 				continue
 			}
-			want, err := manifestBody(codex, m)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: %s: cannot build shared output for comparison: %v\n", output, err)
-				continue
-			}
-			if m.header {
-				want = generatedHeader(manifestPath, want)
+			sharedParts := make(map[string]bool)
+			for _, part := range m.parts {
+				if editedParts[part] {
+					sharedParts[part] = true
+				}
 			}
 			actual, err := os.ReadFile(output)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: %s: cannot read shared output: %v\n", output, err)
 				continue
 			}
-			if outputMatchesGenerated(actual, want, m.header, manifestPath) {
+			sharedChanged, ownChanged, err := sharedOutputEdits(codex, m, actual, sharedParts)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: %s: cannot compare shared output: %v\n", output, err)
+				continue
+			}
+			if !sharedChanged {
+				continue
+			}
+			if ownChanged {
+				fmt.Fprintf(os.Stderr, "warning: %s: its shared part no longer matches the fragments this absorb wrote, and it has own edits; `lex build --force --codex %s %s` will erase its own edits. To keep them, copy the new shared text into the file and run `lex absorb`.\n", output, ShellQuoteArg(codex), ShellQuoteArg(output))
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "warning: %s: its shared part no longer matches the fragments this absorb wrote; `lex build --codex %s %s` replaces that part with the absorbed text\n", output, ShellQuoteArg(codex), ShellQuoteArg(output))
