@@ -504,7 +504,7 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 			return err
 		}
 	}
-	parts, hashes, err := writeImportedFragmentsReserved(codex, topic, units, preservedHeaders, assessment.keepShared, catalog)
+	parts, matched, hashes, err := writeImportedFragmentsReserved(codex, topic, units, preservedHeaders, assessment.keepShared, catalog)
 	if err != nil {
 		return err
 	}
@@ -517,7 +517,7 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 	m := manifest{out: abs, hash: sha(sourceData), builtHash: diskHash, parts: parts, fragmentHashes: hashes, header: old.header}
 	allLinks := uniqueLinks(append(old.links, links...))
 	m.links = allLinks
-	if err := finishImport(codex, manifestPath, m, allLinks, topic, units, preservedHeaders); err != nil {
+	if err := finishImport(codex, manifestPath, m, allLinks, matched, units, preservedHeaders); err != nil {
 		return err
 	}
 	if len(assessment.detachedOutputs) > 0 {
@@ -526,22 +526,24 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 	return nil
 }
 
-func finishImport(codex, manifestPath string, m manifest, links []outputLink, topic string, units [][]byte, preservedHeaders []preservedFragmentHeader) error {
+// finishImport writes the manifest and moves override links to the ids refresh wrote: m.parts[i] holds units[i],
+// which took over preservedHeaders[matched[i]] when matched[i] >= 0.
+func finishImport(codex, manifestPath string, m manifest, links []outputLink, matched []int, units [][]byte, preservedHeaders []preservedFragmentHeader) error {
 	if err := writeManifest(manifestPath, m, links); err != nil {
 		return err
 	}
 	if len(preservedHeaders) > 0 {
-		return rewriteOverridesAfterRefresh(codex, topic, units, preservedHeaders)
+		return rewriteOverridesAfterRefresh(codex, m.parts, matched, units, preservedHeaders)
 	}
 	return nil
 }
 
-func writeImportedFragmentsReserved(codex, topic string, units [][]byte, preservedHeaders []preservedFragmentHeader, reserved []string, catalog *manifestCatalog) ([]string, map[string]string, error) {
+func writeImportedFragmentsReserved(codex, topic string, units [][]byte, preservedHeaders []preservedFragmentHeader, reserved []string, catalog *manifestCatalog) ([]string, []int, map[string]string, error) {
 	parts := make([]string, 0, len(units))
 	hashes := make(map[string]string, len(units))
 	existing, err := fragmentIDsUnderTopic(codex, topic, catalog)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	reserved = append(reserved, existing...)
 	ids, matched, usedHeaders := matchImportedHeadersReserved(topic, units, preservedHeaders, reserved)
@@ -550,10 +552,10 @@ func writeImportedFragmentsReserved(codex, topic string, units [][]byte, preserv
 		parts = append(parts, id)
 		path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
 		if existing, err := os.ReadFile(path); err == nil && fragmentIsRecord(existing) {
-			return nil, nil, fmt.Errorf("%s: imported fragment would overwrite a record", path)
+			return nil, nil, nil, fmt.Errorf("%s: imported fragment would overwrite a record", path)
 		}
 		if err := os.MkdirAll(filepath.Dir(path), directoryMode); err != nil {
-			return nil, nil, fmt.Errorf("%s: create fragment directory: %w", path, err)
+			return nil, nil, nil, fmt.Errorf("%s: create fragment directory: %w", path, err)
 		}
 		header := []byte("---\nid: " + id + "\nцель: \nоснование: \nснять_когда: \n---\n")
 		if oldIndex := matched[i]; oldIndex >= 0 {
@@ -561,19 +563,19 @@ func writeImportedFragmentsReserved(codex, topic string, units [][]byte, preserv
 		}
 		body := append(header, u...)
 		if err := os.WriteFile(path, body, fileMode); err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", path, err)
+			return nil, nil, nil, fmt.Errorf("%s: %w", path, err)
 		}
 		hashes[id] = sha(body)
 	}
 	for i, oldHeader := range preservedHeaders {
 		if !usedHeaders[i] && oldHeader.hasValues {
 			if err := saveLostCodeLinks(codex, oldHeader); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			fmt.Fprintf(os.Stderr, "warning: %s: non-empty fragment header was not preserved by refresh\n", oldHeader.id)
 		}
 	}
-	return parts, hashes, nil
+	return parts, matched, hashes, nil
 }
 
 func headersExcept(headers []preservedFragmentHeader, excluded []string) []preservedFragmentHeader {

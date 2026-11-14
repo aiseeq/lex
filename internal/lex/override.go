@@ -200,8 +200,8 @@ func CountOverrides(codex string) ([]string, error) {
 	return result, nil
 }
 
-func rewriteOverridesAfterRefresh(codex, topic string, units [][]byte, old []preservedFragmentHeader) error {
-	ids, matched, _ := matchImportedHeaders(topic, units, old)
+// rewriteOverridesAfterRefresh moves override links to the ids refresh wrote: ids[i] holds units[i], which took over old[matched[i]] when matched[i] >= 0.
+func rewriteOverridesAfterRefresh(codex string, ids []string, matched []int, units [][]byte, old []preservedFragmentHeader) error {
 	renames := map[string]string{}
 	occupants := map[string]int{}
 	for i, id := range ids {
