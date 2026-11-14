@@ -83,6 +83,13 @@ func checkTextRefs(codex string, options CheckOptions) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	var staged *stagedPaths
+	if options.Staged {
+		staged, err = readStagedPaths()
+		if err != nil {
+			return nil, err
+		}
+	}
 	findings, unused := applyTextRefExceptions(corpus, findTextRefsWithSkills(corpus, journal, skills), exceptions, filepath.Dir(codex))
 	externalCorpus, externalPaths, missingExternal, err := loadExternalTextCorpus(codex, options.OutputsUnder, corpus)
 	if err != nil {
@@ -120,10 +127,14 @@ func checkTextRefs(codex string, options CheckOptions) ([]string, error) {
 		if baseline[refKey(f)] {
 			continue
 		}
+		finding := f
+		if staged != nil {
+			finding.path = staged.treePath(f.path)
+		}
 		if f.kind == 1 && !externalPaths[f.path] {
-			problems = append(problems, f.String())
+			problems = append(problems, finding.String())
 		} else {
-			warnings = append(warnings, f.String())
+			warnings = append(warnings, finding.String())
 		}
 	}
 	return finishCheck(warnings, problems)

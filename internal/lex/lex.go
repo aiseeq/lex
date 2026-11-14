@@ -2693,7 +2693,7 @@ func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map
 	m, perr := parseManifest(path, raw)
 	if perr != nil {
 		if commit.has(path) {
-			problems = append(problems, invalidManifestProblem(path, perr))
+			problems = append(problems, commit.treeProblem(invalidManifestProblem(path, perr), path))
 		}
 		return nil, problems, nil // битый манифест HEAD чинит его коммит
 	}
@@ -2749,7 +2749,9 @@ func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map
 		problems = append(problems, commit.labelProblem(m.out+": index and disk differ — stage the whole file (git add) or restore it", m.out))
 	}
 	if !outputMatchesGenerated(staged, body, m.header, path) {
-		problems = append(problems, commit.labelProblem(builtDiffers(m.out, codex, m, path, body, staged), m.out))
+		problem := commit.labelProblem(builtDiffers(m.out, codex, m, path, body, staged), m.out)
+		problem = commit.stagedOutputAdvice(problem, codex, m.out)
+		problems = append(problems, problem)
 		hints := unstagedFragmentHints(commit, fragPaths, indexed, m.out)
 		for i := range hints {
 			hints[i] = commit.labelProblem(hints[i], m.out)
@@ -3162,6 +3164,24 @@ func (s *stagedPaths) treePath(path string) string {
 		return filepath.Join(s.root, filepath.FromSlash(rel))
 	}
 	return path
+}
+
+func (s *stagedPaths) stagedOutputAdvice(problem, codex, out string) string {
+	tree := s.treePath(out)
+	if tree == out {
+		return problem
+	}
+	mainOut, treeOut := strconv.Quote(out), strconv.Quote(tree)
+	if strings.Contains(problem, "lex absorb") {
+		problem += "; lex builds " + mainOut + " and the edit is in " + treeOut + ": carry the edit into " + mainOut + " before running `lex absorb`"
+		if s.rel(codex) != "" {
+			problem += ", which changes the fragments in the main checkout"
+		}
+	}
+	if strings.Contains(problem, "lex build") {
+		problem += "; `lex build` rewrites " + mainOut + ", not " + treeOut
+	}
+	return problem
 }
 
 func (s *stagedPaths) labelProblem(problem, out string) string {
