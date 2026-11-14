@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -260,11 +261,49 @@ func (p purposeLayout) checkMovedGoals(oldLines [][]byte, matches [][2]int, newL
 		if oldIndex, ok := newToOld[previous]; ok {
 			span := p.spanAt(pair[0])
 			if oldIndex < span.start || oldIndex >= span.end {
+				if !p.ruleTextPresent(span, oldLines, newLines, matches) {
+					return fmt.Errorf("%s: цель line %q has no rule text; delete the line or restore its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n"))
+				}
 				return fmt.Errorf("%s: цель moved to another fragment; put the line %q back under its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n"))
 			}
 		}
 	}
 	return nil
+}
+
+func (p purposeLayout) ruleTextPresent(span purposeSpan, oldLines, newLines [][]byte, matches [][2]int) bool {
+	for index := span.start; index < span.end; index++ {
+		if _, isGoal := p.owners[index]; isGoal || strings.TrimSpace(string(oldLines[index])) == "" {
+			continue
+		}
+		for _, line := range newLines {
+			if bytes.Equal(bytes.TrimRight(oldLines[index], "\r\n"), bytes.TrimRight(line, "\r\n")) {
+				return true
+			}
+		}
+	}
+	matchedNew := make(map[int]bool)
+	beforeOld, beforeNew := -1, -1
+	afterOld, afterNew := len(oldLines), len(newLines)
+	for _, pair := range matches {
+		matchedNew[pair[1]] = true
+		if pair[0] < span.start && pair[0] > beforeOld {
+			beforeOld, beforeNew = pair[0], pair[1]
+		}
+		if pair[0] >= span.end && pair[0] < afterOld {
+			afterOld, afterNew = pair[0], pair[1]
+		}
+	}
+	start, end := beforeNew+1, afterNew
+	if start > end {
+		start, end = end, start
+	}
+	for index := start; index < end; index++ {
+		if !matchedNew[index] && strings.TrimSpace(string(newLines[index])) != "" && !strings.HasPrefix(string(newLines[index]), purposeMarker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p purposeLayout) checkRemovedGoals(oldLines, newLines [][]byte, matchedOld map[int]bool) error {
@@ -297,6 +336,16 @@ func (p purposeLayout) checkRemovedGoals(oldLines, newLines [][]byte, matchedOld
 	if len(failed) == 0 {
 		return nil
 	}
+	return p.refuseRemovedGoals(oldLines, newLines, failed, failedHunk, hunks)
+}
+
+func (p purposeLayout) refuseRemovedGoals(oldLines, newLines [][]byte, failed []int, failedHunk map[int]int, hunks []lineHunk) error {
+	if p.missingFinalPurposeNewline(oldLines, newLines, failed) {
+		return fmt.Errorf("%s: missing final newline; restore the newline at the end of the file", p.owners[failed[0]])
+	}
+	if hasCRLFPurposeCounterpart(oldLines, newLines, failed) {
+		return fmt.Errorf("%s: purpose lines did not match because of CRLF line endings; preserve the file's line endings", p.owners[failed[0]])
+	}
 	first := failed[0]
 	id := p.owners[first]
 	quoted := []string{fmt.Sprintf("%q", strings.TrimRight(string(oldLines[first]), "\r\n"))}
@@ -313,6 +362,57 @@ func (p purposeLayout) checkRemovedGoals(oldLines, newLines [][]byte, matchedOld
 		return fmt.Errorf("%s: missing or edited цель; put the line %s back under its rule or delete the rule together with it%s", id, quoted[0], apart)
 	}
 	return fmt.Errorf("%s: missing or edited цель; put each of the lines %s back under its rule or delete that rule together with it%s", id, strings.Join(quoted, ", "), apart)
+}
+
+func (p purposeLayout) missingFinalPurposeNewline(oldLines, newLines [][]byte, failed []int) bool {
+	if len(failed) != 1 || len(newLines) == 0 || len(newLines[len(newLines)-1]) == 0 || bytes.HasSuffix(newLines[len(newLines)-1], []byte("\n")) {
+		return false
+	}
+	lastPurpose := -1
+	for index := range oldLines {
+		if _, ok := p.owners[index]; ok {
+			lastPurpose = index
+		}
+	}
+	if lastPurpose < 0 || !slices.Contains(failed, lastPurpose) {
+		return false
+	}
+	withoutNewline := bytes.TrimSuffix(oldLines[lastPurpose], []byte("\n"))
+	return bytes.Equal(newLines[len(newLines)-1], withoutNewline)
+}
+
+func hasCRLFPurposeCounterpart(oldLines, newLines [][]byte, failed []int) bool {
+	for _, index := range failed {
+		if !bytes.HasSuffix(oldLines[index], []byte("\n")) || bytes.HasSuffix(oldLines[index], []byte("\r\n")) {
+			continue
+		}
+		withCRLF := append(append([]byte(nil), bytes.TrimSuffix(oldLines[index], []byte("\n"))...), '\r', '\n')
+		found := false
+		for _, line := range newLines {
+			if bytes.Equal(line, withCRLF) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return allLinesCRLF(newLines)
+		}
+	}
+	return len(failed) > 0
+}
+
+func allLinesCRLF(lines [][]byte) bool {
+	seen := false
+	for _, line := range lines {
+		if bytes.HasSuffix(line, []byte("\r\n")) {
+			seen = true
+			continue
+		}
+		if bytes.HasSuffix(line, []byte("\n")) {
+			return false
+		}
+	}
+	return seen
 }
 
 func (p purposeLayout) ownerBefore(matches [][2]int, line int, fallback string) string {
