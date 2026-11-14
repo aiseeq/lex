@@ -228,7 +228,7 @@ func (p purposeLayout) strip(actual []byte, output string) ([]byte, error) {
 		matchedNew[pair[1]] = true
 		newToOld[pair[1]] = pair[0]
 	}
-	if err := p.checkMovedGoals(matches, newLines, newToOld); err != nil {
+	if err := p.checkMovedGoals(oldLines, matches, newLines, newToOld); err != nil {
 		return nil, err
 	}
 	if err := p.checkRemovedGoals(oldLines, newLines, matchedOld); err != nil {
@@ -238,7 +238,7 @@ func (p purposeLayout) strip(actual []byte, output string) ([]byte, error) {
 	for i, l := range newLines {
 		if strings.HasPrefix(string(l), purposeMarker) {
 			if !matchedNew[i] {
-				return nil, fmt.Errorf("%s: unexpected or edited цель; run lex build", p.ownerBefore(matches, i, output))
+				return nil, fmt.Errorf("%s: unexpected or edited цель; delete the line %q or put its original text back", p.ownerBefore(matches, i, output), strings.TrimRight(string(l), "\r\n"))
 			}
 			continue
 		}
@@ -247,7 +247,7 @@ func (p purposeLayout) strip(actual []byte, output string) ([]byte, error) {
 	return clean, nil
 }
 
-func (p purposeLayout) checkMovedGoals(matches [][2]int, newLines [][]byte, newToOld map[int]int) error {
+func (p purposeLayout) checkMovedGoals(oldLines [][]byte, matches [][2]int, newLines [][]byte, newToOld map[int]int) error {
 	for _, pair := range matches {
 		id, isGoal := p.owners[pair[0]]
 		if !isGoal {
@@ -260,7 +260,7 @@ func (p purposeLayout) checkMovedGoals(matches [][2]int, newLines [][]byte, newT
 		if oldIndex, ok := newToOld[previous]; ok {
 			span := p.span(id)
 			if oldIndex < span.start || oldIndex >= span.end {
-				return fmt.Errorf("%s: цель moved to another fragment; run lex build", id)
+				return fmt.Errorf("%s: цель moved to another fragment; put the line %q back under its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n"))
 			}
 		}
 	}
@@ -268,6 +268,7 @@ func (p purposeLayout) checkMovedGoals(matches [][2]int, newLines [][]byte, newT
 }
 
 func (p purposeLayout) checkRemovedGoals(oldLines, newLines [][]byte, matchedOld map[int]bool) error {
+	hunks := splitPurposeHunks(p.spans, p.owners, oldLines, changedLineHunks(oldLines, newLines))
 	for index := range oldLines {
 		id, isGoal := p.owners[index]
 		if !isGoal {
@@ -283,13 +284,13 @@ func (p purposeLayout) checkRemovedGoals(oldLines, newLines [][]byte, matchedOld
 				removed = false
 			}
 		}
-		for _, h := range changedLineHunks(oldLines, newLines) {
+		for _, h := range hunks {
 			if h.oldStart <= index && index < h.oldEnd && h.newStart != h.newEnd {
 				removed = false
 			}
 		}
 		if !removed {
-			return fmt.Errorf("%s: missing or edited цель; run lex build", id)
+			return fmt.Errorf("%s: missing or edited цель; put the line %q back under its rule or delete the rule together with it", id, strings.TrimRight(string(oldLines[index]), "\r\n"))
 		}
 	}
 	return nil

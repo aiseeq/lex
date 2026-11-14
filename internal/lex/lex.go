@@ -1234,6 +1234,9 @@ func absorbEditedFragment(codex string, paths []string, selected string, m manif
 		return err
 	}
 	hunks := absorbHunks(oldLines, newLines, bounds)
+	if purpose != nil {
+		hunks = splitPurposeHunks(purpose.spans, purpose.owners, oldLines, hunks)
+	}
 	edits, additions, err := planAbsorbEdits(codex, paths, selected, m, bounds, oldLines, newLines, hunks, actual, options, purpose != nil)
 	if err != nil {
 		return err
@@ -1369,6 +1372,82 @@ func writeAbsorbPlan(selected string, plan absorbPlan) error {
 		return err
 	}
 	return removeAbsorbedFragments(plan.removePaths)
+}
+
+func splitPurposeHunks(spans []purposeSpan, owners map[int]string, oldLines [][]byte, hunks []lineHunk) []lineHunk {
+	result := make([]lineHunk, 0, len(hunks))
+	for _, hunk := range hunks {
+		result = append(result, splitPurposeHunk(spans, owners, oldLines, hunk)...)
+	}
+	return result
+}
+
+func splitPurposeHunk(spans []purposeSpan, owners map[int]string, oldLines [][]byte, hunk lineHunk) []lineHunk {
+	start, end := hunk.oldStart, hunk.oldEnd
+	for _, span := range spans {
+		if span.end <= start || span.start >= end {
+			continue
+		}
+		if !purposeSpanCovered(owners, oldLines, span, start, end) {
+			break
+		}
+		start = min(end, span.end)
+	}
+	for i := len(spans) - 1; i >= 0; i-- {
+		span := spans[i]
+		if span.start >= end {
+			continue
+		}
+		if span.end <= start {
+			break
+		}
+		if !purposeSpanCovered(owners, oldLines, span, start, end) {
+			break
+		}
+		end = max(start, span.start)
+	}
+	if start == hunk.oldStart && end == hunk.oldEnd || start >= end || !onePurposeSpan(spans, start, end) {
+		return []lineHunk{hunk}
+	}
+	result := make([]lineHunk, 0, 3)
+	if start > hunk.oldStart {
+		result = append(result, lineHunk{oldStart: hunk.oldStart, oldEnd: start, newStart: hunk.newStart, newEnd: hunk.newStart})
+	}
+	result = append(result, lineHunk{oldStart: start, oldEnd: end, newStart: hunk.newStart, newEnd: hunk.newEnd})
+	if end < hunk.oldEnd {
+		result = append(result, lineHunk{oldStart: end, oldEnd: hunk.oldEnd, newStart: hunk.newEnd, newEnd: hunk.newEnd})
+	}
+	return result
+}
+
+func purposeSpanCovered(owners map[int]string, oldLines [][]byte, span purposeSpan, start, end int) bool {
+	if _, ok := ownerForPurposeSpan(owners, span); !ok {
+		return false
+	}
+	for i := span.start; i < span.end; i++ {
+		if strings.TrimSpace(string(oldLines[i])) != "" && (i < start || i >= end) {
+			return false
+		}
+	}
+	return true
+}
+
+func ownerForPurposeSpan(owners map[int]string, span purposeSpan) (string, bool) {
+	for i := span.start; i < span.end; i++ {
+		if id, ok := owners[i]; ok {
+			return id, true
+		}
+	}
+	return "", false
+}
+
+func onePurposeSpan(spans []purposeSpan, start, end int) bool {
+	for _, span := range spans {
+		if span.start <= start && end <= span.end {
+			return true
+		}
+	}
+	return false
 }
 
 func assignAbsorbHunks(bounds [][2]int, parts []string, oldLines [][]byte, hunks []lineHunk, draftDir, key, output string, actual []byte) ([]int, []int, map[int][]lineHunk, error) {
