@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 type outputLink struct {
@@ -980,13 +982,29 @@ func prepareLinks(links []outputLink) error {
 }
 
 func linkMismatch(link outputLink, state string) error {
-	return fmt.Errorf("%s: symlink %s; expected target %q; restore with ln -sfn %q %q or run lex build",
-		link.path, state, link.target, link.target, link.path)
+	return fmt.Errorf("%s: symlink %s; expected target %q; restore with ln -sfn %s %s or run lex build",
+		link.path, state, link.target, ShellQuoteArg(link.target), ShellQuoteArg(link.path))
 }
 
 func linkMismatchInTree(link outputLink, state string) error {
-	return fmt.Errorf("%s: symlink %s; expected target %q; restore with ln -sfn %q %q",
-		link.path, state, link.target, link.target, link.path)
+	return fmt.Errorf("%s: symlink %s; expected target %q; restore with ln -sfn %s %s",
+		link.path, state, link.target, ShellQuoteArg(link.target), ShellQuoteArg(link.path))
+}
+
+// ShellQuoteArg formats an argument for a POSIX shell command hint: double quotes as before when the shell
+// reads them back unchanged, single quotes otherwise (shell expansion characters, escapes, invalid UTF-8).
+func ShellQuoteArg(arg string) string {
+	plain := utf8.ValidString(arg)
+	for _, r := range arg {
+		if r == '$' || r == '`' || r == '\\' || r == '!' || !unicode.IsPrint(r) {
+			plain = false
+			break
+		}
+	}
+	if plain {
+		return strconv.Quote(arg)
+	}
+	return "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
 }
 
 func manifestBody(codex string, m manifest) ([]byte, error) {
@@ -2388,7 +2406,7 @@ func manifestsUsing(paths []string, part string) ([]string, error) {
 
 // forceRefusal says why absorb refuses a file whose fragments changed since the build, with the commands that keep either side.
 func forceRefusal(codex, target, selected string, paths []string, actual []byte, m manifest) error {
-	codexArg, fileArg := strconv.Quote(codex), strconv.Quote(target)
+	codexArg, fileArg := ShellQuoteArg(codex), ShellQuoteArg(target)
 	sharedFlag, sharedHint, hintErr := sharedForceHint(paths, m.out, m.parts)
 	if hintErr != nil {
 		return hintErr
@@ -2992,8 +3010,8 @@ func stagedLinkProblems(commit *stagedPaths, links []outputLink) []string {
 }
 
 func stagedLinkIsRegularFile(link outputLink) error {
-	return fmt.Errorf("%s: staged as a regular file, expected symlink to %q; restore with ln -sfn %q %q",
-		link.path, link.target, link.target, link.path)
+	return fmt.Errorf("%s: staged as a regular file, expected symlink to %q; restore with ln -sfn %s %s",
+		link.path, link.target, ShellQuoteArg(link.target), ShellQuoteArg(link.path))
 }
 
 // unstagedFragmentHints - частая причина расхождения: фрагмент правлен и пересобран, но не добавлен в коммит.
@@ -3048,7 +3066,7 @@ func stagedOrphans(commit *stagedPaths, codex string, referenced map[string]bool
 
 // builtDiffers explains why out differs from its fragments; fileEdited reports advice that keeps an edit made in the file with lex absorb.
 func builtDiffers(out, codex string, m manifest, manifestPath string, want, actual []byte) (problem string, fileEdited bool) {
-	codexArg, fileArg := strconv.Quote(codex), strconv.Quote(out)
+	codexArg, fileArg := ShellQuoteArg(codex), ShellQuoteArg(out)
 	if owner, foreign := foreignOutputOwner(codex, actual); foreign {
 		return fmt.Sprintf("%s: the file carries %s, so lex import and lex absorb refuse it — if this codex owns the file, run `lex build --force --codex %s %s` to rebuild it from the fragments (edits in the file are lost)", out, ForeignHeaderPhrase(owner), codexArg, fileArg), false
 	}
@@ -3678,7 +3696,7 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 	if err != nil {
 		return fmt.Errorf("%s: resolve source path: %w", m.out, err)
 	}
-	target := strconv.Quote(codex) + " " + strconv.Quote(filepath.Join(home, rel))
+	target := ShellQuoteArg(codex) + " " + ShellQuoteArg(filepath.Join(home, rel))
 	if owner, foreign := foreignOutputOwner(codex, actual); foreign {
 		// lex import and lex absorb refuse such a file; only build --force rebuilds it.
 		entry.ForeignCodex = owner
