@@ -868,9 +868,6 @@ func (s *refScanner) list(trim string) {
 }
 
 func (s *refScanner) numbering() {
-	if hasGeneratedHeader(s.corpus[s.path]) {
-		return
-	}
 	for _, match := range stepRef.FindAllStringSubmatch(s.line, -1) {
 		for _, number := range stepNumber.FindAllStringSubmatch(match[1], -1) {
 			if strings.IndexFunc(number[1], func(r rune) bool { return r >= 'a' && r <= 'z' }) >= 0 {
