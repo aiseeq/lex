@@ -1323,6 +1323,9 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 	if err != nil {
 		return err
 	}
+	if moved, err := tryAbsorbPurePartMove(codex, selected, m, purposeEnabled, actual, fileBytes, options); moved || err != nil {
+		return err
+	}
 	var purpose *purposeLayout
 	if purposeEnabled {
 		layout, err := readPurposeLayoutWithRead(codex, m, read)
@@ -1342,6 +1345,40 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 		}
 	}
 	return warnAfterAbsorb(absorbEditedFragment(codex, paths, selected, m, built, actual, fileBytes, options, purpose), target, warnSnapshot)
+}
+
+func readPlainPartLayout(codex string, m manifest) (purposeLayout, error) {
+	l := purposeLayout{owners: map[int]string{}}
+	for _, id := range m.parts {
+		path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return l, fmt.Errorf("%s: read fragment for absorb: %w", path, err)
+		}
+		body, err := fragmentBody(raw)
+		if err != nil {
+			return l, err
+		}
+		start := len(absorbLines(l.rendered))
+		l.rendered = append(l.rendered, body...)
+		l.plain = append(l.plain, body...)
+		l.spans = append(l.spans, purposeSpan{id: id, start: start, end: len(absorbLines(l.rendered))})
+	}
+	return l, nil
+}
+
+func tryAbsorbPurePartMove(codex, selected string, m manifest, printed bool, actual, fileBytes []byte, options AbsorbOptions) (bool, error) {
+	var layout purposeLayout
+	var err error
+	if printed {
+		layout, err = readPurposeLayout(codex, m)
+	} else {
+		layout, err = readPlainPartLayout(codex, m)
+	}
+	if err != nil {
+		return false, err
+	}
+	return absorbPurePartMove(codex, selected, m, layout, actual, fileBytes, options)
 }
 
 // restoreDeletedHeader writes the build back into a file whose text equals the fragments but whose lex header line was deleted: nothing in the file is lost, and lex check names absorb for it.
@@ -1430,7 +1467,7 @@ func absorbEditedFragment(codex string, paths []string, selected string, m manif
 	if purpose != nil {
 		hunks = splitPurposeHunks(purpose.spans, purpose.owners, oldLines, newLines, hunks)
 	}
-	edits, additions, err := planAbsorbEdits(codex, paths, selected, m, bounds, oldLines, newLines, hunks, actual, options, purpose != nil)
+	edits, additions, err := planAbsorbEdits(codex, paths, selected, m, bounds, oldLines, newLines, hunks, fileBytes, options, purpose != nil)
 	if err != nil {
 		return err
 	}
@@ -1444,6 +1481,127 @@ func absorbEditedFragment(codex string, paths []string, selected string, m manif
 	return writeAbsorbPlan(selected, plan)
 }
 
+// absorbPurePartMove recognizes a file made solely by reordering complete,
+// unique manifest parts. It runs before printed purpose lines are stripped.
+func absorbPurePartMove(codex, selected string, m manifest, layout purposeLayout, actual, fileBytes []byte, options AbsorbOptions) (bool, error) {
+	if len(m.parts) < 2 || len(layout.spans) != len(m.parts) {
+		return false, nil
+	}
+	seen := map[string]bool{}
+	for _, id := range m.parts {
+		if seen[id] {
+			return false, nil
+		}
+		seen[id] = true
+	}
+	chunks := make([][]byte, len(m.parts))
+	chunkSet := map[string]bool{}
+	compact := true
+	for i, span := range layout.spans {
+		chunks[i] = append([]byte(nil), layout.renderedLines(span)...)
+		if trailingNewlines(chunks[i]) > 1 {
+			compact = false
+		}
+		key := string(normalizeMovedChunk(chunks[i], false))
+		if len(key) == 0 || chunkSet[key] {
+			return false, nil
+		}
+		chunkSet[key] = true
+	}
+	// Try each possible source part at the current output offset. Exact prefix
+	// matching keeps edits, insertions, and partial moves on the normal path.
+	order := make([]int, 0, len(m.parts))
+	used := make([]bool, len(m.parts))
+	var search func([]byte) bool
+	search = func(rest []byte) bool {
+		if len(order) == len(chunks) {
+			return len(rest) == 0
+		}
+		for i, chunk := range chunks {
+			if used[i] {
+				continue
+			}
+			candidate := normalizeMovePosition(chunk, len(order) < len(chunks)-1, compact)
+			if !bytes.HasPrefix(rest, candidate) {
+				continue
+			}
+			used[i] = true
+			order = append(order, i)
+			if search(rest[len(candidate):]) {
+				return true
+			}
+			order = order[:len(order)-1]
+			used[i] = false
+		}
+		return false
+	}
+	if !search(actual) {
+		return false, nil
+	}
+	updated := m
+	updated.parts = make([]string, len(order))
+	edits := make([]preparedFragmentEdit, 0, len(order))
+	for at, source := range order {
+		id := m.parts[source]
+		updated.parts[at] = id
+		path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return true, fmt.Errorf("%s: read fragment for absorb: %w", path, err)
+		}
+		body, err := fragmentBody(raw)
+		if err != nil {
+			return true, err
+		}
+		changed := replaceFragmentBody(raw, body, normalizeMovePosition(body, at < len(order)-1, compact))
+		updated.fragmentHashes[id] = sha(changed)
+		edits = append(edits, preparedFragmentEdit{part: id, path: path, updated: changed, hash: sha(changed)})
+	}
+	plan := absorbPlan{edits: edits, manifest: updated}
+	if err := verifyAbsorbPlan(codex, plan, actual, options.DraftDir, manifestKey(selected), m.out, fileBytes); err != nil {
+		return true, err
+	}
+	if err := writeAbsorbPlan(selected, plan); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func (p purposeLayout) renderedLines(span purposeSpan) []byte {
+	lines := absorbLines(p.rendered)
+	return bytes.Join(lines[span.start:span.end], nil)
+}
+
+func normalizeMovedChunk(data []byte, nonLast bool) []byte {
+	data = bytes.TrimRight(data, "\n")
+	if len(data) == 0 {
+		return nil
+	}
+	if nonLast {
+		return append(data, '\n', '\n')
+	}
+	return append(data, '\n')
+}
+
+func normalizeMovePosition(data []byte, nonLast, compact bool) []byte {
+	if !compact {
+		return normalizeMovedChunk(data, nonLast)
+	}
+	data = bytes.TrimRight(data, "\n")
+	if len(data) == 0 {
+		return nil
+	}
+	return append(data, '\n')
+}
+
+func trailingNewlines(data []byte) int {
+	n := 0
+	for i := len(data) - 1; i >= 0 && data[i] == '\n'; i-- {
+		n++
+	}
+	return n
+}
+
 type absorbPlan struct {
 	edits       []preparedFragmentEdit
 	fragments   map[int][]plannedFragment
@@ -1451,8 +1609,8 @@ type absorbPlan struct {
 	removePaths []string
 }
 
-func planAbsorbEdits(codex string, paths []string, selected string, m manifest, bounds [][2]int, oldLines, newLines [][]byte, hunks []lineHunk, actual []byte, options AbsorbOptions, printedPurpose bool) ([]preparedFragmentEdit, map[int][]lineHunk, error) {
-	owners, deltas, additions, err := assignAbsorbHunks(bounds, m.parts, oldLines, hunks, options.DraftDir, manifestKey(selected), m.out, actual)
+func planAbsorbEdits(codex string, paths []string, selected string, m manifest, bounds [][2]int, oldLines, newLines [][]byte, hunks []lineHunk, fileBytes []byte, options AbsorbOptions, printedPurpose bool) ([]preparedFragmentEdit, map[int][]lineHunk, error) {
+	owners, deltas, additions, err := assignAbsorbHunks(bounds, m.parts, oldLines, hunks, options.DraftDir, manifestKey(selected), m.out, fileBytes)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1662,14 +1820,14 @@ func headingLines(lines [][]byte) bool {
 	return found
 }
 
-func assignAbsorbHunks(bounds [][2]int, parts []string, oldLines [][]byte, hunks []lineHunk, draftDir, key, output string, actual []byte) ([]int, []int, map[int][]lineHunk, error) {
+func assignAbsorbHunks(bounds [][2]int, parts []string, oldLines [][]byte, hunks []lineHunk, draftDir, key, output string, fileBytes []byte) ([]int, []int, map[int][]lineHunk, error) {
 	owners := make([]int, 0, len(hunks))
 	deltas := make([]int, len(parts))
 	additions := make(map[int][]lineHunk)
 	for _, hunk := range hunks {
 		assignment, ok := assignAbsorbHunk(bounds, oldLines, hunk)
 		if !ok {
-			return nil, nil, nil, writeAbsorbDraft(draftDir, key, output, actual, "boundary conflict")
+			return nil, nil, nil, writeAbsorbDraft(draftDir, key, output, fileBytes, "boundary conflict")
 		}
 		for _, owner := range assignment.owners {
 			owners = appendUniqueInt(owners, owner)

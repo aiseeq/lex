@@ -209,9 +209,9 @@ func readPurposeLayoutWithRead(codex string, m manifest, read func(string) ([]by
 	return layout, nil
 }
 
-func (p purposeLayout) span(id string) purposeSpan {
+func (p purposeLayout) spanAt(line int) purposeSpan {
 	for _, span := range p.spans {
-		if span.id == id {
+		if span.start <= line && line < span.end {
 			return span
 		}
 	}
@@ -258,7 +258,7 @@ func (p purposeLayout) checkMovedGoals(oldLines [][]byte, matches [][2]int, newL
 			previous--
 		}
 		if oldIndex, ok := newToOld[previous]; ok {
-			span := p.span(id)
+			span := p.spanAt(pair[0])
 			if oldIndex < span.start || oldIndex >= span.end {
 				return fmt.Errorf("%s: цель moved to another fragment; put the line %q back under its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n"))
 			}
@@ -271,11 +271,11 @@ func (p purposeLayout) checkRemovedGoals(oldLines, newLines [][]byte, matchedOld
 	hunks := splitPurposeHunks(p.spans, p.owners, oldLines, newLines, changedLineHunks(oldLines, newLines))
 	failed, failedHunk := []int{}, map[int]int{}
 	for index := range oldLines {
-		id, isGoal := p.owners[index]
+		_, isGoal := p.owners[index]
 		if !isGoal || matchedOld[index] {
 			continue
 		}
-		span := p.span(id)
+		span := p.spanAt(index)
 		removed := true
 		for i := span.start; i < span.end; i++ {
 			if matchedOld[i] && strings.TrimSpace(string(oldLines[i])) != "" {
@@ -306,7 +306,7 @@ func (p purposeLayout) checkRemovedGoals(oldLines, newLines [][]byte, matchedOld
 		}
 	}
 	apart := ""
-	if hi := failedHunk[first]; hi >= 0 && purposeSpanCovered(p.owners, oldLines, p.span(id), hunks[hi].oldStart, hunks[hi].oldEnd) {
+	if hi := failedHunk[first]; hi >= 0 && purposeSpanCovered(p.owners, oldLines, p.spanAt(first), hunks[hi].oldStart, hunks[hi].oldEnd) {
 		apart = "; if the rule was deleted on purpose, delete it in one pass and make the edit next to it in another"
 	}
 	if len(quoted) == 1 {
