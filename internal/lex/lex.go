@@ -693,7 +693,7 @@ func buildWithCanonicalCodex(codex string, options BuildOptions) error {
 	if err := prepareBuildLinks(catalog, paths, options.Check); err != nil {
 		return err
 	}
-	differences, manualEdits, err := buildManifests(codex, catalog, paths, options)
+	differences, manualEdits, err := buildManifests(codex, paths, options)
 	if err != nil {
 		return err
 	}
@@ -760,11 +760,11 @@ func guardForeignBuildOutputs(codex string, catalog *manifestCatalog, paths []st
 	return nil
 }
 
-func buildManifests(codex string, catalog *manifestCatalog, paths []string, options BuildOptions) ([]string, []string, error) {
+func buildManifests(codex string, paths []string, options BuildOptions) ([]string, []string, error) {
 	var differences []string
 	var manualEdits []string
 	for _, path := range paths {
-		difference, err := buildManifest(codex, catalog, path, options)
+		difference, err := buildManifest(codex, path, options)
 		if err != nil {
 			if errors.Is(err, errManualOutputEdits) && options.Output == "" {
 				manualEdits = append(manualEdits, err.Error())
@@ -906,8 +906,10 @@ func printEditWarning(kind, output string, s *editWarningSnapshot) {
 	fmt.Fprintf(os.Stderr, "warning: %s: absorb moved an edit into the fragments (file changed %s; git: %s; fragments: %s); if you did not make that edit, another session may still be working on this file — let it finish before you commit\n", output, s.mtime, s.fileGit, s.partsGit)
 }
 
-func buildManifest(codex string, catalog *manifestCatalog, path string, options BuildOptions) (string, error) {
-	m, err := catalog.read(path)
+// buildManifest reads its manifest afresh, not from the catalog: it writes the built hash into the manifest,
+// and a later path linked to the same file must see that write.
+func buildManifest(codex, path string, options BuildOptions) (string, error) {
+	m, err := readManifest(path)
 	if err != nil {
 		return "", err
 	}
