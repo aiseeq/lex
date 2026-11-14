@@ -1939,7 +1939,44 @@ func headingLines(lines [][]byte) bool {
 	return found
 }
 
+// mergeTextWithBlankInsertions joins a text insertion and a blank-line insertion separated only by an unchanged blank gap,
+// so the blank lines stay with the new text: given to the old neighbour fragment, they would land on the wrong side of it.
+func mergeTextWithBlankInsertions(bounds [][2]int, oldLines, newLines [][]byte, hunks []lineHunk) []lineHunk {
+	merged := make([]lineHunk, 0, len(hunks))
+	for i := 0; i < len(hunks); i++ {
+		current := hunks[i]
+		if i+1 < len(hunks) && joinsBlankInsertion(bounds, oldLines, newLines, current, hunks[i+1]) {
+			current.oldEnd, current.newEnd = hunks[i+1].oldStart, hunks[i+1].newEnd
+			i++
+		}
+		merged = append(merged, current)
+	}
+	return merged
+}
+
+func joinsBlankInsertion(bounds [][2]int, oldLines, newLines [][]byte, first, second lineHunk) bool {
+	insertion := func(h lineHunk) bool { return h.oldStart == h.oldEnd && h.newStart < h.newEnd }
+	if !insertion(first) || !insertion(second) {
+		return false
+	}
+	if onlyBlankLines(newLines[first.newStart:first.newEnd]) == onlyBlankLines(newLines[second.newStart:second.newEnd]) {
+		return false
+	}
+	gapOld, gapNew := oldLines[first.oldEnd:second.oldStart], newLines[first.newEnd:second.newStart]
+	if !onlyBlankLines(gapOld) || !bytes.Equal(bytes.Join(gapOld, nil), bytes.Join(gapNew, nil)) {
+		return false
+	}
+	// Only a gap that ends a fragment separates the two insertions; a blank line inside a fragment does not.
+	for _, b := range bounds {
+		if b[1] == second.oldStart {
+			return true
+		}
+	}
+	return false
+}
+
 func assignAbsorbHunks(bounds [][2]int, parts []string, oldLines, newLines [][]byte, hunks []lineHunk, draftDir, key, output string, fileBytes []byte) ([]int, []int, map[int][]lineHunk, error) {
+	hunks = mergeTextWithBlankInsertions(bounds, oldLines, newLines, hunks)
 	owners := make([]int, 0, len(hunks))
 	deltas := make([]int, len(parts))
 	additions := make(map[int][]lineHunk)
@@ -1972,13 +2009,66 @@ type absorbHunkAssignment struct {
 }
 
 func assignAbsorbHunk(bounds [][2]int, oldLines, newLines [][]byte, hunk lineHunk) (absorbHunkAssignment, bool) {
+	if assignment, ok := assignBlankReplacement(bounds, oldLines, newLines, hunk); ok {
+		return assignment, true
+	}
+	if assignment, ok := assignBlankInsertion(bounds, newLines, hunk); ok {
+		return assignment, true
+	}
+	if assignment, ok := assignBoundaryReplacement(bounds, oldLines, hunk); ok {
+		return assignment, true
+	}
+	return assignAbsorbHunkByOwner(bounds, oldLines, hunk)
+}
+
+func assignBlankReplacement(bounds [][2]int, oldLines, newLines [][]byte, hunk lineHunk) (absorbHunkAssignment, bool) {
+	if hunk.oldStart >= hunk.oldEnd || hunk.newStart >= hunk.newEnd || len(bounds) == 0 ||
+		!onlyBlankLines(oldLines[hunk.oldStart:hunk.oldEnd]) || !onlyBlankLines(newLines[hunk.newStart:hunk.newEnd]) {
+		return absorbHunkAssignment{}, false
+	}
+	// The replaced blank lines already belong to a fragment: that fragment takes the edit.
+	part := fragmentOwnerForLines(bounds, hunk.oldStart, hunk.oldEnd)
+	if part < 0 {
+		return absorbHunkAssignment{}, false
+	}
+	delta := (hunk.newEnd - hunk.newStart) - (hunk.oldEnd - hunk.oldStart)
+	return absorbHunkAssignment{owners: []int{part}, deltas: map[int]int{part: delta}}, true
+}
+
+func assignBlankInsertion(bounds [][2]int, newLines [][]byte, hunk lineHunk) (absorbHunkAssignment, bool) {
+	if hunk.oldStart != hunk.oldEnd || hunk.newEnd <= hunk.newStart || len(bounds) == 0 ||
+		!onlyBlankLines(newLines[hunk.newStart:hunk.newEnd]) {
+		return absorbHunkAssignment{}, false
+	}
+	part := blankNeighbourPart(bounds, hunk.oldStart)
+	if part < 0 {
+		return absorbHunkAssignment{}, false
+	}
+	return absorbHunkAssignment{owners: []int{part}, deltas: map[int]int{part: hunk.newEnd - hunk.newStart}}, true
+}
+
+// blankNeighbourPart is the old fragment that takes blank lines placed before old line oldStart:
+// the fragment of the line above, or the first fragment at the start of the file; -1 when no single fragment owns that line.
+func blankNeighbourPart(bounds [][2]int, oldStart int) int {
+	if oldStart == 0 {
+		return 0
+	}
+	return fragmentOwnerForLines(bounds, oldStart-1, oldStart)
+}
+
+func assignBoundaryReplacement(bounds [][2]int, oldLines [][]byte, hunk lineHunk) (absorbHunkAssignment, bool) {
+	if hunk.newEnd <= hunk.newStart {
+		return absorbHunkAssignment{}, false
+	}
+	part := replacedBoundaryBlank(bounds, oldLines, hunk)
+	if part < 0 {
+		return absorbHunkAssignment{}, false
+	}
+	return absorbHunkAssignment{owners: []int{part}, deltas: map[int]int{part: hunk.oldStart - hunk.oldEnd}, additionPosition: bounds[part][1], addition: &hunk}, true
+}
+
+func assignAbsorbHunkByOwner(bounds [][2]int, oldLines [][]byte, hunk lineHunk) (absorbHunkAssignment, bool) {
 	if hunk.oldStart == hunk.oldEnd && hunk.newEnd > hunk.newStart {
-		if hunk.oldStart == len(oldLines) && len(bounds) > 0 && onlyBlankLines(newLines[hunk.newStart:hunk.newEnd]) {
-			// Trailing whitespace belongs to the last existing fragment. Treat it as
-			// an edit so shared-fragment validation applies as usual.
-			part := len(bounds) - 1
-			return absorbHunkAssignment{owners: []int{part}, deltas: map[int]int{part: hunk.newEnd - hunk.newStart}}, true
-		}
 		if part, tail, ok := insertionBoundaryPart(bounds, oldLines, hunk.oldStart); ok {
 			hunk.newEnd += tail
 			position := bounds[part][1]
@@ -1986,11 +2076,6 @@ func assignAbsorbHunk(bounds [][2]int, oldLines, newLines [][]byte, hunk lineHun
 				position = bounds[part][0]
 			}
 			return absorbHunkAssignment{deltas: map[int]int{part: -tail}, additionPosition: position, addition: &hunk}, true
-		}
-	}
-	if hunk.newEnd > hunk.newStart {
-		if part := replacedBoundaryBlank(bounds, oldLines, hunk); part >= 0 {
-			return absorbHunkAssignment{owners: []int{part}, deltas: map[int]int{part: hunk.oldStart - hunk.oldEnd}, additionPosition: bounds[part][1], addition: &hunk}, true
 		}
 	}
 	owner := fragmentForEdit(bounds, hunk.oldStart, hunk.oldEnd, hunk.newEnd-hunk.newStart > hunk.oldEnd-hunk.oldStart)
@@ -2197,10 +2282,7 @@ func planInsertedFragments(codex, selected string, parts []string, additions map
 		sort.Slice(hunks, func(i, j int) bool { return hunks[i].newStart < hunks[j].newStart })
 		for _, hunk := range hunks {
 			body := bytes.Join(newLines[hunk.newStart:hunk.newEnd], nil)
-			units := split(body)
-			if hunk.oldStart == hunk.oldEnd && hunk.oldEnd == position {
-				units = attachLeadingBlankUnits(units)
-			}
+			units := attachLeadingBlankUnits(split(body))
 			for _, unit := range units {
 				label := slug(unit)
 				if label == "" {
