@@ -47,6 +47,7 @@ func TestAbsorbPurposeLeftovers(t *testing.T) {
 		{"delete-text-rule1", r4, g4, rep("- rule one\n", "")},
 		{"nonl-and-delete-rule4-whole", r4, g4, chain(rep("- rule four\n  Зачем: g4\n", ""), trimNL)},
 		{"crlf-goal1-moved-under-rule3", r4, g4, chain(rep("  Зачем: g1\n", ""), rep("  Зачем: g3\n", "  Зачем: g3\n  Зачем: g1\r\n"))},
+		{"x-crlf-goal3-moved-to-top", r4, g4, chain(rep("  Зачем: g3\n", ""), func(d []byte) []byte { return append([]byte("  Зачем: g3\r\n"), d...) })},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -58,7 +59,7 @@ func TestAbsorbPurposeLeftovers(t *testing.T) {
 				}
 				return
 			}
-			if c.name == "crlf-goal1-moved-under-rule3" {
+			if c.name == "crlf-goal1-moved-under-rule3" || c.name == "x-crlf-goal3-moved-to-top" {
 				if !(strings.Contains(msg, "CRLF") || strings.Contains(msg, "line endings")) || !strings.Contains(msg, "moved to another fragment") {
 					t.Fatalf("refusal = %q", msg)
 				}
@@ -83,11 +84,51 @@ func TestAbsorbPurposeLeftovers(t *testing.T) {
 	}
 }
 
+func TestAbsorbPrefixRuleDeleted(t *testing.T) {
+	r4 := "- rule one\n- rule two\n- rule three\n- rule four\n"
+	pre := "- rule one\n- delete files\n- delete files carefully\n- rule four\n"
+	g4 := []string{"g1", "g2", "g3", "g4"}
+	rep := func(old, new string) func([]byte) []byte {
+		return func(d []byte) []byte { return bytes.Replace(d, []byte(old), []byte(new), 1) }
+	}
+	chain := func(fs ...func([]byte) []byte) func([]byte) []byte {
+		return func(d []byte) []byte {
+			for _, f := range fs {
+				d = f(d)
+			}
+			return d
+		}
+	}
+	cases := []struct {
+		name, input string
+		edit        func([]byte) []byte
+	}{
+		{"x-prefix-del2-text", pre, rep("- delete files\n", "")},
+		{"x-prefix-del2-text-edit4", pre, chain(rep("- delete files\n", ""), rep("- rule four\n", "- rule four edited\n"))},
+		{"x-del2-text-edit1-prefix", r4, chain(rep("- rule two\n", ""), rep("- rule one\n", "- rule two and one\n"))},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			codex, out, _, _ := goalDeleteFixture(t, c.input, g4)
+			msg := refusalAdvice(t, codex, out, c.edit)
+			if !strings.Contains(msg, "has no rule text") || !strings.Contains(msg, `"  Зачем: g2"`) {
+				t.Fatalf("refusal = %q", msg)
+			}
+			for _, other := range []string{"g1", "g3", "g4"} {
+				if strings.Contains(msg, `"  Зачем: `+other+`"`) {
+					t.Fatalf("refusal = %q", msg)
+				}
+			}
+		})
+	}
+}
+
 func TestAbsorbRefusesTextAboveHeader(t *testing.T) {
 	cases := []struct {
 		name, prefix string
 		edit         bool
-	}{{"one-line", "intro\n", false}, {"blank-line", "note\n\n", false}, {"edit-below", "intro\n", true}}
+		crlf         string
+	}{{"one-line", "intro\n", false, ""}, {"blank-line", "note\n\n", false, ""}, {"edit-below", "intro\n", true, ""}, {"crlf-header", "intro\n", false, "header"}, {"crlf-all", "intro\n", false, "all"}}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -114,7 +155,13 @@ func TestAbsorbRefusesTextAboveHeader(t *testing.T) {
 			if c.edit {
 				data = bytes.Replace(data, []byte("- two\n"), []byte("- two edited\n"), 1)
 			}
+			if c.crlf == "header" {
+				data = bytes.Replace(data, []byte("-->\n"), []byte("-->\r\n"), 1)
+			}
 			data = append([]byte(c.prefix), data...)
+			if c.crlf == "all" {
+				data = bytes.ReplaceAll(data, []byte("\n"), []byte("\r\n"))
+			}
 			mustWrite(t, out, data)
 			before := treeBytes(t, codex)
 			err = Absorb(codex, out, AbsorbOptions{DraftDir: codex})

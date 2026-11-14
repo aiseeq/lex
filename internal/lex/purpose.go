@@ -228,7 +228,7 @@ func (p purposeLayout) strip(actual []byte, output string) ([]byte, error) {
 		matchedNew[pair[1]] = true
 		newToOld[pair[1]] = pair[0]
 	}
-	if err := p.checkMovedGoals(oldLines, matches, newLines, newToOld); err != nil {
+	if err, _ := p.checkMovedGoals(oldLines, matches, newLines, newToOld, nil); err != nil {
 		return nil, err
 	}
 	if err := p.checkRemovedGoals(oldLines, newLines, matchedOld); err != nil {
@@ -247,10 +247,10 @@ func (p purposeLayout) strip(actual []byte, output string) ([]byte, error) {
 	return clean, nil
 }
 
-func (p purposeLayout) checkMovedGoals(oldLines [][]byte, matches [][2]int, newLines [][]byte, newToOld map[int]int) error {
+func (p purposeLayout) checkMovedGoals(oldLines [][]byte, matches [][2]int, newLines [][]byte, newToOld map[int]int, only map[int]bool) (error, bool) {
 	for _, pair := range matches {
 		id, isGoal := p.owners[pair[0]]
-		if !isGoal {
+		if !isGoal || (only != nil && !only[pair[0]]) {
 			continue
 		}
 		previous := pair[1] - 1
@@ -261,25 +261,17 @@ func (p purposeLayout) checkMovedGoals(oldLines [][]byte, matches [][2]int, newL
 		oldIndex, ok := newToOld[previous]
 		if previous < 0 || (ok && (oldIndex < span.start || oldIndex >= span.end)) {
 			if !p.ruleTextPresent(span, oldLines, newLines, matches) {
-				return fmt.Errorf("%s: цель line %q has no rule text; delete the line or restore its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n"))
+				return fmt.Errorf("%s: цель line %q has no rule text; delete the line or restore its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n")), false
 			}
-			return fmt.Errorf("%s: цель moved to another fragment; put the line %q back under its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n"))
+			return fmt.Errorf("%s: цель moved to another fragment; put the line %q back under its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n")), true
 		}
 	}
-	return nil
+	return nil, false
 }
 
 func (p purposeLayout) ruleTextPresent(span purposeSpan, oldLines, newLines [][]byte, matches [][2]int) bool {
-	for index := span.start; index < span.end; index++ {
-		if !p.isRuleText(index, oldLines) {
-			continue
-		}
-		if purposeLineMatched(index, matches) {
-			return true
-		}
-		if ruleLinePresent(oldLines[index], oldLines, newLines) {
-			return true
-		}
+	if p.existingRuleText(span, oldLines, newLines, matches) {
+		return true
 	}
 	matchedNew := make(map[int]bool)
 	beforeOld, beforeNew := -1, -1
@@ -294,6 +286,9 @@ func (p purposeLayout) ruleTextPresent(span purposeSpan, oldLines, newLines [][]
 		}
 	}
 	start, end := beforeNew+1, afterNew
+	if p.editedRuleInWindow(span, oldLines, newLines, matchedNew, start, end) {
+		return true
+	}
 	for _, pair := range matches {
 		if _, isGoal := p.owners[pair[0]]; isGoal && p.spanAt(pair[0]) == span && pair[1] >= start && pair[1] < end {
 			end = pair[1]
@@ -306,6 +301,35 @@ func (p purposeLayout) ruleTextPresent(span purposeSpan, oldLines, newLines [][]
 	for index := start; index < end; index++ {
 		if !matchedNew[index] && strings.TrimSpace(string(newLines[index])) != "" && !strings.HasPrefix(string(newLines[index]), purposeMarker) {
 			return true
+		}
+	}
+	return false
+}
+
+func (p purposeLayout) existingRuleText(span purposeSpan, oldLines, newLines [][]byte, matches [][2]int) bool {
+	for index := span.start; index < span.end; index++ {
+		if !p.isRuleText(index, oldLines) {
+			continue
+		}
+		if purposeLineMatched(index, matches) || ruleLinePresent(oldLines[index], oldLines, newLines) {
+			return true
+		}
+	}
+	return false
+}
+
+// A changed rule can remain after its goal was moved above it. Only unmatched
+// lines within this rule's anchors can represent that edit.
+func (p purposeLayout) editedRuleInWindow(span purposeSpan, oldLines, newLines [][]byte, matchedNew map[int]bool, start, end int) bool {
+	for index := start; index < end; index++ {
+		if matchedNew[index] {
+			continue
+		}
+		text := bytes.TrimSpace(newLines[index])
+		for oldIndex := span.start; oldIndex < span.end; oldIndex++ {
+			if p.isRuleText(oldIndex, oldLines) && bytes.HasPrefix(text, bytes.TrimSpace(oldLines[oldIndex])) {
+				return true
+			}
 		}
 	}
 	return false
@@ -334,17 +358,8 @@ func ruleLinePresent(line []byte, oldLines, newLines [][]byte) bool {
 		}
 	}
 	for _, line := range newLines {
-		text := bytes.TrimSpace(line)
-		if bytes.Equal(text, oldText) {
+		if bytes.Equal(bytes.TrimSpace(line), oldText) {
 			newCount++
-			continue
-		}
-		common := 0
-		for common < len(oldText) && common < len(text) && oldText[common] == text[common] {
-			common++
-		}
-		if common >= 6 && common == len(oldText) {
-			return true
 		}
 	}
 	if newCount >= oldCount {
@@ -396,22 +411,14 @@ func (p purposeLayout) refuseRemovedGoals(oldLines, newLines [][]byte, failed []
 			normalized[i] = bytes.ReplaceAll(line, []byte("\r\n"), []byte("\n"))
 		}
 		matches := myersLineMatches(oldLines, normalized)
-		newToOld := make(map[int]int, len(matches))
-		for _, pair := range matches {
-			newToOld[pair[1]] = pair[0]
-		}
 		for _, index := range failed {
 			for i, line := range normalized {
 				if !bytes.Equal(line, oldLines[index]) || bytes.Equal(newLines[i], line) {
 					continue
 				}
-				previous := i - 1
-				for previous >= 0 && strings.TrimSpace(string(normalized[previous])) == "" {
-					previous--
-				}
-				span := p.spanAt(index)
-				if oldIndex, ok := newToOld[previous]; ok && (oldIndex < span.start || oldIndex >= span.end) && p.ruleTextPresent(span, oldLines, normalized, matches) {
-					return fmt.Errorf("%s: purpose line has CRLF line endings and moved to another fragment; restore its line ending and put it back under its rule", p.owners[index])
+				candidate, newToOld := purposeMatchesWithCandidate(matches, index, i)
+				if err, moved := p.checkMovedGoals(oldLines, candidate, normalized, newToOld, map[int]bool{index: true}); moved {
+					return fmt.Errorf("purpose line has CRLF line endings; %w", err)
 				}
 			}
 		}
@@ -433,6 +440,20 @@ func (p purposeLayout) refuseRemovedGoals(oldLines, newLines [][]byte, failed []
 		return fmt.Errorf("%s: missing or edited цель; put the line %s back under its rule or delete the rule together with it%s", id, quoted[0], apart)
 	}
 	return fmt.Errorf("%s: missing or edited цель; put each of the lines %s back under its rule or delete that rule together with it%s", id, strings.Join(quoted, ", "), apart)
+}
+
+func purposeMatchesWithCandidate(matches [][2]int, oldIndex, newIndex int) ([][2]int, map[int]int) {
+	candidate := make([][2]int, 0, len(matches)+1)
+	newToOld := make(map[int]int, len(matches)+1)
+	for _, pair := range matches {
+		if pair[0] != oldIndex && pair[1] != newIndex {
+			candidate = append(candidate, pair)
+			newToOld[pair[1]] = pair[0]
+		}
+	}
+	candidate = append(candidate, [2]int{oldIndex, newIndex})
+	newToOld[newIndex] = oldIndex
+	return candidate, newToOld
 }
 
 func (p purposeLayout) missingFinalPurposeNewline(oldLines, newLines [][]byte, failed []int) bool {

@@ -1099,13 +1099,17 @@ func generatedMarkerForms(manifestPath string) [][]byte {
 	return forms
 }
 
-func hasGeneratedHeader(data []byte) bool {
+func frontMatterOffset(data []byte) int {
 	lines := bytes.SplitAfter(data, []byte("\n"))
 	offset := 0
 	for _, line := range lines[:frontMatterLength(lines)] {
 		offset += len(line)
 	}
-	return bytes.HasPrefix(data[offset:], []byte("<!-- lex: собран из "))
+	return offset
+}
+
+func hasGeneratedHeader(data []byte) bool {
+	return bytes.HasPrefix(data[frontMatterOffset(data):], []byte("<!-- lex: собран из "))
 }
 
 func expandHeaderCodexPath(path string) string {
@@ -1141,12 +1145,7 @@ func ForeignHeaderPhrase(owner string) string {
 // foreignOutputOwner reports the codex named by a lex header that is not this codex's ("unknown codex" when the header names none).
 func foreignOutputOwner(codex string, data []byte) (string, bool) {
 	marker := []byte("<!-- lex: собран из ")
-	lines := bytes.SplitAfter(data, []byte("\n"))
-	offset := 0
-	count := frontMatterLength(lines)
-	for _, line := range lines[:count] {
-		offset += len(line)
-	}
+	offset := frontMatterOffset(data)
 	lineEnd := bytes.IndexByte(data[offset:], '\n')
 	line := data[offset:]
 	if lineEnd >= 0 {
@@ -1181,12 +1180,7 @@ func withoutGeneratedHeader(data []byte, manifestPath string) []byte {
 }
 
 func stripGeneratedHeader(data []byte, manifestPath string) ([]byte, bool) {
-	lines := bytes.SplitAfter(data, []byte("\n"))
-	count := frontMatterLength(lines)
-	offset := 0
-	for _, line := range lines[:count] {
-		offset += len(line)
-	}
+	offset := frontMatterOffset(data)
 	for _, marker := range generatedMarkerForms(manifestPath) {
 		if bytes.HasPrefix(data[offset:], marker) {
 			return append(append([]byte{}, data[:offset]...), data[offset+len(marker):]...), true
@@ -1380,14 +1374,9 @@ func absorbBuiltBody(codex, target, selected string, paths []string, m manifest,
 func rejectTextAboveHeader(file, selected string, m manifest, actual []byte) error {
 	if m.header {
 		for _, marker := range generatedMarkerForms(selected) {
-			if index := bytes.Index(actual, marker); index > 0 && actual[index-1] == '\n' {
-				prefix := actual[:index]
-				lines := bytes.SplitAfter(prefix, []byte("\n"))
-				frontLength := 0
-				for _, line := range lines[:frontMatterLength(lines)] {
-					frontLength += len(line)
-				}
-				if frontLength != len(prefix) {
+			for _, ending := range [][]byte{[]byte("\n"), []byte("\r\n")} {
+				form := append(append([]byte(nil), bytes.TrimSuffix(marker, []byte("\n"))...), ending...)
+				if index := bytes.Index(actual, form); index > 0 && actual[index-1] == '\n' && index != frontMatterOffset(actual) {
 					return fmt.Errorf("%s: text above lex header; move the text below the header", file)
 				}
 			}
