@@ -3451,12 +3451,9 @@ func checkSelectedOutputs(codex, tree string, codexInMain bool, selected []*sele
 			continue
 		}
 		if !outputMatchesGenerated(data, body, entry.m.header, entry.path) {
-			problem, fileEdited := builtDiffers(codex, entry.m, entry.path, body, data, catalog)
+			problem, advice := builtDiffers(codex, entry.m, entry.path, body, data, catalog)
 			if tree != "" {
-				problem = labelTreeOutputProblem(problem, entry.m.out, out)
-				if fileEdited {
-					problem = treeOutputAdvice(problem, entry.m.out, out, codexInMain)
-				}
+				problem = treeCopyAdvice(labelTreeOutputProblem(problem, entry.m.out, out), entry.m.out, out, advice, codexInMain)
 			}
 			problems = append(problems, problem)
 		}
@@ -3751,38 +3748,51 @@ func stagedOrphans(commit *stagedPaths, codex string, referenced map[string]bool
 	return problems, warnings, nil
 }
 
-// builtDiffers explains why the manifest output m.out differs from its fragments; fileEdited reports advice that keeps an edit made in the file with lex absorb.
-func builtDiffers(codex string, m manifest, manifestPath string, want, actual []byte, catalog *manifestCatalog) (problem string, fileEdited bool) {
+// outputAdvice is the kind of command a builtDiffers advice gives for the manifest output.
+type outputAdvice uint8
+
+const (
+	// adviceOther gets no worktree note: no lex command, or lex build after a fragment edit,
+	// which may sit in the worktree where a build of the manifest output does not see it.
+	adviceOther outputAdvice = iota
+	// adviceKeepEdit offers lex absorb to keep an edit made in the file.
+	adviceKeepEdit
+	// adviceRebuild offers lex build --force to replace a file the fragments did not build.
+	adviceRebuild
+)
+
+// builtDiffers explains why the manifest output m.out differs from its fragments and which kind of command the advice gives.
+func builtDiffers(codex string, m manifest, manifestPath string, want, actual []byte, catalog *manifestCatalog) (string, outputAdvice) {
 	out := m.out
 	codexArg, fileArg := ShellQuoteArg(codex), ShellQuoteArg(out)
 	if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
-		return fmt.Sprintf("%s: built output differs from its fragments; manifest %s is missing on disk — restore it to disk", out, manifestPath), false
+		return fmt.Sprintf("%s: built output differs from its fragments; manifest %s is missing on disk — restore it to disk", out, manifestPath), adviceOther
 	} else if err != nil {
-		return fmt.Sprintf("%s: %v", out, err), false
+		return fmt.Sprintf("%s: %v", out, err), adviceOther
 	}
 	if owner, foreign := foreignOutputOwner(codex, actual); foreign {
-		return fmt.Sprintf("%s: the file carries %s, so lex import and lex absorb refuse it — if this codex owns the file, run `lex build --force --codex %s %s` to rebuild it from the fragments (edits in the file are lost)", out, ForeignHeaderPhrase(owner), codexArg, fileArg), false
+		return fmt.Sprintf("%s: the file carries %s, so lex import and lex absorb refuse it — if this codex owns the file, run `lex build --force --codex %s %s` to rebuild it from the fragments (edits in the file are lost)", out, ForeignHeaderPhrase(owner), codexArg, fileArg), adviceRebuild
 	}
 	if err := rejectTextAboveHeader(out, manifestPath, m, actual); err != nil {
-		return err.Error(), false
+		return err.Error(), adviceOther
 	}
 	fragmentsChanged := fragmentsChangedSinceBuild(codex, manifestPath, m, want)
 	fileChanged := statusFileChanged(actual, manifestPath, m)
 	if fragmentsChanged && !fileChanged {
-		return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`", out, codexArg), false
+		return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`", out, codexArg), adviceOther
 	}
 	if fragmentsChanged && fileChanged {
 		sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual, catalog)
 		if err != nil {
-			return fmt.Sprintf("%s: %v", out, err), false
+			return fmt.Sprintf("%s: %v", out, err), adviceOther
 		}
-		return fmt.Sprintf("%s: built output differs from its fragments — run `lex absorb --force%s --codex %s %s` to keep the file, or `lex build --force --codex %s %s` to keep the fragments%s", out, sharedFlag, codexArg, fileArg, codexArg, fileArg, sharedHint), true
+		return fmt.Sprintf("%s: built output differs from its fragments — run `lex absorb --force%s --codex %s %s` to keep the file, or `lex build --force --codex %s %s` to keep the fragments%s", out, sharedFlag, codexArg, fileArg, codexArg, fileArg, sharedHint), adviceKeepEdit
 	}
 	sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual, catalog)
 	if err != nil {
-		return fmt.Sprintf("%s: %v", out, err), false
+		return fmt.Sprintf("%s: %v", out, err), adviceOther
 	}
-	return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`, or keep this edit with `lex absorb%s --codex %s %s`%s", out, codexArg, sharedFlag, codexArg, fileArg, sharedHint), true
+	return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`, or keep this edit with `lex absorb%s --codex %s %s`%s", out, codexArg, sharedFlag, codexArg, fileArg, sharedHint), adviceKeepEdit
 }
 
 func finishCheck(warnings, problems []string) ([]string, error) {
@@ -4083,12 +4093,8 @@ func (s *stagedPaths) treePath(path string) string {
 
 // stagedDiffers explains why the staged m.out differs from its fragments, naming the tree it was read from and, for a file edit, what a worktree changes.
 func (s *stagedPaths) stagedDiffers(codex string, m manifest, manifestPath string, want, staged []byte, catalog *manifestCatalog) string {
-	problem, fileEdited := builtDiffers(codex, m, manifestPath, want, staged, catalog)
-	problem = s.labelProblem(problem, m.out)
-	if fileEdited {
-		problem = s.stagedOutputAdvice(problem, codex, m.out)
-	}
-	return problem
+	problem, advice := builtDiffers(codex, m, manifestPath, want, staged, catalog)
+	return s.stagedOutputAdvice(s.labelProblem(problem, m.out), codex, m.out, advice)
 }
 
 // inMainCheckout reports a path under the main checkout and outside this worktree, which may itself lie under the main checkout.
@@ -4097,14 +4103,29 @@ func (s *stagedPaths) inMainCheckout(path string) bool {
 	return s.mainRoot != "" && strings.HasPrefix(path, s.mainRoot+sep) && path != s.root && !strings.HasPrefix(path, s.root+sep)
 }
 
-// stagedOutputAdvice adds to advice that keeps a file edit what a worktree changes: lex absorb reads and lex build rewrites the main checkout's copy of out.
-func (s *stagedPaths) stagedOutputAdvice(problem, codex, out string) string {
+// stagedOutputAdvice adds to advice with a lex command what a worktree changes: lex absorb reads and lex build rewrites the main checkout's copy of out.
+func (s *stagedPaths) stagedOutputAdvice(problem, codex, out string, advice outputAdvice) string {
 	tree := s.treePath(out)
 	if tree == out {
 		return problem
 	}
 	abs, err := filepath.Abs(codex)
-	return treeOutputAdvice(problem, out, tree, err == nil && s.inMainCheckout(resolvePath(abs)))
+	return treeCopyAdvice(problem, out, tree, advice, err == nil && s.inMainCheckout(resolvePath(abs)))
+}
+
+// treeCopyAdvice adds to advice about tree, a worktree copy of the manifest output out, what its lex command changes: absorb reads out, build rewrites out and leaves tree as it is.
+func treeCopyAdvice(problem, out, tree string, advice outputAdvice, codexInMain bool) string {
+	if tree == out {
+		return problem
+	}
+	switch advice {
+	case adviceKeepEdit:
+		return treeOutputAdvice(problem, out, tree, codexInMain)
+	case adviceRebuild:
+		mainOut, treeOut := strconv.Quote(out), strconv.Quote(tree)
+		return problem + "; `lex build` rewrites " + mainOut + ", not " + treeOut + ": copy " + mainOut + " over " + treeOut + " after it"
+	}
+	return problem
 }
 
 // treeOutputAdvice adds to advice that keeps an edit of tree, the copy of the manifest output out in another tree,

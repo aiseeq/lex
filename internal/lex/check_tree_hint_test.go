@@ -7,6 +7,45 @@ import (
 	"testing"
 )
 
+// treeOutputFixture is a codex that built docs/guide.md under a main checkout,
+// with check options that read the output's copy under a worktree.
+type treeOutputFixture struct {
+	codex, mainOutput, treeOutput string
+	opts                          CheckOptions
+	built                         []byte
+}
+
+// newTreeOutputFixture builds "- one\n- two\n" into the main checkout's docs/guide.md and creates the worktree's docs directory without the copy.
+func newTreeOutputFixture(t *testing.T, codexInMain bool) treeOutputFixture {
+	t.Helper()
+	root := t.TempDir()
+	main, tree := filepath.Join(root, "main"), filepath.Join(root, "tree")
+	fx := treeOutputFixture{
+		codex:      filepath.Join(root, "codex"),
+		mainOutput: filepath.Join(main, "docs", "guide.md"),
+		treeOutput: filepath.Join(tree, "docs", "guide.md"),
+		opts:       CheckOptions{OutputsUnder: main, Tree: tree},
+	}
+	if codexInMain {
+		fx.codex = filepath.Join(main, "codex")
+	}
+	if err := importData(fx.codex, fx.mainOutput, "guide.md", []byte("- one\n- two\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := Build(fx.codex, false); err != nil {
+		t.Fatal(err)
+	}
+	built, err := os.ReadFile(fx.mainOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx.built = built
+	if err := os.MkdirAll(filepath.Dir(fx.treeOutput), directoryMode); err != nil {
+		t.Fatal(err)
+	}
+	return fx
+}
+
 func TestCheckTreeAdviceNamesManifestOutput(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -18,29 +57,9 @@ func TestCheckTreeAdviceNamesManifestOutput(t *testing.T) {
 		{name: "codex in main tree", codexInMain: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
-			main := filepath.Join(root, "main")
-			codex := filepath.Join(root, "codex")
-			if tc.codexInMain {
-				codex = filepath.Join(main, "codex")
-			}
-			tree := filepath.Join(root, "tree")
-			mainOutput := filepath.Join(main, "docs", "guide.md")
-			treeOutput := filepath.Join(tree, "docs", "guide.md")
-			if err := importData(codex, mainOutput, "guide.md", []byte("- one\n- two\n"), false); err != nil {
-				t.Fatal(err)
-			}
-			if err := Build(codex, false); err != nil {
-				t.Fatal(err)
-			}
-			built, err := os.ReadFile(mainOutput)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.MkdirAll(filepath.Dir(treeOutput), directoryMode); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(treeOutput, []byte(strings.Replace(string(built), "- two", "- TWO", 1)), 0o644); err != nil {
+			fx := newTreeOutputFixture(t, tc.codexInMain)
+			codex, treeOutput := fx.codex, fx.treeOutput
+			if err := os.WriteFile(treeOutput, []byte(strings.Replace(string(fx.built), "- two", "- TWO", 1)), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			if tc.editFragment {
@@ -54,7 +73,7 @@ func TestCheckTreeAdviceNamesManifestOutput(t *testing.T) {
 				}
 			}
 
-			_, err = CheckWithWarnings(codex, CheckOptions{OutputsUnder: main, Tree: tree})
+			_, err := CheckWithWarnings(codex, fx.opts)
 			if err == nil {
 				t.Fatal("expected a tree output mismatch")
 			}

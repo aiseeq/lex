@@ -146,7 +146,7 @@ func TestStagedWorktreeAdviceByBranch(t *testing.T) {
 		{name: "fragments only", editFrag: true, want: []string{"edit the fragment and run `lex build"}, avoid: []string{carry, rewrites, mainFragments}},
 		{name: "foreign header", editFile: func(old string) string {
 			return "<!-- lex: собран из /elsewhere/codex/manifest/CLAUDE.md.yaml. Правь фрагменты в /elsewhere/codex/frag -->\n" + old
-		}, want: []string{"lex absorb refuse it"}, avoid: []string{carry, rewrites, mainFragments}},
+		}, want: []string{"lex absorb refuse it", rewrites}, avoid: []string{carry, mainFragments}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
