@@ -59,3 +59,39 @@ func TestExternalEntryThroughSymlinkIsCorpusFile(t *testing.T) {
 		t.Errorf("existing section «Бюджет» reported as missing: %v", warnings)
 	}
 }
+
+// Two external entries that reach one file outside the corpus, one through a symlink, read it once.
+func TestExternalEntriesForOneFileReadItOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	codex := filepath.Join(home, "codex")
+	output := filepath.Join(home, "tree", "CLAUDE.md")
+	externalRefsImport(t, codex, output, "CLAUDE.md", "# Бюджет\n")
+	if err := Build(codex, false); err != nil {
+		t.Fatalf("build corpus: %v", err)
+	}
+	agent := filepath.Join(home, "agent.md")
+	if err := os.WriteFile(agent, []byte("- Доходы — раздел «Деньги» в `~/tree/CLAUDE.md`.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(agent, filepath.Join(home, "alias.md")); err != nil {
+		t.Fatal(err)
+	}
+	tools := `{"text_refs":{"external":["` + agent + `","~/alias.md"]}}`
+	if err := os.WriteFile(filepath.Join(codex, "tools.json"), []byte(tools), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	warnings, err := CheckWithWarnings(codex, CheckOptions{})
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	var money []string
+	for _, warning := range warnings {
+		if strings.Contains(warning, "«Деньги»") {
+			money = append(money, warning)
+		}
+	}
+	if len(money) != 1 || !strings.HasPrefix(money[0], agent+":") {
+		t.Errorf("want the missing section «Деньги» once, under %s; got %v", agent, money)
+	}
+}

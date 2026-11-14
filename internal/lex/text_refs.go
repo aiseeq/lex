@@ -167,6 +167,7 @@ func loadExternalTextCorpus(codex, outputsUnder string, corpus textCorpus) (text
 		_, ok := corpusReal[resolvePath(path)]
 		return ok
 	}
+	readReal := map[string]bool{} // an external file reached by two entries (one through a symlink) is read once, under the first entry
 	warned := map[string]bool{}
 	warn := func(line string) {
 		if !warned[line] {
@@ -182,7 +183,8 @@ func loadExternalTextCorpus(codex, outputsUnder string, corpus textCorpus) (text
 			}
 		}
 		path := resolveRefTarget(codex, configured)
-		if paths[path] || inCorpus(path) {
+		real := resolvePath(path)
+		if paths[path] || readReal[real] || inCorpus(path) {
 			continue
 		}
 		data, err := os.ReadFile(path)
@@ -198,7 +200,7 @@ func loadExternalTextCorpus(codex, outputsUnder string, corpus textCorpus) (text
 			warn(path + ": external file for text references not read: " + err.Error())
 			continue
 		}
-		external[path], paths[path] = data, true
+		external[path], paths[path], readReal[real] = data, true, true
 	}
 	return external, paths, warnings, nil
 }
