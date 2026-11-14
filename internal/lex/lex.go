@@ -1235,16 +1235,7 @@ func ForeignHeaderPhrase(owner string) string {
 
 // foreignOutputOwner reports the codex named by a lex header that is not this codex's ("unknown codex" when the header names none).
 func foreignOutputOwner(codex string, data []byte) (string, bool) {
-	offset := frontMatterOffset(data)
-	if offset == 0 {
-		// An invisible prefix before the front matter fence hides the header under it as well.
-		first, _, _ := bytes.Cut(data, []byte{'\n'})
-		if index := bytes.Index(first, []byte("---")); index > 0 && invisibleHeaderPrefix(data[:index]) {
-			if matter := frontMatterOffset(data[index:]); matter > 0 {
-				offset = index + matter
-			}
-		}
-	}
+	offset := foreignHeaderLineOffset(data)
 	lineEnd := bytes.IndexByte(data[offset:], '\n')
 	line := data[offset:]
 	if lineEnd >= 0 {
@@ -1269,6 +1260,22 @@ func foreignOutputOwner(codex string, data []byte) (string, bool) {
 		}
 	}
 	return owner, true
+}
+
+// foreignHeaderLineOffset is the offset of the line where a lex header stands: after the front matter,
+// also when an invisible prefix before the front matter fence hides it.
+func foreignHeaderLineOffset(data []byte) int {
+	offset := frontMatterOffset(data)
+	if offset > 0 {
+		return offset
+	}
+	first, _, _ := bytes.Cut(data, []byte{'\n'})
+	if index := bytes.Index(first, []byte("---")); index > 0 && invisibleHeaderPrefix(data[:index]) {
+		if matter := frontMatterOffset(data[index:]); matter > 0 {
+			return index + matter
+		}
+	}
+	return 0
 }
 
 // invisibleHeaderPrefix reports a prefix that hides a lex header: invisible bytes with at least one
@@ -3875,7 +3882,7 @@ type outputCopy struct {
 
 // foreignHeaderAction tells how to fix a worktree copy, actual, that carries a foreign header: lex build writes only the manifest output, so the copy's header line itself is fixed.
 func (c *outputCopy) foreignHeaderAction(actual, want []byte, m manifest, manifestPath string) string {
-	offset := frontMatterOffset(actual)
+	offset := foreignHeaderLineOffset(actual)
 	end := len(actual)
 	if i := bytes.IndexByte(actual[offset:], '\n'); i >= 0 {
 		end = offset + i + 1

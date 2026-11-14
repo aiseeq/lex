@@ -91,3 +91,20 @@ func TestForeignHeaderBehindInvisiblePrefixRefused(t *testing.T) {
 		})
 	}
 }
+
+// A worktree copy with a byte order mark before its front matter keeps the foreign header on the
+// line after the front matter; the advice names that line, not the fence the mark stands on.
+func TestForeignHeaderActionNamesLineBehindPrefixedFrontMatter(t *testing.T) {
+	dir := t.TempDir()
+	body := "# B\n\n- one\n"
+	actual := []byte("\xef\xbb\xbf---\nname: x\n---\n" + string(generatedMarkerForCodex("source", filepath.Join(dir, "codex-a"))) + body)
+	m := manifest{out: filepath.Join(dir, "b.md")}
+	for _, header := range []bool{false, true} {
+		m.header = header
+		manifestPath := filepath.Join(dir, "codex-b", "manifest", "b.md.yaml")
+		action := (&outputCopy{}).foreignHeaderAction(actual, []byte("---\nname: x\n---\n"+body), m, manifestPath)
+		if !strings.Contains(action, "line 4, the foreign header") {
+			t.Fatalf("header=%v: action = %q, want line 4", header, action)
+		}
+	}
+}
