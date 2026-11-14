@@ -1100,3 +1100,9 @@ func TestReadCommandsRejectInvalidCodex(t *testing.T) {
 		t.Errorf("import into file: error = %v, want operational error containing %q", importErr, file)
 	}
 }
+
+func TestGuideSaysRefsOnlyPrintsNoRuleSummary(t *testing.T) {
+	if want := "с --refs-only правила не проверяются и этой строки нет."; !strings.Contains(guideText, want) {
+		t.Fatalf("guide lacks %q", want)
+	}
+}

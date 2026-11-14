@@ -31,6 +31,9 @@ type finding struct {
 var findingPattern = regexp.MustCompile(`^(?:warning: )?(.*?):([0-9]+): kind ([1-4]): `)
 var home string
 
+// unusedExceptionPrefix starts a warning about a tools.json exception that matched nothing: it is not a reference finding.
+const unusedExceptionPrefix = "warning: unused text reference exception: "
+
 const privateDir = 0700
 
 func archive(rev, dir string) error {
@@ -62,7 +65,7 @@ func scan(binary, dir string) ([]finding, error) {
 	}
 	var found []finding
 	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
-		if line == "" {
+		if line == "" || strings.HasPrefix(line, unusedExceptionPrefix) {
 			continue
 		}
 		m := findingPattern.FindStringSubmatch(line)
@@ -178,7 +181,7 @@ func run() error {
 			return fmt.Errorf("создать снимок: %w", err)
 		}
 	}
-	if err := archive("e11307f", old); err != nil {
+	if err := archive("33bda589", old); err != nil {
 		return err
 	}
 	if err := archive("HEAD", current); err != nil {
