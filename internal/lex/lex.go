@@ -1323,6 +1323,9 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 	if err != nil {
 		return err
 	}
+	if moved, err := tryAbsorbPurePartMove(codex, paths, selected, m, purposeEnabled, actual, fileBytes, options); moved || err != nil {
+		return warnAfterAbsorb(err, target, warnSnapshot)
+	}
 	var purpose *purposeLayout
 	if purposeEnabled {
 		layout, err := readPurposeLayoutWithRead(codex, m, read)
@@ -1342,6 +1345,40 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 		}
 	}
 	return warnAfterAbsorb(absorbEditedFragment(codex, paths, selected, m, built, actual, fileBytes, options, purpose), target, warnSnapshot)
+}
+
+func readPlainPartLayout(codex string, m manifest) (purposeLayout, error) {
+	l := purposeLayout{owners: map[int]string{}}
+	for _, id := range m.parts {
+		path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return l, fmt.Errorf("%s: read fragment for absorb: %w", path, err)
+		}
+		body, err := fragmentBody(raw)
+		if err != nil {
+			return l, err
+		}
+		start := len(absorbLines(l.rendered))
+		l.rendered = append(l.rendered, body...)
+		l.plain = append(l.plain, body...)
+		l.spans = append(l.spans, purposeSpan{id: id, start: start, end: len(absorbLines(l.rendered))})
+	}
+	return l, nil
+}
+
+func tryAbsorbPurePartMove(codex string, paths []string, selected string, m manifest, printed bool, actual, fileBytes []byte, options AbsorbOptions) (bool, error) {
+	var layout purposeLayout
+	var err error
+	if printed {
+		layout, err = readPurposeLayout(codex, m)
+	} else {
+		layout, err = readPlainPartLayout(codex, m)
+	}
+	if err != nil {
+		return false, err
+	}
+	return absorbPurePartMove(codex, paths, selected, m, layout, actual, fileBytes, options)
 }
 
 // restoreDeletedHeader writes the build back into a file whose text equals the fragments but whose lex header line was deleted: nothing in the file is lost, and lex check names absorb for it.
@@ -1430,7 +1467,7 @@ func absorbEditedFragment(codex string, paths []string, selected string, m manif
 	if purpose != nil {
 		hunks = splitPurposeHunks(purpose.spans, purpose.owners, oldLines, newLines, hunks)
 	}
-	edits, additions, err := planAbsorbEdits(codex, paths, selected, m, bounds, oldLines, newLines, hunks, actual, options, purpose != nil)
+	edits, additions, err := planAbsorbEdits(codex, paths, selected, m, bounds, oldLines, newLines, hunks, fileBytes, options, purpose != nil)
 	if err != nil {
 		return err
 	}
@@ -1444,6 +1481,153 @@ func absorbEditedFragment(codex string, paths []string, selected string, m manif
 	return writeAbsorbPlan(selected, plan)
 }
 
+// absorbPurePartMove recognizes a file made solely by reordering complete,
+// unique manifest parts. It runs before printed purpose lines are stripped.
+func absorbPurePartMove(codex string, paths []string, selected string, m manifest, layout purposeLayout, actual, fileBytes []byte, options AbsorbOptions) (bool, error) {
+	chunks, compact, ok := purePartMoveChunks(m, layout)
+	if !ok {
+		return false, nil
+	}
+	order, ok := matchPartMove(chunks, actual, compact)
+	if !ok {
+		return false, nil
+	}
+	updated := m
+	updated.parts = make([]string, len(order))
+	updated.fragmentHashes = maps.Clone(m.fragmentHashes)
+	updated.builtHash = sha(fileBytes)
+	edits := make([]preparedFragmentEdit, 0, len(order))
+	changedOwners := make([]int, 0, len(order))
+	for at, source := range order {
+		id := m.parts[source]
+		updated.parts[at] = id
+		path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return true, fmt.Errorf("%s: read fragment for absorb: %w", path, err)
+		}
+		body, err := fragmentBody(raw)
+		if err != nil {
+			return true, err
+		}
+		changed := replaceFragmentBody(raw, body, normalizeMovePosition(body, at < len(order)-1, compact))
+		if !bytes.Equal(raw, changed) {
+			changedOwners = append(changedOwners, source)
+		}
+		updated.fragmentHashes[id] = sha(changed)
+		edits = append(edits, preparedFragmentEdit{part: id, path: path, updated: changed, hash: sha(changed)})
+	}
+	// A shared fragment whose bytes change here would change the other files it builds; the
+	// line-edit path keeps that fragment and adds a new one for this file, as it did before.
+	affected, err := firstSharedEdit(paths, m.parts, changedOwners)
+	if err != nil {
+		return true, err
+	}
+	if len(affected) > 0 {
+		return false, nil
+	}
+	plan := absorbPlan{edits: edits, manifest: updated}
+	if err := verifyAbsorbPlan(codex, plan, actual, options.DraftDir, manifestKey(selected), m.out, fileBytes); err != nil {
+		return true, err
+	}
+	if err := writeAbsorbPlan(selected, plan); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func purePartMoveChunks(m manifest, layout purposeLayout) ([][]byte, bool, bool) {
+	if len(m.parts) < 2 || len(layout.spans) != len(m.parts) {
+		return nil, false, false
+	}
+	seenIDs, seenChunks := map[string]bool{}, map[string]bool{}
+	chunks := make([][]byte, len(m.parts))
+	compact := true
+	for i, id := range m.parts {
+		if seenIDs[id] {
+			return nil, false, false
+		}
+		seenIDs[id] = true
+		chunks[i] = append([]byte(nil), layout.renderedLines(layout.spans[i])...)
+		if trailingNewlines(chunks[i]) > 1 {
+			compact = false
+		}
+		key := string(normalizeMovedChunk(chunks[i], false))
+		if len(key) == 0 || seenChunks[key] {
+			return nil, false, false
+		}
+		seenChunks[key] = true
+	}
+	return chunks, compact, true
+}
+
+// matchPartMove requires an exact concatenation of complete rendered parts.
+func matchPartMove(chunks [][]byte, actual []byte, compact bool) ([]int, bool) {
+	order, used := make([]int, 0, len(chunks)), make([]bool, len(chunks))
+	var search func([]byte) bool
+	search = func(rest []byte) bool {
+		if len(order) == len(chunks) {
+			return len(rest) == 0
+		}
+		for i, chunk := range chunks {
+			if used[i] {
+				continue
+			}
+			candidate := normalizeMovePosition(chunk, len(order) < len(chunks)-1, compact)
+			if !bytes.HasPrefix(rest, candidate) {
+				continue
+			}
+			used[i] = true
+			order = append(order, i)
+			if search(rest[len(candidate):]) {
+				return true
+			}
+			order = order[:len(order)-1]
+			used[i] = false
+		}
+		return false
+	}
+	if !search(actual) {
+		return nil, false
+	}
+	return order, true
+}
+
+func (p purposeLayout) renderedLines(span purposeSpan) []byte {
+	lines := absorbLines(p.rendered)
+	return bytes.Join(lines[span.start:span.end], nil)
+}
+
+func normalizeMovedChunk(data []byte, nonLast bool) []byte {
+	data = bytes.TrimRight(data, "\n")
+	if len(data) == 0 {
+		return nil
+	}
+	if nonLast {
+		return append(data, '\n', '\n')
+	}
+	return append(data, '\n')
+}
+
+func normalizeMovePosition(data []byte, nonLast, compact bool) []byte {
+	if !compact {
+		return normalizeMovedChunk(data, nonLast)
+	}
+	data = bytes.TrimRight(data, "\n")
+	if len(data) == 0 {
+		return nil
+	}
+	return append(data, '\n')
+}
+
+func trailingNewlines(data []byte) int {
+	n := 0
+	for i := len(data) - 1; i >= 0 && data[i] == '\n'; i-- {
+		n++
+	}
+	return n
+}
+
 type absorbPlan struct {
 	edits       []preparedFragmentEdit
 	fragments   map[int][]plannedFragment
@@ -1451,8 +1635,8 @@ type absorbPlan struct {
 	removePaths []string
 }
 
-func planAbsorbEdits(codex string, paths []string, selected string, m manifest, bounds [][2]int, oldLines, newLines [][]byte, hunks []lineHunk, actual []byte, options AbsorbOptions, printedPurpose bool) ([]preparedFragmentEdit, map[int][]lineHunk, error) {
-	owners, deltas, additions, err := assignAbsorbHunks(bounds, m.parts, oldLines, hunks, options.DraftDir, manifestKey(selected), m.out, actual)
+func planAbsorbEdits(codex string, paths []string, selected string, m manifest, bounds [][2]int, oldLines, newLines [][]byte, hunks []lineHunk, fileBytes []byte, options AbsorbOptions, printedPurpose bool) ([]preparedFragmentEdit, map[int][]lineHunk, error) {
+	owners, deltas, additions, err := assignAbsorbHunks(bounds, m.parts, oldLines, hunks, options.DraftDir, manifestKey(selected), m.out, fileBytes)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1662,14 +1846,14 @@ func headingLines(lines [][]byte) bool {
 	return found
 }
 
-func assignAbsorbHunks(bounds [][2]int, parts []string, oldLines [][]byte, hunks []lineHunk, draftDir, key, output string, actual []byte) ([]int, []int, map[int][]lineHunk, error) {
+func assignAbsorbHunks(bounds [][2]int, parts []string, oldLines [][]byte, hunks []lineHunk, draftDir, key, output string, fileBytes []byte) ([]int, []int, map[int][]lineHunk, error) {
 	owners := make([]int, 0, len(hunks))
 	deltas := make([]int, len(parts))
 	additions := make(map[int][]lineHunk)
 	for _, hunk := range hunks {
 		assignment, ok := assignAbsorbHunk(bounds, oldLines, hunk)
 		if !ok {
-			return nil, nil, nil, writeAbsorbDraft(draftDir, key, output, actual, "boundary conflict")
+			return nil, nil, nil, writeAbsorbDraft(draftDir, key, output, fileBytes, "boundary conflict")
 		}
 		for _, owner := range assignment.owners {
 			owners = appendUniqueInt(owners, owner)
@@ -1969,6 +2153,18 @@ func validateEditedPartOccurrences(codex string, parts []string, owners []int) e
 }
 
 func validateSharedEdits(paths []string, parts []string, owners []int, shared bool) error {
+	affected, err := firstSharedEdit(paths, parts, owners)
+	if err != nil {
+		return err
+	}
+	if len(affected) > 0 && !shared {
+		return fmt.Errorf("shared fragment affects: %s; pass --shared", strings.Join(affected, ", "))
+	}
+	return nil
+}
+
+// firstSharedEdit returns the manifests using the first edited part that more than one manifest builds, or nil.
+func firstSharedEdit(paths []string, parts []string, owners []int) ([]string, error) {
 	checked := make(map[string]bool)
 	for _, owner := range owners {
 		part := parts[owner]
@@ -1978,13 +2174,13 @@ func validateSharedEdits(paths []string, parts []string, owners []int, shared bo
 		checked[part] = true
 		affected, err := manifestsUsing(paths, part)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if len(affected) > 1 && !shared {
-			return fmt.Errorf("shared fragment affects: %s; pass --shared", strings.Join(affected, ", "))
+		if len(affected) > 1 {
+			return affected, nil
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func prepareFragmentEdits(codex string, parts []string, bounds [][2]int, owners, deltas []int, newLines [][]byte, additions map[int][]lineHunk, printedPurpose bool) ([]preparedFragmentEdit, error) {
