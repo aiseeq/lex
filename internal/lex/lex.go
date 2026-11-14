@@ -1204,7 +1204,9 @@ func restoreDeletedHeader(manifestPath string, m manifest, fileBytes, body []byt
 	if outputMatchesGenerated(fileBytes, full, true, manifestPath) {
 		// A restore whose manifest write failed left the file right and the hash stale: record it now.
 		if m.builtHash != "" && bytes.Equal(fileBytes, full) && sha(full) != m.builtHash {
-			return updateManifestField(manifestPath, "built_sha256", sha(full))
+			if err := updateManifestField(manifestPath, "built_sha256", sha(full)); err != nil {
+				return fmt.Errorf("%s: record the restored file in the manifest: %w", m.out, err)
+			}
 		}
 		return nil
 	}
