@@ -112,12 +112,78 @@ func TestToolRootCommand(t *testing.T) {
 	}
 
 	legacy := loadedTool{loaded: true, config: configuredTool{Name: "tool"}, tasksKnown: true, registry: toolRegistry{Commands: []toolCommand{{Path: []string{"sub"}}}}}
-	if got, want := legacy.problem([]string{"tool", "old"}), "tool has no command or task old"; got != want {
+	if got, want := legacy.problem([]string{"tool", "old"}), "tool has no command old"; got != want {
 		t.Fatalf("without root: problem %q, want %q", got, want)
 	}
 	rootNone := loadedTool{loaded: true, config: configuredTool{Name: "tool"}, tasksKnown: true, registry: toolRegistry{Commands: []toolCommand{{Path: []string{}, Rest: "none"}}}}
-	if got, want := rootNone.problem([]string{"tool", "old"}), "tool has no command or task old"; got != want {
+	if got, want := rootNone.problem([]string{"tool", "old"}), "tool takes no arguments: old"; got != want {
 		t.Fatalf("root without positional arguments: problem %q, want %q", got, want)
+	}
+}
+
+func TestToolCommandFlagForms(t *testing.T) {
+	testProblem := func(name string, command toolCommand, words []string, want string) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			tool := loadedTool{loaded: true, config: configuredTool{Name: "tool"}, tasksKnown: true,
+				registry: toolRegistry{Commands: []toolCommand{command}}}
+			if got := tool.problem(words); got != want {
+				t.Fatalf("problem %q, want %q", got, want)
+			}
+		})
+	}
+
+	// no_equals rejects a known flag's equals form while preserving unknown-flag
+	// diagnostics; without it, the equals form remains accepted.
+	noEquals := toolCommand{Path: []string{}, Flags: []string{"--runs"}, ValueFlags: []string{"--runs"}, NoEquals: true}
+	testProblem("no_equals accepts separated value", noEquals, []string{"tool", "--runs", "4"}, "")
+	testProblem("no_equals rejects equals form", noEquals, []string{"tool", "--runs=4"}, "tool has no form --runs=")
+	testProblem("no_equals unknown flag", noEquals, []string{"tool", "--other=4"}, "tool has no flag --other")
+	testProblem("equals form without no_equals", toolCommand{Path: []string{}, Flags: []string{"--runs"}, ValueFlags: []string{"--runs"}}, []string{"tool", "--runs=4"}, "")
+
+	// only-after-dashdash admits free arguments after the separator and reports
+	// an ordinary positional word before it. The previous mode remains intact.
+	onlyAfter := toolCommand{Path: []string{}, Rest: "only-after-dashdash", Flags: []string{"--ok"}}
+	testProblem("only-after-dashdash after separator", onlyAfter, []string{"tool", "--", "-x", "item"}, "")
+	testProblem("only-after-dashdash before separator", onlyAfter, []string{"tool", "item"}, "tool takes arguments only after --: item")
+	testProblem("only-after-dashdash flag before separator", onlyAfter, []string{"tool", "--ok", "item"}, "tool takes arguments only after --: item")
+	testProblem("ordinary args without feature", toolCommand{Path: []string{}, Rest: "args"}, []string{"tool", "item"}, "")
+	testProblem("legacy after-dashdash", toolCommand{Path: []string{}, Rest: "after-dashdash"}, []string{"tool", "item", "--", "-x"}, "")
+
+	// With no_dashdash, -- is validated as a registered flag. By default it is
+	// still the separator, after which arguments are free.
+	noDashDash := toolCommand{Path: []string{}, Rest: "none", Flags: []string{"--"}, NoDashDash: true}
+	testProblem("no_dashdash registered separator token", noDashDash, []string{"tool", "--"}, "")
+	testProblem("no_dashdash missing flag", toolCommand{Path: []string{}, Rest: "none", NoDashDash: true}, []string{"tool", "--"}, "tool has no flag --")
+	testProblem("separator without no_dashdash", toolCommand{Path: []string{}, Rest: "args"}, []string{"tool", "--", "-x"}, "")
+
+	// dash_args follows akit's looksLikeFlag rule for dash-prefixed words.
+	dashArgs := toolCommand{Path: []string{}, Rest: "none", DashArgs: true, Flags: []string{"-x", "--long"}}
+	testProblem("dash_args known flag", dashArgs, []string{"tool", "-x"}, "")
+	testProblem("dash_args malformed word is argument", dashArgs, []string{"tool", "-1"}, "tool takes no arguments: -1")
+	testProblem("dash_args malformed list marker", dashArgs, []string{"tool", "- item"}, "tool takes no arguments: - item")
+	testProblem("dash_args three dashes", dashArgs, []string{"tool", "---x"}, "tool takes no arguments: ---x")
+	testProblem("dash_args single dash", dashArgs, []string{"tool", "-"}, "tool takes no arguments: -")
+	testProblem("dash_args two dashes and name", dashArgs, []string{"tool", "--long=value"}, "")
+	testProblem("dash word without dash_args", toolCommand{Path: []string{}, Rest: "none"}, []string{"tool", "-1"}, "tool has no flag -1")
+}
+
+func TestToolUnknownFirstWordDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tool loadedTool
+		want string
+	}{
+		{"root none", loadedTool{config: configuredTool{Name: "busy"}, tasksKnown: true, registry: toolRegistry{Commands: []toolCommand{{Path: []string{}, Rest: "none"}}}}, "busy takes no arguments: now"},
+		{"no tasks", loadedTool{config: configuredTool{Name: "busy"}, tasksKnown: true, registry: toolRegistry{}}, "busy has no command now"},
+		{"has tasks", loadedTool{config: configuredTool{Name: "busy"}, tasksKnown: true, registry: toolRegistry{Tasks: []string{"build"}}}, "busy has no command or task now"},
+		{"task command configured", loadedTool{config: configuredTool{Name: "busy", TaskCommand: []string{"run"}}, tasksKnown: true, registry: toolRegistry{}}, "busy has no command or task now"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.tool.problem([]string{"busy", "now"}); got != tc.want {
+				t.Fatalf("problem %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

@@ -29,6 +29,9 @@ type toolCommand struct {
 	Flags      []string `json:"flags"`
 	ValueFlags []string `json:"value_flags"`
 	Rest       string   `json:"rest"`
+	NoEquals   bool     `json:"no_equals"`
+	NoDashDash bool     `json:"no_dashdash"`
+	DashArgs   bool     `json:"dash_args"`
 }
 type toolRegistry struct {
 	GlobalFlags      []string      `json:"global_flags"`
@@ -570,7 +573,8 @@ func (t loadedTool) globalFlags(words []string) (int, string) {
 	i := 1
 	for i < len(words) {
 		w := words[i]
-		if placeholder(w) || w == "--" {
+		root := t.rootCommand()
+		if placeholder(w) || w == "--" && (root == nil || !root.NoDashDash) {
 			return len(words), ""
 		}
 		if !strings.HasPrefix(w, "-") {
@@ -578,7 +582,10 @@ func (t loadedTool) globalFlags(words []string) (int, string) {
 		}
 		flag := flagName(w)
 		if !slices.Contains(reg.GlobalFlags, flag) {
-			if root := t.rootCommand(); root != nil && slices.Contains(root.Flags, flag) {
+			if root != nil && slices.Contains(root.Flags, flag) {
+				break
+			}
+			if root != nil && root.DashArgs && !looksLikeToolFlag(w) {
 				break
 			}
 			return i, fmt.Sprintf("%s has no flag %s", t.config.Name, flag)
@@ -614,6 +621,12 @@ func (t loadedTool) problem(words []string) string {
 		}
 		if root := t.rootCommand(); root != nil && (root.Rest != "none" || strings.HasPrefix(words[start], "-")) {
 			return t.commandFlags(words, start, root)
+		}
+		if root := t.rootCommand(); root != nil && root.Rest == "none" && !strings.HasPrefix(words[start], "-") {
+			return fmt.Sprintf("%s takes no arguments: %s", t.config.Name, words[start])
+		}
+		if longest == 0 && t.tasksKnown && len(reg.Tasks) == 0 && len(t.config.TaskCommand) == 0 {
+			return fmt.Sprintf("%s has no command %s", t.config.Name, words[start])
 		}
 		if longest == 0 && t.tasksKnown {
 			return fmt.Sprintf("%s has no command or task %s", t.config.Name, words[start])
@@ -696,17 +709,22 @@ func (t loadedTool) commandFlags(words []string, i int, best *toolCommand) strin
 		if placeholder(w) {
 			return ""
 		}
-		if w == "--" {
+		if w == "--" && !best.NoDashDash {
 			if best.Rest != "none" {
 				return ""
 			}
 			i++
 			continue
 		}
-		if strings.HasPrefix(w, "-") {
+		if strings.HasPrefix(w, "-") && (!best.DashArgs || w == "--" || looksLikeToolFlag(w)) {
 			flag := flagName(w)
-			if !slices.Contains(best.Flags, flag) && !slices.Contains(reg.GlobalFlags, flag) {
+			commandFlag := slices.Contains(best.Flags, flag)
+			globalFlag := slices.Contains(reg.GlobalFlags, flag)
+			if !commandFlag && !globalFlag {
 				return fmt.Sprintf("%s has no flag %s", command, flag)
+			}
+			if best.NoEquals && commandFlag && !globalFlag && strings.Contains(w, "=") {
+				return fmt.Sprintf("%s has no form %s=", command, flag)
 			}
 			values := best.ValueFlags
 			if slices.Contains(reg.GlobalValueFlags, flag) {
@@ -715,10 +733,30 @@ func (t loadedTool) commandFlags(words []string, i int, best *toolCommand) strin
 			i = skipFlag(words, i, values)
 			continue
 		}
+		if best.Rest == "only-after-dashdash" {
+			return fmt.Sprintf("%s takes arguments only after --: %s", command, w)
+		}
 		if best.Rest == "none" {
 			return fmt.Sprintf("%s takes no arguments: %s", command, w)
 		}
 		i++
 	}
 	return ""
+}
+
+func looksLikeToolFlag(word string) bool {
+	dashes := len(word) - len(strings.TrimLeft(word, "-"))
+	if dashes < 1 || dashes > 2 {
+		return false
+	}
+	name, _, _ := strings.Cut(word[dashes:], "=")
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
