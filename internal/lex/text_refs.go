@@ -918,10 +918,10 @@ func (s *refScanner) numbering() {
 	s.list()
 }
 
-// stepAvailable reports whether step exists where the reference points. A file
-// named right after the step number ("шаг 5 в `x.md`", "из", "в файле") is the
-// step's place unless it has no steps at all (then it is the step's output); a
-// file further in the sentence is not.
+// stepAvailable reports whether step exists where the reference may point. A
+// file named right after the step number ("шаг 5 в `x.md`", "из", "в файле") is
+// one more place to look: the step may also be the current file's, and the file
+// its output.
 func (s *refScanner) stepAvailable(step string, after int) bool {
 	step = strings.ToLower(step)
 	if match := stepFileRef.FindStringSubmatch(s.line[after:]); match != nil {
@@ -931,11 +931,8 @@ func (s *refScanner) stepAvailable(step string, after int) bool {
 		}
 		target := s.resolve(name)
 		body, ok := s.corpus[target]
-		if !ok || s.external[target] {
+		if !ok || s.external[target] || stepExistsInBody(string(body), step) {
 			return true
-		}
-		if bodyHasSteps(string(body)) {
-			return stepExistsInBody(string(body), step)
 		}
 	}
 	if match := skillNameRef.FindStringSubmatch(s.line); match != nil {
@@ -958,16 +955,6 @@ func (s *refScanner) stepAvailable(step string, after int) bool {
 func stepExistsAnywhere(corpus textCorpus, step string, excluded map[string]bool) bool {
 	for path, body := range corpus {
 		if !excluded[path] && stepExistsInBody(string(body), step) {
-			return true
-		}
-	}
-	return false
-}
-
-func bodyHasSteps(body string) bool {
-	for line := range strings.SplitSeq(body, "\n") {
-		trim := strings.TrimSpace(line)
-		if listItem.MatchString(line) || numberedHeading.MatchString(trim) || stepHeading.MatchString(trim) {
 			return true
 		}
 	}

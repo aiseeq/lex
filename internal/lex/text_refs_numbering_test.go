@@ -139,17 +139,30 @@ func TestNumberingNamedFileControlsStepLookup(t *testing.T) {
 		}
 	})
 
-	t.Run("present file is exclusive", func(t *testing.T) {
+	t.Run("step absent in the named file and the own file", func(t *testing.T) {
 		dir := t.TempDir()
 		skill := filepath.Join(dir, "SKILL.md")
 		commands := filepath.Join(dir, "commands.md")
 		corpus := textCorpus{
-			skill:    []byte("1. a\n2. b\n3. c\n4. d\n5. e\nШаг 5 в `commands.md`.\n"),
+			skill:    []byte("1. a\n2. b\nШаг 5 в `commands.md`.\n"),
 			commands: []byte("1. a\n2. b\n3. c\n"),
 		}
 		findings := numberingFindingsFromCorpus(corpus, skill)
 		if !hasNumberingFinding(findings, "нет шага 5") {
-			t.Fatalf("при наличии commands.md нужно проверять только его: %v", findings)
+			t.Fatalf("шага нет ни в commands.md, ни в своём файле: %v", findings)
+		}
+	})
+
+	t.Run("own file step with an output file named after it", func(t *testing.T) {
+		dir := t.TempDir()
+		skill := filepath.Join(dir, "SKILL.md")
+		report := filepath.Join(dir, "report.md")
+		corpus := textCorpus{
+			skill:  []byte("1. a\n2. b\n3. c\nНа шаге 3 в `report.md` появится раздел.\n"),
+			report: []byte("1. Итог\n"),
+		}
+		if findings := numberingFindingsFromCorpus(corpus, skill); len(findings) > 0 {
+			t.Fatalf("шаг своего файла с выходным файлом после него: %v", findings)
 		}
 	})
 }
