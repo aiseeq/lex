@@ -39,8 +39,22 @@ func TestRuleFieldWarningsEmptyGoalOnlyForRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(goalOnlyWarnings) != 0 {
-		t.Fatalf("цель alone made a fragment a rule: %v", goalOnlyWarnings)
+	// цель alone keeps a fragment a rule (check-rule-basis, 12.11): its other fields are reported, its цель is not.
+	if countWarningsContaining(goalOnlyWarnings, goalOnly+": rule has empty цель") != 0 ||
+		countWarningsContaining(goalOnlyWarnings, goalOnly+": rule has empty основание") != 1 ||
+		countWarningsContaining(goalOnlyWarnings, goalOnly+": rule has empty снять_когда") != 1 {
+		t.Fatalf("цель-only rule warnings = %v", goalOnlyWarnings)
+	}
+}
+
+func TestRuleTypedListItemIsNotUnmarked(t *testing.T) {
+	codex, _, rule := ruleBasisFixture(t, "- Правило пунктом.\n", "цель: ", "основание: ", "снять_когда: ")
+	warnings, err := CheckWithWarnings(codex, CheckOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countWarningsContaining(warnings, rule+": rule has empty цель") != 1 || countWarningsContaining(warnings, rule+itemHasNoFieldsWarning) != 0 {
+		t.Fatalf("typed rule list item warnings = %v", warnings)
 	}
 }
 

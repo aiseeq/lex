@@ -466,8 +466,11 @@ func TestRuleBasisPurposeOnly(t *testing.T) {
 	}
 	mustWrite(t, frag, bytes.Replace(raw, []byte("тип: правило\n"), nil, 1))
 	warnings, err := CheckWithWarnings(codex, CheckOptions{})
-	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 0, без условия снятия: 0; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 0; пунктов без полей: 0" || len(warnings) != 0 {
+	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 1, без условия снятия: 1; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 0; пунктов без полей: 0" || len(warnings) != 2 {
 		t.Fatalf("warnings = %v, err = %v", warnings, err)
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), "основание") || !strings.Contains(strings.Join(warnings, "\n"), "снять_когда") {
+		t.Fatalf("warnings do not name both empty fields: %v", warnings)
 	}
 }
 

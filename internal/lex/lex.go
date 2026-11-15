@@ -5132,7 +5132,7 @@ func fragmentKindField(line string) (string, bool) {
 func ruleFieldWarnings(path string, raw []byte) []string {
 	values := fragmentHeaderValues(raw)
 	isRule := len(values["тип"]) > 0 && values["тип"][len(values["тип"])-1] == "правило"
-	for _, field := range []string{"основание", "снять_когда"} {
+	for _, field := range []string{"цель", "основание", "снять_когда"} {
 		if len(values[field]) > 0 && values[field][len(values[field])-1] != "" {
 			isRule = true
 		}
@@ -5194,7 +5194,7 @@ func RuleWarningSummary(warnings []string) string {
 
 func fragmentHasNoFields(raw, body []byte) bool {
 	values := fragmentHeaderValues(raw)
-	for _, field := range []string{"цель", "основание", "снять_когда", "вид"} {
+	for _, field := range []string{"цель", "основание", "снять_когда", "тип", "вид"} {
 		if nonemptyHeaderValue(values, field) {
 			return false
 		}
