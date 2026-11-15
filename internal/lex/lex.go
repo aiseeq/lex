@@ -2023,8 +2023,8 @@ func splitPurposeHunks(spans []purposeSpan, owners map[int]string, oldLines, new
 	return result
 }
 
-// splitHunkAtUnchangedLines keeps an unchanged purpose line as a boundary when
-// another edit in the same diff hunk sits on either side of it.
+// splitHunkAtUnchangedLines cuts a diff hunk at every line it leaves unchanged,
+// so an unchanged purpose line stays a boundary between edits on either side.
 func splitHunkAtUnchangedLines(hunk lineHunk, oldLines, newLines [][]byte) []lineHunk {
 	oldPart := oldLines[hunk.oldStart:hunk.oldEnd]
 	newPart := newLines[hunk.newStart:hunk.newEnd]
