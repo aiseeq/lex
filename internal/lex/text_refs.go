@@ -53,6 +53,7 @@ var (
 	markdownRef      = regexp.MustCompile(`\[[^\]]+\]\(([^)]+\.md)(?:#([^)]+))?\)`)
 	listItem         = regexp.MustCompile(`^(\s*)([0-9]{1,6})([a-zа-я]?)[.)]\s+`)
 	numberedHeading  = regexp.MustCompile(`^#{2,6}\s+([0-9]{1,6})([a-zа-я]?)\.\s+`)
+	stepHeading      = regexp.MustCompile(`(?i)^#{2,6}\s+шаг\s+([0-9]+[a-z]?)\b`)
 	stepRef          = regexp.MustCompile(`(?i)шаг[а-я]*\s+([0-9]+[a-z]?(?:\s*[–—-]\s*[0-9]+[a-z]?)?(?:\s+и\s+[0-9]+[a-z]?)*)`)
 	stepNumber       = regexp.MustCompile(`([0-9]+[a-z]?)(?:\s*[–—-]\s*([0-9]+[a-z]?))?`)
 	skillNameRef     = regexp.MustCompile("(?i)скилл[а-я]*\\s+`([a-z0-9-]+)`")
@@ -489,18 +490,19 @@ func loadTextCorpus(codex string, o CheckOptions) (textCorpus, textCorpus, strin
 }
 
 type refScanner struct {
-	corpus         textCorpus
-	external       map[string]bool
-	slugs          map[string]bool
-	skills         map[string]bool
-	hasJournal     bool
-	path           string
-	line           string
-	number         int
-	found          []textRefFinding
-	last, headings map[int]int
-	steps          map[string]bool
-	realKeys       map[string]string
+	corpus          textCorpus
+	external        map[string]bool
+	slugs           map[string]bool
+	skills          map[string]bool
+	hasJournal      bool
+	path            string
+	line            string
+	number          int
+	found           []textRefFinding
+	last, headings  map[int]int
+	steps           map[string]bool
+	realKeys        map[string]string
+	listInterrupted bool
 }
 
 // resolve is resolveRefTarget that also finds a corpus file reached through a
@@ -833,22 +835,18 @@ func (s *refScanner) heading(trim string) {
 	s.headings[level] = n
 }
 
-func (s *refScanner) list(trim string) {
+func (s *refScanner) list() {
 	match := listItem.FindStringSubmatch(s.line)
 	if match == nil {
-		if trim != "" && !strings.HasPrefix(s.line, " ") {
+		trim := strings.TrimSpace(s.line)
+		if trim == "" {
+			return
+		}
+		if strings.HasPrefix(trim, "#") {
 			clear(s.last)
 		}
+		s.listInterrupted = true
 		return
-	}
-	if filepath.Base(s.path) != "SKILL.md" {
-		if sibling, ok := s.corpus[filepath.Join(filepath.Dir(s.path), "SKILL.md")]; ok {
-			for line := range strings.SplitSeq(string(sibling), "\n") {
-				if line == s.line {
-					return
-				}
-			}
-		}
 	}
 	indent := len(match[1])
 	n, err := strconv.Atoi(match[2])
@@ -860,11 +858,12 @@ func (s *refScanner) list(trim string) {
 		return
 	}
 	expected := s.last[indent] + 1
-	if !(expected == 1 && n == 0) && n != expected {
+	if !(expected == 1 && n == 0) && n != expected && !(s.listInterrupted && n == 1) {
 		s.add(4, fmt.Sprintf("ожидался пункт %d, найден %d", expected, n))
 	}
 	s.last[indent] = n
 	dropDeeper(s.last, indent)
+	s.listInterrupted = false
 }
 
 func (s *refScanner) numbering() {
@@ -899,10 +898,16 @@ func (s *refScanner) numbering() {
 	}
 	trim := strings.TrimSpace(s.line)
 	s.heading(trim)
-	s.list(trim)
+	s.list()
 }
 
 func (s *refScanner) stepAvailable(step string) bool {
+	for _, match := range fileRef.FindAllStringSubmatch(s.line, -1) {
+		target := s.resolve(match[1])
+		if body, ok := s.corpus[target]; ok && !s.external[target] && stepExistsInBody(string(body), step) {
+			return true
+		}
+	}
 	if match := skillNameRef.FindStringSubmatch(s.line); match != nil {
 		target := filepath.Join(filepath.Dir(filepath.Dir(s.path)), match[1], "SKILL.md")
 		body, ok := s.corpus[target]
@@ -937,6 +942,9 @@ func stepExistsInBody(body, step string) bool {
 		if heading := numberedHeading.FindStringSubmatch(strings.TrimSpace(line)); heading != nil && heading[1]+heading[2] == step {
 			return true
 		}
+		if heading := stepHeading.FindStringSubmatch(strings.TrimSpace(line)); heading != nil && heading[1] == step {
+			return true
+		}
 	}
 	return false
 }
@@ -944,6 +952,7 @@ func stepExistsInBody(body, step string) bool {
 func (s *refScanner) scan(path string) {
 	s.path = path
 	s.last, s.headings, s.steps = map[int]int{}, map[int]int{}, map[string]bool{}
+	s.listInterrupted = false
 	lines := strings.Split(string(s.corpus[path]), "\n")
 	stepLines := lines
 	if sibling, ok := s.corpus[filepath.Join(filepath.Dir(path), "SKILL.md")]; ok && filepath.Base(path) != "SKILL.md" {
@@ -956,15 +965,22 @@ func (s *refScanner) scan(path string) {
 		if m := numberedHeading.FindStringSubmatch(line); m != nil {
 			s.steps[m[1]+m[2]] = true
 		}
+		if m := stepHeading.FindStringSubmatch(line); m != nil {
+			s.steps[m[1]] = true
+		}
 	}
 	fence := false
 	for i, line := range lines {
 		trim := strings.TrimSpace(line)
 		if strings.HasPrefix(trim, "```") || strings.HasPrefix(trim, "~~~") {
 			fence = !fence
+			s.listInterrupted = true
 			continue
 		}
 		if fence {
+			if trim != "" {
+				s.listInterrupted = true
+			}
 			continue
 		}
 		s.number, s.line = i+1, line
