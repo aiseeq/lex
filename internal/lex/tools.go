@@ -578,6 +578,9 @@ func (t loadedTool) globalFlags(words []string) (int, string) {
 		}
 		flag := flagName(w)
 		if !slices.Contains(reg.GlobalFlags, flag) {
+			if root := t.rootCommand(); root != nil && slices.Contains(root.Flags, flag) {
+				break
+			}
 			return i, fmt.Sprintf("%s has no flag %s", t.config.Name, flag)
 		}
 		i = skipFlag(words, i, reg.GlobalValueFlags)
@@ -609,12 +612,24 @@ func (t loadedTool) problem(words []string) string {
 			}
 			return ""
 		}
+		if root := t.rootCommand(); root != nil && (root.Rest != "none" || strings.HasPrefix(words[start], "-")) {
+			return t.commandFlags(words, start, root)
+		}
 		if longest == 0 && t.tasksKnown {
 			return fmt.Sprintf("%s has no command or task %s", t.config.Name, words[start])
 		}
 		return ""
 	}
 	return t.commandFlags(words, i+len(best.Path), best)
+}
+
+func (t loadedTool) rootCommand() *toolCommand {
+	for i := range t.registry.Commands {
+		if len(t.registry.Commands[i].Path) == 0 {
+			return &t.registry.Commands[i]
+		}
+	}
+	return nil
 }
 
 func (t loadedTool) partialPathProblem(words []string, start int, best *toolCommand, longest int) (bool, string) {
@@ -672,7 +687,10 @@ func (t loadedTool) hasLongerPath(prefix []string) bool {
 
 func (t loadedTool) commandFlags(words []string, i int, best *toolCommand) string {
 	reg := t.registry
-	command := t.config.Name + " " + strings.Join(best.Path, " ")
+	command := t.config.Name
+	if len(best.Path) > 0 {
+		command += " " + strings.Join(best.Path, " ")
+	}
 	for i < len(words) {
 		w := words[i]
 		if placeholder(w) {

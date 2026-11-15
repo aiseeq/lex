@@ -17,7 +17,7 @@ For the command summary and agent editing guide, run `lex guide`.
 
 CLI exit codes: `0` for success, `1` for check refusals and other operational errors, and `2` for invalid usage (including unknown flags and incompatible options).
 
-Optional `<codex>/tools.json` configures `lex check` to validate tool commands and flags in fragment code against each tool’s JSON help registry; without it the rule is disabled. An optional `task_command` path (for example, `["run"]`) selects the registry command whose flags apply after a task name.
+Optional `<codex>/tools.json` configures `lex check` to validate tool commands and flags in fragment code against each tool’s JSON help registry; without it the rule is disabled. An optional `task_command` path (for example, `["run"]`) selects the registry command whose flags apply after a task name. A command entry with an empty `path` describes the tool’s root command; its flags and arguments apply immediately after the tool name, unless a registered subcommand matches first.
 
 To print nonempty fragment purposes beneath rules, create `<codex>/purpose.json` containing `{"print": true}` and run `lex build --codex DIR`. The default is off. To roll back, set `print` to `false` or remove the file, then immediately run `lex build --codex DIR`. The derived line is `  Зачем: <цель>`; its indentation keeps it inside a list item. Headings, code blocks and front matter do not print a purpose and are reported by `lex check`. A body containing a line with this marker is rejected when printing is on. `lex check --staged` reads this setting from the index and checks affected outputs when it changes.
 
