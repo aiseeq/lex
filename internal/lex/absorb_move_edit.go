@@ -13,10 +13,14 @@ type absorbLineOwner struct {
 	id, goal string
 	count    int
 	head     bool // the first nonblank line of its fragment: the rule itself, not a continuation
+	// Every occurrence in order: a line that occurs more than once names no single rule,
+	// but its occurrences can still be matched to the old ones in order.
+	ids, goals []string
+	heads      []bool
 }
 
-// collectAbsorbLineOwners tracks only unambiguous nonblank lines. Lines that
-// occur more than once cannot establish which rule they came from.
+// collectAbsorbLineOwners records the owner of every nonblank line; id, goal and head
+// name a single rule only when the line occurs once.
 func collectAbsorbLineOwners(codex string, parts []string, overrides map[string][]byte) (map[string]absorbLineOwner, error) {
 	owners := make(map[string]absorbLineOwner)
 	for _, id := range parts {
@@ -41,6 +45,7 @@ func collectAbsorbLineOwners(codex string, parts []string, overrides map[string]
 			}
 			owner := owners[text]
 			owner.id, owner.goal, owner.count, owner.head = id, purposeValue(raw), owner.count+1, head
+			owner.ids, owner.goals, owner.heads = append(owner.ids, id), append(owner.goals, owner.goal), append(owner.heads, head)
 			owners[text] = owner
 			head = false
 		}
@@ -75,8 +80,33 @@ func checkAbsorbPurposeOwners(codex string, original manifest, plan absorbPlan) 
 		if ok && old.head && old.count == 1 && next.count == 1 && old.goal != next.goal {
 			return fmt.Errorf("%s: cannot safely preserve the purpose of %q while moving and editing rules; first move the rule and run lex absorb, then make the other edit and run lex absorb again", old.id, line)
 		}
+		// A rule line that occurs several times keeps every goal its rules had.
+		if ok && old.count > 1 && old.count == next.count {
+			if lost, id := lostHeadGoal(old, next); lost {
+				return fmt.Errorf("%s: cannot safely preserve the purpose of %q while moving and editing rules; first move the rule and run lex absorb, then make the other edit and run lex absorb again", id, line)
+			}
+		}
 	}
 	return nil
+}
+
+// lostHeadGoal reports a goal of a rule starting with a repeated line that no
+// occurrence of that line holds afterwards.
+func lostHeadGoal(old, next absorbLineOwner) (bool, string) {
+	left := map[string]int{}
+	for _, goal := range next.goals {
+		left[goal]++
+	}
+	for k, goal := range old.goals {
+		if !old.heads[k] || goal == "" {
+			continue
+		}
+		if left[goal] == 0 {
+			return true, old.ids[k]
+		}
+		left[goal]--
+	}
+	return false, ""
 }
 
 // repairAbsorbPurposeOwners assigns complete unchanged units to their original
@@ -114,6 +144,7 @@ func assignUnchangedUnits(units [][]byte, old map[string]absorbLineOwner) ([][]b
 			assigned[i] = owner.id
 		}
 	}
+	assignRepeatedUnits(units, assigned, old)
 	for i := 1; i < len(units); {
 		if assigned[i] != "" && assigned[i] == assigned[i-1] {
 			units[i-1] = append(units[i-1], units[i]...)
@@ -130,6 +161,59 @@ func assignUnchangedUnits(units [][]byte, old map[string]absorbLineOwner) ([][]b
 		used[id] = true
 	}
 	return units, assigned, used, true
+}
+
+// assignRepeatedUnits matches the occurrences of a repeated line to its old
+// occurrences in order. The match is used only when the line occurs as often as
+// before and every occurrence in an already assigned unit agrees with it; a unit
+// takes it only when all its repeated lines name the same unused fragment.
+func assignRepeatedUnits(units [][]byte, assigned []string, old map[string]absorbLineOwner) {
+	type occurrence struct{ unit int }
+	seen := map[string][]occurrence{}
+	for i, unit := range units {
+		for _, line := range absorbLines(unit) {
+			text := strings.TrimRight(string(line), "\r\n")
+			if old[text].count > 1 {
+				seen[text] = append(seen[text], occurrence{i})
+			}
+		}
+	}
+	candidate := make([]string, len(units))
+	conflict := make([]bool, len(units))
+	for text, occurrences := range seen {
+		owner := old[text]
+		if len(occurrences) != owner.count {
+			continue
+		}
+		agrees := true
+		for k, at := range occurrences {
+			if assigned[at.unit] != "" && assigned[at.unit] != owner.ids[k] {
+				agrees = false
+			}
+		}
+		if !agrees {
+			continue
+		}
+		for k, at := range occurrences {
+			if assigned[at.unit] != "" {
+				continue
+			}
+			if candidate[at.unit] != "" && candidate[at.unit] != owner.ids[k] {
+				conflict[at.unit] = true
+			}
+			candidate[at.unit] = owner.ids[k]
+		}
+	}
+	taken := map[string]bool{}
+	for _, id := range assigned {
+		taken[id] = true
+	}
+	for i, id := range candidate {
+		if id != "" && !conflict[i] && !taken[id] {
+			assigned[i] = id
+			taken[id] = true
+		}
+	}
 }
 
 // An extension retains a complete old line. A rewrite without such evidence
@@ -155,6 +239,21 @@ func assignEditedUnits(units [][]byte, assigned []string, used map[string]bool, 
 		if candidate != "" {
 			assigned[i] = candidate
 			used[candidate] = true
+		}
+	}
+	// A unit left unassigned that still holds a repeated line of an unused fragment
+	// with a goal is that fragment's text, not a new rule.
+	for i, unit := range units {
+		if assigned[i] != "" {
+			continue
+		}
+		for _, line := range absorbLines(unit) {
+			owner := old[strings.TrimRight(string(line), "\r\n")]
+			for k := 0; owner.count > 1 && k < len(owner.ids); k++ {
+				if owner.goals[k] != "" && !used[owner.ids[k]] {
+					return false
+				}
+			}
 		}
 	}
 	return unassignedUnitsAreNew(assigned, used, old, parts)

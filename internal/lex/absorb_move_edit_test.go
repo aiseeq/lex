@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -187,4 +188,64 @@ func TestAbsorbPrintedPurposeFollowsItsGoalLine(t *testing.T) {
 		}
 	}
 	assertAbsorbedOutputEquals(t, codex, out, []byte(edited))
+}
+
+// Rules whose line occurs more than once keep their goals: their occurrences are matched to
+// the old ones in order, or absorb refuses without changing the codex.
+func TestAbsorbMoveKeepsGoalsOfRepeatedRules(t *testing.T) {
+	for _, tc := range []struct {
+		name, input, edited string
+		goals               []string
+		keep                map[string][]string // line -> goals of the fragments holding it
+	}{
+		{"move a rule above repeated ones and edit a neighbour",
+			"# Guide\n\n## Tasks\n- Do it\n- Beta rule\n- Do it\n- Gamma rule\n",
+			"# Guide\n\n## Tasks\n- Gamma rule\n- Do it\n- Beta rule!\n- Do it\n",
+			[]string{"", "", "ga", "gb", "gc", "gd"},
+			map[string][]string{"- Do it": {"ga", "gc"}, "- Gamma rule": {"gd"}}},
+		{"move a rule past a repeated one",
+			"# Guide\n\n## Tasks\n- same rule\n- other rule\n- same rule\n",
+			"# Guide\n\n## Tasks\n- same rule\n- same rule\n- other rule\n",
+			[]string{"", "", "ga", "gc", "gb"},
+			map[string][]string{"- same rule": {"ga", "gb"}, "- other rule": {"gc"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			codex, out, mp, m := purposeFixture(t, tc.input)
+			if len(m.parts) != len(tc.goals) {
+				t.Fatalf("parts = %v", m.parts)
+			}
+			setPurposeGoals(t, codex, mp, m, tc.goals...)
+			if err := Build(codex, false); err != nil {
+				t.Fatal(err)
+			}
+			frags := snapshotMoveEditFrags(t, codex)
+			mustWrite(t, out, []byte(tc.edited))
+			if err := Absorb(codex, out, AbsorbOptions{}); err != nil {
+				if snapshotMoveEditFrags(t, codex) != frags {
+					t.Fatalf("refusal (%v) changed the codex", err)
+				}
+				return
+			}
+			got := map[string][]string{}
+			for _, id := range mustReadManifest(t, mp).parts {
+				raw, err := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(id)+".md"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				for line := range tc.keep {
+					if strings.Contains(string(readFragmentBody(t, codex, id)), line+"\n") {
+						got[line] = append(got[line], purposeValue(raw))
+					}
+				}
+			}
+			for line, want := range tc.keep {
+				g := append([]string(nil), got[line]...)
+				slices.Sort(g)
+				if !slices.Equal(g, want) {
+					t.Fatalf("%q goals = %v, want %v", line, got[line], want)
+				}
+			}
+			assertAbsorbedOutputEquals(t, codex, out, []byte(tc.edited))
+		})
+	}
 }
