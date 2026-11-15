@@ -96,7 +96,8 @@ func checkAbsorbPurposeOwners(codex string, original manifest, plan absorbPlan) 
 func checkAbsorbLostPurpose(codex string, original manifest, plan absorbPlan) error {
 	// A new fragment and a lost goal-bearing fragment can represent either an
 	// edited move or a deletion and an unrelated insertion. Without printed
-	// goals the plan cannot distinguish them safely.
+	// goals the plan cannot distinguish them safely. A fragment that another
+	// manifest still uses keeps its file and its goal, so it is not lost.
 	added := false
 	for _, id := range plan.manifest.parts {
 		if !slices.Contains(original.parts, id) {
@@ -110,6 +111,9 @@ func checkAbsorbLostPurpose(codex string, original manifest, plan absorbPlan) er
 				continue
 			}
 			path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
+			if !slices.Contains(plan.removePaths, path) {
+				continue
+			}
 			raw, err := os.ReadFile(path)
 			if err != nil {
 				return fmt.Errorf("%s: read fragment for purpose check: %w", path, err)

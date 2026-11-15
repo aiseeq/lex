@@ -335,3 +335,42 @@ func TestAbsorbMoveEditDoesNotReplaceGoalFragment(t *testing.T) {
 		})
 	}
 }
+
+// A fragment that another manifest still uses keeps its file and its goal: dropping it from
+// one file while adding a rule there is not a lost goal and is not refused.
+func TestAbsorbSharedFragmentLeavingOneFileIsNotLost(t *testing.T) {
+	for _, tc := range []struct{ name, edited string }{
+		{"delete shared rule and add one", "# Guide\n\n## Tasks\n- Beta rule\n- New rule\n"},
+		{"move and edit shared rule", "# Guide\n\n## Tasks\n- Beta rule\n- Alpha rule!\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := "# Guide\n\n## Tasks\n- Alpha rule\n- Beta rule\n"
+			codex, out, mp, m := purposeFixture(t, input)
+			setPurposeGoals(t, codex, mp, m, "", "", "ga", "gb")
+			data, err := os.ReadFile(mp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			other := filepath.Join(filepath.Dir(out), "other.md")
+			if !bytes.Contains(data, []byte(out)) {
+				t.Fatalf("manifest does not name its output %s: %s", out, data)
+			}
+			mustWrite(t, filepath.Join(codex, "manifest", "other.md.yaml"), bytes.ReplaceAll(data, []byte(out), []byte(other)))
+			if err := Build(codex, false); err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, out, []byte(tc.edited))
+			if err := Absorb(codex, out, AbsorbOptions{}); err != nil {
+				t.Fatalf("Absorb: %v", err)
+			}
+			got, err := os.ReadFile(other)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != input && !strings.HasSuffix(string(got), input[len("# Guide\n"):]) {
+				t.Fatalf("other file changed: %q", got)
+			}
+			assertAbsorbedOutputEquals(t, codex, out, []byte(tc.edited))
+		})
+	}
+}
