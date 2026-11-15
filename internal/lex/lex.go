@@ -1717,6 +1717,19 @@ func absorbEditedFragment(codex, selected string, m manifest, built, actual, fil
 	if err != nil {
 		return err
 	}
+	if err := checkAbsorbPurposeOwners(codex, m, plan); err != nil {
+		if purpose != nil {
+			return err
+		}
+		repaired, ok, repairErr := repairAbsorbPurposeOwners(codex, selected, m, actual, fileBytes, catalog)
+		if repairErr != nil {
+			return repairErr
+		}
+		if !ok {
+			return err
+		}
+		plan = repaired
+	}
 	if err := verifyAbsorbPlan(codex, plan, actual, options.DraftDir, manifestKey(selected), m.out, fileBytes); err != nil {
 		return err
 	}
