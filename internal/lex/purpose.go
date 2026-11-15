@@ -446,14 +446,19 @@ func (p purposeLayout) refuseRemovedGoals(oldLines, newLines [][]byte, failed []
 			quoted = append(quoted, fmt.Sprintf("%q", strings.TrimRight(string(oldLines[index]), "\r\n")))
 		}
 	}
-	apart := ""
 	if hi := failedHunk[first]; hi >= 0 && purposeSpanCovered(p.owners, oldLines, p.spanAt(first), hunks[hi].oldStart, hunks[hi].oldEnd) {
-		apart = "; if the rule was deleted on purpose, delete it in one pass and make the edit next to it in another"
+		// The rule falls into the same change as an edit next to it: deleting the rule
+		// together with its goal line would not resolve this refusal, so it is not offered.
+		lines := "the line " + quoted[0]
+		if len(quoted) > 1 {
+			lines = "each of the lines " + strings.Join(quoted, ", ")
+		}
+		return fmt.Errorf("%s: missing or edited цель; put %s back under its rule; if you deleted the rule together with it on purpose, delete it in one pass and make the edit next to it in another", id, lines)
 	}
 	if len(quoted) == 1 {
-		return fmt.Errorf("%s: missing or edited цель; put the line %s back under its rule or delete the rule together with it%s", id, quoted[0], apart)
+		return fmt.Errorf("%s: missing or edited цель; put the line %s back under its rule or delete the rule together with it", id, quoted[0])
 	}
-	return fmt.Errorf("%s: missing or edited цель; put each of the lines %s back under its rule or delete that rule together with it%s", id, strings.Join(quoted, ", "), apart)
+	return fmt.Errorf("%s: missing or edited цель; put each of the lines %s back under its rule or delete that rule together with it", id, strings.Join(quoted, ", "))
 }
 
 func purposeMatchesWithCandidate(matches [][2]int, oldIndex, newIndex int) ([][2]int, map[int]int) {

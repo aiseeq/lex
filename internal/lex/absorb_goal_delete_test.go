@@ -323,3 +323,19 @@ func TestAbsorbPurposeRefusalForKeptRuleDoesNotAdviseTwoPasses(t *testing.T) {
 		t.Fatalf("refusal for a kept rule = %v; want the line named without the advice for a deleted rule", err)
 	}
 }
+
+func TestAbsorbTwoPassAdviceDropsAdviceAlreadyFollowed(t *testing.T) {
+	codex, out, _, _ := goalDeleteFixture(t, "# Alpha\n## Beta\n- rule one text\n- rule two text\n", []string{"", "", "reason one", "reason two"})
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, out, bytes.Replace(data, []byte("# Alpha\n## Beta\n- rule one text\n  Зачем: reason one\n"), []byte("# Gamma\n"), 1))
+	err = Absorb(codex, out, AbsorbOptions{})
+	if err == nil {
+		t.Fatal("Absorb accepted a deleted rule with an edit next to it")
+	}
+	if msg := err.Error(); strings.Contains(msg, "delete the rule together with it") || !strings.Contains(msg, "in one pass") {
+		t.Fatalf("refusal = %q; want only the two-pass advice: the rule and its line were already deleted together", msg)
+	}
+}
