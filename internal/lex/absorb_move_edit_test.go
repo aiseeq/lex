@@ -117,7 +117,7 @@ func TestAbsorbMoveWithNeighborDeletion(t *testing.T) {
 	assertAbsorbedOutputEquals(t, codex, out, want)
 }
 
-func TestAbsorbMoveSplitRuleKeepsPurpose(t *testing.T) {
+func TestAbsorbMoveSplitRuleKeepsPurposeOnTheRuleLine(t *testing.T) {
 	input := "# Guide\n\n## Tasks\n- rule one text\n  more about one\n- rule two text\n  more about two\n- rule three text\n  more about three\n- rule four text\n  more about four\n\nClosing words.\n"
 	codex, out, mp, m := purposeFixture(t, input)
 	goals := make([]string, len(m.parts))
@@ -136,7 +136,10 @@ func TestAbsorbMoveSplitRuleKeepsPurpose(t *testing.T) {
 		t.Fatal(err)
 	}
 	updated := mustReadManifest(t, mp)
-	for _, line := range []string{"- rule two text", "  more about two"} {
+	// The rule line keeps its goal; the continuation split off by a blank line is a new
+	// fragment without one, and no fragment carries a copy of another's goal.
+	for _, tc := range []struct{ line, goal string }{{"- rule two text", "reason two"}, {"  more about two", ""}} {
+		line := tc.line
 		found := false
 		for _, id := range updated.parts {
 			if strings.Contains(string(readFragmentBody(t, codex, id)), line) {
@@ -144,7 +147,7 @@ func TestAbsorbMoveSplitRuleKeepsPurpose(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if got := purposeValue(raw); got != "reason two" {
+				if got := purposeValue(raw); got != tc.goal {
 					t.Fatalf("%q goal = %q", line, got)
 				}
 				found = true
@@ -157,22 +160,31 @@ func TestAbsorbMoveSplitRuleKeepsPurpose(t *testing.T) {
 	assertAbsorbedOutputEquals(t, codex, out, []byte(edited))
 }
 
-func TestAbsorbRejectsMovedPrintedPurposeBesideInsertedRule(t *testing.T) {
-	codex, out, _, _ := moveFixture(t, true, false)
-	before, err := snapshotCodexFiles(codex)
-	if err != nil {
-		t.Fatal(err)
+// With printed goals the goal line names its fragment: the fragment of "reason third"
+// follows that line under the inserted rule, and no fragment takes another's goal.
+func TestAbsorbPrintedPurposeFollowsItsGoalLine(t *testing.T) {
+	codex, out, mp, m := moveFixture(t, true, false)
+	goals := map[string]string{}
+	for _, id := range m.parts {
+		raw, err := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(id)+".md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		goals[id] = purposeValue(raw)
 	}
 	edited := "- first\n  Зачем: reason first\n\n- third\n- second\n  Зачем: reason second\n\n- added\n  Зачем: reason third\n"
 	mustWrite(t, out, []byte(edited))
-	if err := Absorb(codex, out, AbsorbOptions{}); err == nil {
-		t.Fatal("accepted a purpose moved away from its rule")
+	if err := Absorb(codex, out, AbsorbOptions{}); err != nil {
+		t.Fatalf("Absorb: %v", err)
 	}
-	after, err := snapshotCodexFiles(codex)
-	if err != nil {
-		t.Fatal(err)
+	for _, id := range mustReadManifest(t, mp).parts {
+		raw, err := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(id)+".md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if goal, had := purposeValue(raw), goals[id]; goal != "" && goal != had {
+			t.Fatalf("fragment %s took goal %q, had %q", id, goal, had)
+		}
 	}
-	if changed := changedCodexFiles(before, after); len(changed) != 0 {
-		t.Fatalf("refusal changed codex: %v", changed)
-	}
+	assertAbsorbedOutputEquals(t, codex, out, []byte(edited))
 }

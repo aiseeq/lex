@@ -12,6 +12,7 @@ import (
 type absorbLineOwner struct {
 	id, goal string
 	count    int
+	head     bool // the first nonblank line of its fragment: the rule itself, not a continuation
 }
 
 // collectAbsorbLineOwners tracks only unambiguous nonblank lines. Lines that
@@ -32,14 +33,16 @@ func collectAbsorbLineOwners(codex string, parts []string, overrides map[string]
 		if err != nil {
 			return nil, err
 		}
+		head := true
 		for _, line := range absorbLines(body) {
 			text := strings.TrimRight(string(line), "\r\n")
 			if strings.TrimSpace(text) == "" {
 				continue
 			}
 			owner := owners[text]
-			owner.id, owner.goal, owner.count = id, purposeValue(raw), owner.count+1
+			owner.id, owner.goal, owner.count, owner.head = id, purposeValue(raw), owner.count+1, head
 			owners[text] = owner
+			head = false
 		}
 	}
 	return owners, nil
@@ -67,7 +70,9 @@ func checkAbsorbPurposeOwners(codex string, original manifest, plan absorbPlan) 
 	}
 	for line, old := range before {
 		next, ok := after[line]
-		if ok && old.count == 1 && next.count == 1 && old.goal != next.goal {
+		// A rule line keeps its goal; a continuation split off into a fragment of its
+		// own starts without one, as a split does elsewhere.
+		if ok && old.head && old.count == 1 && next.count == 1 && old.goal != next.goal {
 			return fmt.Errorf("%s: cannot safely preserve the purpose of %q while moving and editing rules; first move the rule and run lex absorb, then make the other edit and run lex absorb again", old.id, line)
 		}
 	}
@@ -237,7 +242,6 @@ func buildRepairedAbsorbPlan(codex, selected string, original manifest, units []
 			if !ok {
 				return absorbPlan{}, false, nil
 			}
-			frag.raw = append(replaceHeaderID(fragmentHeader(raw), frag.id), unit...)
 			plan.fragments[i] = []plannedFragment{frag}
 			updated.parts = append(updated.parts, frag.id)
 			updated.fragmentHashes[frag.id] = sha(frag.raw)
