@@ -215,3 +215,14 @@ func TestNumberingBindsFileOnlyRightAfterStep(t *testing.T) {
 		t.Fatalf("файл назначения принят за место шага: %v", findings)
 	}
 }
+
+func TestNumberingNamedFileWithoutStepsIsStepOutput(t *testing.T) {
+	dir := t.TempDir()
+	corpus := textCorpus{
+		filepath.Join(dir, "SKILL.md"):  []byte("1. a\n2. b\n3. c\nНа шаге 3 в `report.md` появится раздел.\n"),
+		filepath.Join(dir, "report.md"): []byte("# Отчёт\n\nТекст.\n"),
+	}
+	if findings := numberingFindingsFromCorpus(corpus, filepath.Join(dir, "SKILL.md")); len(findings) > 0 {
+		t.Fatalf("файл без шагов принят за место шага: %v", findings)
+	}
+}

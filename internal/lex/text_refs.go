@@ -56,7 +56,7 @@ var (
 	stepHeading      = regexp.MustCompile(`(?i)^#{2,6}\s+шаг\s+([0-9]+[a-z]?)\b`)
 	stepRef          = regexp.MustCompile(`(?i)шаг[а-я]*\s+([0-9]+[a-z]?(?:\s*[–—-]\s*[0-9]+[a-z]?)?(?:\s+и\s+[0-9]+[a-z]?)*)`)
 	stepNumber       = regexp.MustCompile(`(?i)([0-9]+[a-z]?)(?:\s*[–—-]\s*([0-9]+[a-z]?))?`)
-	stepFileRef      = regexp.MustCompile("(?i)^\\s+(?:в|из)(?:\\s+файл[а-я]*)?\\s+(?:`([^`\\n]+\\.md)`|\\[[^\\]\\n]+\\]\\(([^)\\s]+\\.md)\\))")
+	stepFileRef      = regexp.MustCompile("(?i)^\\s+(?:в|из)(?:\\s+файл[а-я]*)?\\s+(?:`([^`\\n]+\\.md)`|\\[[^\\]\\n]+\\]\\(([^)\\s#]+\\.md)(?:#[^)\\s]*)?\\))")
 	skillNameRef     = regexp.MustCompile("(?i)скилл[а-я]*\\s+`([a-z0-9-]+)`")
 	nearbyRef        = regexp.MustCompile("`([^`\\n]+\\.md)`\\s+рядом")
 	backDecision     = regexp.MustCompile("`([a-z0-9]+(?:-[a-z0-9]+)+)`\\s+в\\s+`[^`]*decisions\\.md`")
@@ -920,7 +920,8 @@ func (s *refScanner) numbering() {
 
 // stepAvailable reports whether step exists where the reference points. A file
 // named right after the step number ("шаг 5 в `x.md`", "из", "в файле") is the
-// step's place; a file further in the sentence is not.
+// step's place unless it has no steps at all (then it is the step's output); a
+// file further in the sentence is not.
 func (s *refScanner) stepAvailable(step string, after int) bool {
 	step = strings.ToLower(step)
 	if match := stepFileRef.FindStringSubmatch(s.line[after:]); match != nil {
@@ -933,7 +934,9 @@ func (s *refScanner) stepAvailable(step string, after int) bool {
 		if !ok || s.external[target] {
 			return true
 		}
-		return stepExistsInBody(string(body), step)
+		if bodyHasSteps(string(body)) {
+			return stepExistsInBody(string(body), step)
+		}
 	}
 	if match := skillNameRef.FindStringSubmatch(s.line); match != nil {
 		target := filepath.Join(filepath.Dir(filepath.Dir(s.path)), match[1], "SKILL.md")
@@ -955,6 +958,16 @@ func (s *refScanner) stepAvailable(step string, after int) bool {
 func stepExistsAnywhere(corpus textCorpus, step string, excluded map[string]bool) bool {
 	for path, body := range corpus {
 		if !excluded[path] && stepExistsInBody(string(body), step) {
+			return true
+		}
+	}
+	return false
+}
+
+func bodyHasSteps(body string) bool {
+	for line := range strings.SplitSeq(body, "\n") {
+		trim := strings.TrimSpace(line)
+		if listItem.MatchString(line) || numberedHeading.MatchString(trim) || stepHeading.MatchString(trim) {
 			return true
 		}
 	}
