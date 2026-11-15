@@ -56,6 +56,9 @@ func collectAbsorbLineOwners(codex string, parts []string, overrides map[string]
 // checkAbsorbPurposeOwners prevents a plan that rebuilds the right text from
 // silently assigning an unchanged rule line to another fragment's goal.
 func checkAbsorbPurposeOwners(codex string, original manifest, plan absorbPlan) error {
+	if err := checkAbsorbLostPurpose(codex, original, plan); err != nil {
+		return err
+	}
 	before, err := collectAbsorbLineOwners(codex, original.parts, nil)
 	if err != nil {
 		return err
@@ -84,6 +87,39 @@ func checkAbsorbPurposeOwners(codex string, original manifest, plan absorbPlan) 
 		if ok && old.count > 1 && old.count == next.count {
 			if lost, id := lostHeadGoal(old, next); lost {
 				return fmt.Errorf("%s: cannot safely preserve the purpose of %q while moving and editing rules; first move the rule and run lex absorb, then make the other edit and run lex absorb again", id, line)
+			}
+		}
+	}
+	return nil
+}
+
+func checkAbsorbLostPurpose(codex string, original manifest, plan absorbPlan) error {
+	// A new fragment and a lost goal-bearing fragment can represent either an
+	// edited move or a deletion and an unrelated insertion. Without printed
+	// goals the plan cannot distinguish them safely. A fragment that another
+	// manifest still uses keeps its file and its goal, so it is not lost.
+	added := false
+	for _, id := range plan.manifest.parts {
+		if !slices.Contains(original.parts, id) {
+			added = true
+			break
+		}
+	}
+	if added {
+		for _, id := range original.parts {
+			if slices.Contains(plan.manifest.parts, id) {
+				continue
+			}
+			path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
+			if !slices.Contains(plan.removePaths, path) {
+				continue
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("%s: read fragment for purpose check: %w", path, err)
+			}
+			if purposeValue(raw) != "" {
+				return fmt.Errorf("%s: without printed goals this change cannot be told from deleting the rule and adding another, so its цель would be lost; first move or delete the rule and run lex absorb, then make the other edit and run lex absorb again", id)
 			}
 		}
 	}
