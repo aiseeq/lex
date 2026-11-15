@@ -53,8 +53,10 @@ var (
 	markdownRef      = regexp.MustCompile(`\[[^\]]+\]\(([^)]+\.md)(?:#([^)]+))?\)`)
 	listItem         = regexp.MustCompile(`^(\s*)([0-9]{1,6})([a-zа-я]?)[.)]\s+`)
 	numberedHeading  = regexp.MustCompile(`^#{2,6}\s+([0-9]{1,6})([a-zа-я]?)\.\s+`)
+	stepHeading      = regexp.MustCompile(`(?i)^#{2,6}\s+шаг\s+([0-9]+[a-z]?)\b`)
 	stepRef          = regexp.MustCompile(`(?i)шаг[а-я]*\s+([0-9]+[a-z]?(?:\s*[–—-]\s*[0-9]+[a-z]?)?(?:\s+и\s+[0-9]+[a-z]?)*)`)
-	stepNumber       = regexp.MustCompile(`([0-9]+[a-z]?)(?:\s*[–—-]\s*([0-9]+[a-z]?))?`)
+	stepNumber       = regexp.MustCompile(`(?i)([0-9]+[a-z]?)(?:\s*[–—-]\s*([0-9]+[a-z]?))?`)
+	stepFileRef      = regexp.MustCompile("(?i)^\\s+(?:в|из)(?:\\s+файл[а-я]*)?\\s+(?:`([^`\\n]+\\.md)`|\\[[^\\]\\n]+\\]\\(([^)\\s#]+\\.md)(?:#[^)\\s]*)?\\))")
 	skillNameRef     = regexp.MustCompile("(?i)скилл[а-я]*\\s+`([a-z0-9-]+)`")
 	nearbyRef        = regexp.MustCompile("`([^`\\n]+\\.md)`\\s+рядом")
 	backDecision     = regexp.MustCompile("`([a-z0-9]+(?:-[a-z0-9]+)+)`\\s+в\\s+`[^`]*decisions\\.md`")
@@ -489,18 +491,19 @@ func loadTextCorpus(codex string, o CheckOptions) (textCorpus, textCorpus, strin
 }
 
 type refScanner struct {
-	corpus         textCorpus
-	external       map[string]bool
-	slugs          map[string]bool
-	skills         map[string]bool
-	hasJournal     bool
-	path           string
-	line           string
-	number         int
-	found          []textRefFinding
-	last, headings map[int]int
-	steps          map[string]bool
-	realKeys       map[string]string
+	corpus          textCorpus
+	external        map[string]bool
+	slugs           map[string]bool
+	skills          map[string]bool
+	hasJournal      bool
+	path            string
+	line            string
+	number          int
+	found           []textRefFinding
+	last, headings  map[int]int
+	steps           map[string]bool
+	realKeys        map[string]string
+	listInterrupted map[int]bool
 }
 
 // resolve is resolveRefTarget that also finds a corpus file reached through a
@@ -807,6 +810,14 @@ func dropDeeper(numbers map[int]int, level int) {
 	}
 }
 
+func dropDeeperFlags(flags map[int]bool, level int) {
+	for k := range flags {
+		if k > level {
+			delete(flags, k)
+		}
+	}
+}
+
 func (s *refScanner) heading(trim string) {
 	if !strings.HasPrefix(trim, "#") {
 		return
@@ -833,22 +844,23 @@ func (s *refScanner) heading(trim string) {
 	s.headings[level] = n
 }
 
-func (s *refScanner) list(trim string) {
+func (s *refScanner) list() {
 	match := listItem.FindStringSubmatch(s.line)
 	if match == nil {
-		if trim != "" && !strings.HasPrefix(s.line, " ") {
-			clear(s.last)
+		trim := strings.TrimSpace(s.line)
+		if trim == "" {
+			return
 		}
-		return
-	}
-	if filepath.Base(s.path) != "SKILL.md" {
-		if sibling, ok := s.corpus[filepath.Join(filepath.Dir(s.path), "SKILL.md")]; ok {
-			for line := range strings.SplitSeq(string(sibling), "\n") {
-				if line == s.line {
-					return
-				}
+		if strings.HasPrefix(trim, "#") {
+			clear(s.last)
+			clear(s.listInterrupted)
+		}
+		if s.line[0] != ' ' && s.line[0] != '\t' {
+			for indent := range s.last {
+				s.listInterrupted[indent] = true
 			}
 		}
+		return
 	}
 	indent := len(match[1])
 	n, err := strconv.Atoi(match[2])
@@ -860,19 +872,23 @@ func (s *refScanner) list(trim string) {
 		return
 	}
 	expected := s.last[indent] + 1
-	if !(expected == 1 && n == 0) && n != expected {
+	if !(expected == 1 && n == 0) && n != expected && !(s.listInterrupted[indent] && (n == 0 || n == 1)) {
 		s.add(4, fmt.Sprintf("ожидался пункт %d, найден %d", expected, n))
 	}
 	s.last[indent] = n
 	dropDeeper(s.last, indent)
+	delete(s.listInterrupted, indent)
+	dropDeeperFlags(s.listInterrupted, indent)
 }
 
 func (s *refScanner) numbering() {
-	for _, match := range stepRef.FindAllStringSubmatch(s.line, -1) {
-		for _, number := range stepNumber.FindAllStringSubmatch(match[1], -1) {
-			if strings.IndexFunc(number[1], func(r rune) bool { return r >= 'a' && r <= 'z' }) >= 0 {
-				if !s.stepAvailable(number[1]) {
-					s.add(4, "нет шага "+number[1])
+	for _, match := range stepRef.FindAllStringSubmatchIndex(s.line, -1) {
+		stepText := s.line[match[2]:match[3]]
+		for _, number := range stepNumber.FindAllStringSubmatch(stepText, -1) {
+			step := strings.ToLower(number[1])
+			if strings.IndexFunc(step, func(r rune) bool { return r >= 'a' && r <= 'z' }) >= 0 {
+				if !s.stepAvailable(step, match[1]) {
+					s.add(4, "нет шага "+step)
 				}
 				continue
 			}
@@ -883,7 +899,7 @@ func (s *refScanner) numbering() {
 			}
 			last := first
 			if number[2] != "" {
-				last, err = strconv.Atoi(number[2])
+				last, err = strconv.Atoi(strings.ToLower(number[2]))
 				if err != nil {
 					s.add(4, fmt.Sprintf("неверный номер шага %s: %v", number[2], err))
 					continue
@@ -891,7 +907,7 @@ func (s *refScanner) numbering() {
 			}
 			for n := first; n <= last; n++ {
 				step := strconv.Itoa(n)
-				if !s.stepAvailable(step) {
+				if !s.stepAvailable(step, match[1]) {
 					s.add(4, "нет шага "+step)
 				}
 			}
@@ -899,10 +915,26 @@ func (s *refScanner) numbering() {
 	}
 	trim := strings.TrimSpace(s.line)
 	s.heading(trim)
-	s.list(trim)
+	s.list()
 }
 
-func (s *refScanner) stepAvailable(step string) bool {
+// stepAvailable reports whether step exists where the reference may point. A
+// file named right after the step number ("шаг 5 в `x.md`", "из", "в файле") is
+// one more place to look: the step may also be the current file's, and the file
+// its output.
+func (s *refScanner) stepAvailable(step string, after int) bool {
+	step = strings.ToLower(step)
+	if match := stepFileRef.FindStringSubmatch(s.line[after:]); match != nil {
+		name := match[1]
+		if name == "" {
+			name = match[2]
+		}
+		target := s.resolve(name)
+		body, ok := s.corpus[target]
+		if !ok || s.external[target] || stepExistsInBody(string(body), step) {
+			return true
+		}
+	}
 	if match := skillNameRef.FindStringSubmatch(s.line); match != nil {
 		target := filepath.Join(filepath.Dir(filepath.Dir(s.path)), match[1], "SKILL.md")
 		body, ok := s.corpus[target]
@@ -931,10 +963,13 @@ func stepExistsAnywhere(corpus textCorpus, step string, excluded map[string]bool
 
 func stepExistsInBody(body, step string) bool {
 	for line := range strings.SplitSeq(body, "\n") {
-		if item := listItem.FindStringSubmatch(line); item != nil && item[2]+item[3] == step {
+		if item := listItem.FindStringSubmatch(line); item != nil && strings.EqualFold(item[2]+item[3], step) {
 			return true
 		}
-		if heading := numberedHeading.FindStringSubmatch(strings.TrimSpace(line)); heading != nil && heading[1]+heading[2] == step {
+		if heading := numberedHeading.FindStringSubmatch(strings.TrimSpace(line)); heading != nil && strings.EqualFold(heading[1]+heading[2], step) {
+			return true
+		}
+		if heading := stepHeading.FindStringSubmatch(strings.TrimSpace(line)); heading != nil && strings.EqualFold(heading[1], step) {
 			return true
 		}
 	}
@@ -944,6 +979,7 @@ func stepExistsInBody(body, step string) bool {
 func (s *refScanner) scan(path string) {
 	s.path = path
 	s.last, s.headings, s.steps = map[int]int{}, map[int]int{}, map[string]bool{}
+	s.listInterrupted = map[int]bool{}
 	lines := strings.Split(string(s.corpus[path]), "\n")
 	stepLines := lines
 	if sibling, ok := s.corpus[filepath.Join(filepath.Dir(path), "SKILL.md")]; ok && filepath.Base(path) != "SKILL.md" {
@@ -951,20 +987,36 @@ func (s *refScanner) scan(path string) {
 	}
 	for _, line := range stepLines {
 		if m := listItem.FindStringSubmatch(line); m != nil {
-			s.steps[m[2]+m[3]] = true
+			s.steps[strings.ToLower(m[2]+m[3])] = true
 		}
 		if m := numberedHeading.FindStringSubmatch(line); m != nil {
-			s.steps[m[1]+m[2]] = true
+			s.steps[strings.ToLower(m[1]+m[2])] = true
+		}
+		if m := stepHeading.FindStringSubmatch(line); m != nil {
+			s.steps[strings.ToLower(m[1])] = true
 		}
 	}
-	fence := false
+	fence, fenceInItem := false, false
 	for i, line := range lines {
 		trim := strings.TrimSpace(line)
 		if strings.HasPrefix(trim, "```") || strings.HasPrefix(trim, "~~~") {
+			if !fence {
+				fenceInItem = line[0] == ' ' || line[0] == '\t'
+			}
 			fence = !fence
+			if !fenceInItem {
+				for indent := range s.last {
+					s.listInterrupted[indent] = true
+				}
+			}
 			continue
 		}
 		if fence {
+			if trim != "" && !fenceInItem {
+				for indent := range s.last {
+					s.listInterrupted[indent] = true
+				}
+			}
 			continue
 		}
 		s.number, s.line = i+1, line
