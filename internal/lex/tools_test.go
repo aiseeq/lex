@@ -90,6 +90,37 @@ func TestToolMentions(t *testing.T) {
 	}
 }
 
+func TestToolRootCommand(t *testing.T) {
+	tool := loadedTool{loaded: true, config: configuredTool{Name: "tool"}, tasksKnown: true, registry: toolRegistry{Commands: []toolCommand{
+		{Path: []string{}, Rest: "args", Flags: []string{"-F"}, ValueFlags: []string{"-F"}},
+		{Path: []string{"sub"}, Rest: "none", Flags: []string{"--ok"}},
+	}}}
+	cases := []struct {
+		name, words, want string
+	}{
+		{"root positional arguments", "tool OLD NEW FILE", ""},
+		{"root flag with value", "tool -F plan.txt", ""},
+		{"unknown root flag", "tool -X plan.txt", "tool has no flag -X"},
+		{"subcommand wins", "tool sub --bad", "tool sub has no flag --bad"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tool.problem(strings.Fields(tc.words)); got != tc.want {
+				t.Fatalf("problem %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	legacy := loadedTool{loaded: true, config: configuredTool{Name: "tool"}, tasksKnown: true, registry: toolRegistry{Commands: []toolCommand{{Path: []string{"sub"}}}}}
+	if got, want := legacy.problem([]string{"tool", "old"}), "tool has no command or task old"; got != want {
+		t.Fatalf("without root: problem %q, want %q", got, want)
+	}
+	rootNone := loadedTool{loaded: true, config: configuredTool{Name: "tool"}, tasksKnown: true, registry: toolRegistry{Commands: []toolCommand{{Path: []string{}, Rest: "none"}}}}
+	if got, want := rootNone.problem([]string{"tool", "old"}), "tool has no command or task old"; got != want {
+		t.Fatalf("root without positional arguments: problem %q, want %q", got, want)
+	}
+}
+
 func TestToolRestAndCodeForms(t *testing.T) {
 	tool := loadedTool{loaded: true, config: configuredTool{Name: "graft"}, tasksKnown: true, registry: toolRegistry{Commands: []toolCommand{
 		{Path: []string{"deploy"}, Rest: "args", Flags: []string{"--ok"}},
@@ -348,8 +379,8 @@ func TestToolMoreReviewCases(t *testing.T) {
 		t.Fatal("opening angle placeholder")
 	}
 	empty := loadedTool{tasksKnown: true, config: configuredTool{Name: "graft"}, registry: toolRegistry{Commands: []toolCommand{{Path: []string{}}}}}
-	if got := empty.problem([]string{"graft", "unknown"}); !strings.Contains(got, "unknown") {
-		t.Fatalf("empty path: %q", got)
+	if got := empty.problem([]string{"graft", "unknown"}); got != "" {
+		t.Fatalf("root positional argument: %q", got)
 	}
 	if got := empty.taskCommand(); got != nil {
 		t.Fatalf("empty task command: %v", got)
