@@ -187,3 +187,31 @@ func TestNumberingSkipsIndentedCodeInsideItem(t *testing.T) {
 		t.Fatalf("код с отступом внутри пункта проверен как текст: %v", findings)
 	}
 }
+
+func TestNumberingBindsFileOnlyRightAfterStep(t *testing.T) {
+	commands := "1. a\n2. b\n3. c\n4. d\n5. e\n"
+	for _, tc := range []struct{ name, line string }{
+		{"в файле", "Шаг 5 в файле `commands.md`.\n"},
+		{"из", "Шаг 5 из `commands.md`.\n"},
+		{"markdown link", "Шаг 5 в [commands](commands.md).\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			corpus := textCorpus{
+				filepath.Join(dir, "SKILL.md"):    []byte("1. Один\n" + tc.line),
+				filepath.Join(dir, "commands.md"): []byte(commands),
+			}
+			if findings := numberingFindingsFromCorpus(corpus, filepath.Join(dir, "SKILL.md")); len(findings) > 0 {
+				t.Fatalf("шаг из названного файла не найден: %v", findings)
+			}
+		})
+	}
+	dir := t.TempDir()
+	corpus := textCorpus{
+		filepath.Join(dir, "SKILL.md"): []byte("1. a\n2. b\nПосле шага 2 запиши итог в `notes.md`.\n"),
+		filepath.Join(dir, "notes.md"): []byte("Заметки.\n"),
+	}
+	if findings := numberingFindingsFromCorpus(corpus, filepath.Join(dir, "SKILL.md")); len(findings) > 0 {
+		t.Fatalf("файл назначения принят за место шага: %v", findings)
+	}
+}
