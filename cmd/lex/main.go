@@ -47,7 +47,7 @@ var commandHelpTable = []commandHelp{
 	{"import", "--codex DIR [--refresh] FILE", "импортировать файл во фрагменты и манифест."},
 	{"build", "--codex DIR [--check] [--force] [--no-header] [FILE]", "собрать файлы из манифестов."},
 	{"absorb", "--codex DIR [--shared] [--force] FILE", "перенести правку собранного файла во фрагменты."},
-	{"check", "--codex DIR [--staged] [--outputs-under PATH] [--tree TREE] [--refs-only] [--decisions PATH]", "проверить кодекс и собранные файлы."},
+	{"check", "--codex DIR [--staged] [--outputs-under PATH] [--tree TREE] [--refs-only] [--decisions PATH] [--unmarked]", "проверить кодекс и собранные файлы."},
 	{"status", "--codex DIR", "показать изменившиеся файлы и команды для них."},
 	{"code-debt", "--codex DIR [--drop TARGET]", "показать или удалить запись о долге ссылок на код."},
 	{"code-confirm", "--codex DIR FRAGMENT", "подтвердить ссылки фрагмента на код."},
@@ -84,7 +84,7 @@ lex status --codex <кодекс> показывает файл, который 
 Правь собранный файл прямо в нём, затем выполни команду из его шапки: lex absorb --codex <кодекс> <файл>. Если absorb отказывает из-за правок фрагментов после сборки, запусти lex absorb --force --codex <кодекс> <файл>, чтобы сохранить файл, либо lex build --force --codex <кодекс> <файл>, чтобы сохранить фрагменты. Подсказка для общего фрагмента уже содержит --shared и называет другие файлы из него: их правки в нём, которых нет в этом файле, пропадут. После этого запусти lex check --codex <кодекс>; успешная проверка возвращает код 0. Правку, пересекающую границу двух пунктов, и правку, после переноса которой сборка не дала бы тот же файл, absorb не переносит: сохраняет файл черновиком в <кодекс>/drafts и не меняет фрагменты; перенеси её оттуда вручную.
 
 ## Поля шапки фрагмента
-цель — зачем нужно правило; основание — источник или причина; снять_когда — условие, при котором правило можно убрать. У заголовков и шагов процедур эти поля пусты. Найди фрагмент пункта: grep -rl '<слова пункта>' <кодекс>/frag. После правки пересобери файл: lex build --codex <кодекс> <файл>. lex check предупреждает о правиле (поле тип: правило или любое из трёх полей заполнено), у которого пусто основание или снять_когда, и о цитате пользователя в тексте фрагмента; в конце пишет «правил без основания: N, без условия снятия: M; фрагментов с цитатой пользователя в тексте: K»; с --refs-only правила не проверяются и этой строки нет. N — число предупреждений о пустом основании, M — о пустом условии снятия, K — о цитате пользователя в тексте; код выхода от этого не меняется.
+цель — зачем нужно правило; основание — источник или причина; снять_когда — условие, при котором правило можно убрать. У заголовков, шагов процедур, указателей («читай файл X») и справки эти поля пусты. Поле вид помечает такой пункт: шаг, указатель или справка. Найди фрагмент пункта: grep -rl '<слова пункта>' <кодекс>/frag. После правки пересобери файл: lex build --codex <кодекс> <файл>. lex check предупреждает о правиле (поле тип: правило или непустое основание либо снять_когда), у которого пусто цель, основание или снять_когда, и о цитате пользователя в тексте фрагмента; считает пункты без полей и в конце дописывает к сводке «правил без цели: N; пунктов без полей: M». С --unmarked печатает пути таких пунктов; с --refs-only правила не проверяются и этой строки нет. Код выхода от этого не меняется.
 
 ## Не твой файл
 Когда lex build --force <файл> затирает, а lex absorb <файл> переносит во фрагменты правку, которой во фрагментах нет, они печатают строку warning со временем правки и состоянием файла и фрагментов в git. Если правку делал не ты, другая сессия могла ещё работать с файлом — дождись её завершения, прежде чем коммитить. Если lex build или lex check называет файл с незавершённой правкой, не трогай файл и не ставь --force.
@@ -120,7 +120,7 @@ func flagValue(args []string, index *int, flag, description string) (string, err
 
 type cliOptions struct {
 	command, codex, source, outputsUnder, tree, decisions, report, drop string
-	refresh, check, force, shared, staged, noHeader, refsOnly           bool
+	refresh, check, force, shared, staged, noHeader, refsOnly, unmarked bool
 	applyQuotes                                                         bool
 }
 
@@ -191,8 +191,7 @@ func parseArguments(args []string) (cliOptions, error) {
 		case "--no-header":
 			opts.noHeader = true
 		default:
-			if arg == "--refs-only" {
-				opts.refsOnly = true
+			if parseBooleanFlag(&opts, arg) {
 				continue
 			}
 			if strings.HasPrefix(arg, "-") {
@@ -208,6 +207,18 @@ func parseArguments(args []string) (cliOptions, error) {
 		return opts, usage("--codex DIR is required")
 	}
 	return opts, nil
+}
+
+func parseBooleanFlag(opts *cliOptions, arg string) bool {
+	switch arg {
+	case "--refs-only":
+		opts.refsOnly = true
+	case "--unmarked":
+		opts.unmarked = true
+	default:
+		return false
+	}
+	return true
 }
 
 func parseDrop(opts *cliOptions, args []string, index *int) error {
@@ -285,7 +296,7 @@ func dispatch(opts cliOptions) error {
 }
 
 func quotesToBasisCommand(o cliOptions) error {
-	if o.source != "" || o.check || o.refresh || o.force || o.shared || o.staged || o.noHeader || o.refsOnly || o.decisions != "" || o.report == "" || o.tree != "" && o.outputsUnder == "" {
+	if o.source != "" || o.check || o.refresh || o.force || o.shared || o.staged || o.noHeader || o.refsOnly || o.unmarked || o.decisions != "" || o.report == "" || o.tree != "" && o.outputsUnder == "" {
 		return usage("usage: lex quotes-to-basis --codex DIR --report FILE [--apply] [--outputs-under PATH [--tree TREE]]")
 	}
 	return lex.QuotesToBasis(o.codex, lex.QuotesToBasisOptions{Apply: o.applyQuotes, Report: o.report, OutputsUnder: o.outputsUnder, Tree: o.tree})
@@ -412,7 +423,18 @@ func checkCommand(o cliOptions) error {
 	}
 
 	warnings, err := lex.CheckWithWarnings(o.codex, lex.CheckOptions{Staged: o.staged, OutputsUnder: o.outputsUnder, Tree: o.tree, RefsOnly: o.refsOnly, Decisions: o.decisions})
+	seenUnmarked := make(map[string]bool)
 	for _, warning := range warnings {
+		isUnmarked := strings.HasSuffix(warning, ": item has no fields")
+		if isUnmarked && !o.unmarked {
+			continue
+		}
+		if isUnmarked && seenUnmarked[warning] {
+			continue
+		}
+		if isUnmarked {
+			seenUnmarked[warning] = true
+		}
 		fmt.Fprintln(os.Stderr, "warning:", warning)
 	}
 	if !o.refsOnly {

@@ -354,6 +354,9 @@ func TestCheckOutputsUnderKnowsCodexSkills(t *testing.T) {
 			t.Fatalf("outputs under %s: a skill named after «по» was read as a decision: %v", under, err)
 		}
 		for _, warning := range warnings {
+			if strings.HasSuffix(warning, itemHasNoFieldsWarning) {
+				continue
+			}
 			if strings.Contains(warning, "sample-process") {
 				t.Fatalf("outputs under %s: unexpected warning %q", under, warning)
 			}

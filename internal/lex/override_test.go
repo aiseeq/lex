@@ -54,8 +54,14 @@ func addOverride(t *testing.T, codex, amend, target string, reason bool) {
 func overrideCheck(t *testing.T, codex, want string) {
 	t.Helper()
 	w, err := CheckWithWarnings(codex, CheckOptions{})
-	if err != nil || (want == "" && len(w) != 0) || (want != "" && !strings.Contains(strings.Join(w, "\n"), want)) {
-		t.Fatalf("warnings %v, err %v, want %q", w, err, want)
+	var overrideWarnings []string
+	for _, warning := range w {
+		if !strings.HasSuffix(warning, itemHasNoFieldsWarning) {
+			overrideWarnings = append(overrideWarnings, warning)
+		}
+	}
+	if err != nil || (want == "" && len(overrideWarnings) != 0) || (want != "" && !strings.Contains(strings.Join(overrideWarnings, "\n"), want)) {
+		t.Fatalf("warnings %v, err %v, want %q", overrideWarnings, err, want)
 	}
 }
 func refreshOverride(t *testing.T, codex, out, rel, source string) {

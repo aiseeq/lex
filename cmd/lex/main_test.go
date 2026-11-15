@@ -726,7 +726,7 @@ func TestCheckPrintsRuleSummaryOnceAfterWarnings(t *testing.T) {
 	if filled != len(fields) {
 		t.Fatalf("filled %d fragments of %d, want %d", filled, len(frags), len(fields))
 	}
-	summary := "правил без основания: 1, без условия снятия: 2; фрагментов с цитатой пользователя в тексте: 0"
+	summary := "правил без основания: 1, без условия снятия: 2; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 3; пунктов без полей: 0"
 	assertStreams := func(t *testing.T, stdout, stderr string) {
 		t.Helper()
 		if stdout != "" {
@@ -736,10 +736,10 @@ func TestCheckPrintsRuleSummaryOnceAfterWarnings(t *testing.T) {
 			t.Fatalf("stderr = %q, want it to end with the line %q and a newline", stderr, summary)
 		}
 		lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
-		if len(lines) != 4 || lines[3] != summary {
-			t.Fatalf("stderr = %q, want three warnings and then the line %q", stderr, summary)
+		if len(lines) != 7 || lines[6] != summary {
+			t.Fatalf("stderr = %q, want six warnings and then the line %q", stderr, summary)
 		}
-		for _, line := range lines[:3] {
+		for _, line := range lines[:6] {
 			if !strings.HasPrefix(line, "warning: ") {
 				t.Fatalf("stderr line %q is not a warning; stderr = %q", line, stderr)
 			}

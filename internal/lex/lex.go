@@ -4109,6 +4109,9 @@ func checkedManifestBody(codex, manifestPath string, m manifest, referenced map[
 			problems = append(problems, path+": "+err.Error())
 			continue
 		}
+		if fragmentHasNoFields(raw, part) {
+			warnings = append(warnings, path+itemHasNoFieldsWarning)
+		}
 		part, warning, err := renderPurpose(path, raw, part, purposeEnabled)
 		if err != nil {
 			problems = append(problems, err.Error())
@@ -5080,6 +5083,11 @@ func fragmentBody(b []byte) ([]byte, error) {
 	}
 	for closeAt < len(lines) {
 		line := strings.TrimSpace(string(lines[closeAt]))
+		if value, isKind := fragmentKindField(line); isKind {
+			if value != "" && !slices.Contains(fragmentKinds, value) {
+				return nil, errors.New("invalid fragment header: invalid вид")
+			}
+		}
 		if optionalFragmentField(line) {
 			closeAt++
 			continue
@@ -5100,6 +5108,9 @@ func fragmentBody(b []byte) ([]byte, error) {
 }
 
 func optionalFragmentField(line string) bool {
+	if value, isKind := fragmentKindField(line); isKind {
+		return value == "" || slices.Contains(fragmentKinds, value)
+	}
 	for _, prefix := range []string{"код: ", "код_sha256: ", "текст_sha256: ", "переопределяет: ", "переопределяет_sha256: ", "переопределяет_обрыв: "} {
 		if strings.HasPrefix(line, prefix) {
 			return true
@@ -5108,16 +5119,29 @@ func optionalFragmentField(line string) bool {
 	return line == "запись: true"
 }
 
+var fragmentKinds = []string{"шаг", "указатель", "справка"}
+
+func fragmentKindField(line string) (string, bool) {
+	field, value, ok := strings.Cut(line, ":")
+	if !ok || field != "вид" {
+		return "", false
+	}
+	return strings.TrimSpace(value), true
+}
+
 func ruleFieldWarnings(path string, raw []byte) []string {
 	values := fragmentHeaderValues(raw)
 	isRule := len(values["тип"]) > 0 && values["тип"][len(values["тип"])-1] == "правило"
-	for _, field := range []string{"цель", "основание", "снять_когда"} {
+	for _, field := range []string{"основание", "снять_когда"} {
 		if len(values[field]) > 0 && values[field][len(values[field])-1] != "" {
 			isRule = true
 		}
 	}
 	var warnings []string
 	if isRule {
+		if len(values["цель"]) == 0 || values["цель"][len(values["цель"])-1] == "" {
+			warnings = append(warnings, fmt.Sprintf("%s: rule has empty цель", path))
+		}
 		for _, field := range []string{"основание", "снять_когда"} {
 			if len(values[field]) == 0 || values[field][len(values[field])-1] == "" {
 				warnings = append(warnings, fmt.Sprintf("%s: rule has empty %s", path, field))
@@ -5131,24 +5155,32 @@ func ruleFieldWarnings(path string, raw []byte) []string {
 	return warnings
 }
 
-// The three rule warnings of lex check, as they follow the fragment path.
+// Rule field and text warnings of lex check, as they follow the fragment path.
 const (
-	emptyBasisWarning   = ": rule has empty основание"
-	emptyRemovalWarning = ": rule has empty снять_когда"
-	textQuoteWarning    = ": цитата пользователя в тексте, место ей — основание"
+	emptyGoalWarning       = ": rule has empty цель"
+	itemHasNoFieldsWarning = ": item has no fields"
+	emptyBasisWarning      = ": rule has empty основание"
+	emptyRemovalWarning    = ": rule has empty снять_когда"
+	textQuoteWarning       = ": цитата пользователя в тексте, место ей — основание"
 )
 
 func isRuleBasisWarning(warning string) bool {
-	return strings.Contains(warning, emptyBasisWarning) ||
+	return strings.Contains(warning, emptyGoalWarning) ||
+		strings.Contains(warning, emptyBasisWarning) ||
 		strings.Contains(warning, emptyRemovalWarning) ||
 		strings.Contains(warning, textQuoteWarning)
 }
 
 // RuleWarningSummary returns the closing line of lex check: how many warnings of each rule kind there are.
 func RuleWarningSummary(warnings []string) string {
-	basis, removal, quote := 0, 0, 0
+	basis, removal, quote, goal := 0, 0, 0, 0
+	items := make(map[string]bool)
 	for _, warning := range warnings {
 		switch {
+		case strings.HasSuffix(warning, itemHasNoFieldsWarning):
+			items[strings.TrimSuffix(warning, itemHasNoFieldsWarning)] = true
+		case strings.Contains(warning, emptyGoalWarning):
+			goal++
 		case strings.Contains(warning, emptyBasisWarning):
 			basis++
 		case strings.Contains(warning, emptyRemovalWarning):
@@ -5157,7 +5189,32 @@ func RuleWarningSummary(warnings []string) string {
 			quote++
 		}
 	}
-	return fmt.Sprintf("правил без основания: %d, без условия снятия: %d; фрагментов с цитатой пользователя в тексте: %d", basis, removal, quote)
+	return fmt.Sprintf("правил без основания: %d, без условия снятия: %d; фрагментов с цитатой пользователя в тексте: %d; правил без цели: %d; пунктов без полей: %d", basis, removal, quote, goal, len(items))
+}
+
+func fragmentHasNoFields(raw, body []byte) bool {
+	values := fragmentHeaderValues(raw)
+	for _, field := range []string{"цель", "основание", "снять_когда", "вид"} {
+		if nonemptyHeaderValue(values, field) {
+			return false
+		}
+	}
+	return startsWithListItem(body)
+}
+
+func nonemptyHeaderValue(values map[string][]string, field string) bool {
+	return len(values[field]) > 0 && values[field][len(values[field])-1] != ""
+}
+
+func startsWithListItem(body []byte) bool {
+	if bytes.HasPrefix(body, []byte("- ")) {
+		return true
+	}
+	i := 0
+	for i < len(body) && body[i] >= '0' && body[i] <= '9' {
+		i++
+	}
+	return i > 0 && i+2 <= len(body) && body[i] == '.' && body[i+1] == ' '
 }
 func parseManifestLink(line string, m *manifest) (bool, error) {
 	if strings.TrimSpace(line) == "" {

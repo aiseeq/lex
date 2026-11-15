@@ -61,7 +61,7 @@ func TestAbsorbSameEditOfRepeatedPart(t *testing.T) {
 			if !bytes.Equal(got, edited) {
 				t.Fatalf("rebuilt output = %q, want %q", got, edited)
 			}
-			if warnings, err := CheckWithWarnings(codex, CheckOptions{}); err != nil || len(warnings) != 0 {
+			if warnings, err := CheckWithWarnings(codex, CheckOptions{}); err != nil || countWarningsContaining(warnings, itemHasNoFieldsWarning) != 3 {
 				t.Fatalf("check after absorb = %v, warnings %v", err, warnings)
 			}
 		})
