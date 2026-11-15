@@ -436,12 +436,12 @@ func (r *corpusReader) decisionPath(codex, override string, settings textRefSett
 	return filepath.Clean(journal), nil
 }
 
+// decisionPathForCheck names the decision journal for the item count. With a broken tools.json it still names the journal
+// from --decisions or the default path, so the caller runs the other checks and reports the error with them.
 func (r *corpusReader) decisionPathForCheck(codex, override string) (string, error) {
-	settings, err := r.textRefSettings(codex)
-	if err != nil {
-		return "", err
-	}
-	return r.decisionPath(codex, override, settings)
+	settings, settingsErr := r.textRefSettings(codex)
+	journal, pathErr := r.decisionPath(codex, override, settings)
+	return journal, errors.Join(settingsErr, pathErr)
 }
 
 func loadTextCorpus(codex string, o CheckOptions) (textCorpus, textCorpus, string, []textRefException, map[string]bool, error) {

@@ -3327,22 +3327,19 @@ func CheckWithWarnings(codex string, options CheckOptions) ([]string, error) {
 	var warnings []string
 	var checkErr error
 	if !options.RefsOnly {
+		journal, journalErr := (&corpusReader{}).decisionPathForCheck(codex, options.Decisions)
 		switch {
 		case options.Staged:
-			decisionPath, pathErr := (&corpusReader{}).decisionPathForCheck(codex, options.Decisions)
-			if pathErr != nil {
-				return nil, pathErr
-			}
-			warnings, checkErr = checkStaged(codex, decisionPath)
+			warnings, checkErr = checkStaged(codex, journal)
 		case options.OutputsUnder != "":
-			warnings, checkErr = checkDiskUnder(codex, options.OutputsUnder, options.Tree, options.Decisions)
+			// An empty scope must stay silent about tools.json; checkTextRefs names a broken one when the scope has outputs.
+			journalErr = nil
+			warnings, checkErr = checkDiskUnder(codex, options.OutputsUnder, options.Tree, journal)
 		default:
-			decisionPath, pathErr := (&corpusReader{}).decisionPathForCheck(codex, options.Decisions)
-			if pathErr != nil {
-				return nil, pathErr
-			}
-			warnings, checkErr = checkDisk(codex, decisionPath)
+			warnings, checkErr = checkDisk(codex, journal)
 		}
+		// A broken tools.json is named after the other problems: they were checked with the journal from --decisions or the default path.
+		checkErr = errors.Join(checkErr, journalErr)
 		if checkErr != nil {
 			return warnings, checkErr
 		}
@@ -3455,7 +3452,7 @@ type selectedManifestUnder struct {
 	links  []outputLink
 }
 
-func checkDiskUnder(codex, under, tree, decisions string) ([]string, error) {
+func checkDiskUnder(codex, under, tree, decisionPath string) ([]string, error) {
 	abs, err := filepath.Abs(under)
 	if err != nil {
 		return nil, fmt.Errorf("%s: resolve output path: %w", under, err)
@@ -3481,7 +3478,7 @@ func checkDiskUnder(codex, under, tree, decisions string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return checkSelectedOutputs(codex, tree, codexInMain, selected, warnings, problems, catalog, decisions)
+	return checkSelectedOutputs(codex, tree, codexInMain, selected, warnings, problems, catalog, decisionPath)
 }
 
 // codexInMainTree reports a codex under the checked main tree and outside the --tree copy: lex absorb then changes the main tree's fragments.
@@ -3553,17 +3550,13 @@ func selectManifestsUnder(catalog *manifestCatalog, underText, under, tree strin
 	return selected, warnings, problems, nil
 }
 
-func checkSelectedOutputs(codex, tree string, codexInMain bool, selected []*selectedManifestUnder, warnings, problems []string, catalog *manifestCatalog, decisions string) ([]string, error) {
+func checkSelectedOutputs(codex, tree string, codexInMain bool, selected []*selectedManifestUnder, warnings, problems []string, catalog *manifestCatalog, decisionPath string) ([]string, error) {
 	hasOutput := false
 	for _, entry := range selected {
 		hasOutput = hasOutput || entry.output
 	}
 	if !hasOutput {
 		return finishCheck(warnings, problems)
-	}
-	decisionPath, err := (&corpusReader{}).decisionPathForCheck(codex, decisions)
-	if err != nil {
-		return nil, err
 	}
 	checker, err := loadToolChecker(codex)
 	if err != nil {
@@ -4109,10 +4102,10 @@ func checkedManifestBody(codex, manifestPath string, m manifest, referenced map[
 		if fragmentIsDraft(raw) {
 			warnings = append(warnings, path+": draft: true")
 		}
-		conflictProblem := conflictingRuleKindProblem(path, raw)
-		if conflictProblem != "" {
-			problems = append(problems, conflictProblem)
+		if problem := conflictingRuleKindProblem(path, raw); problem != "" {
+			problems = append(problems, problem)
 		}
+		warnings = append(warnings, ruleFieldWarnings(path, raw)...)
 		warnings = append(warnings, codeLinkWarnings(path, raw)...)
 		warnings = append(warnings, overrideWarnings(codex, id, raw, read)...)
 		if fragmentIsRecord(raw) {
@@ -4123,9 +4116,6 @@ func checkedManifestBody(codex, manifestPath string, m manifest, referenced map[
 		if err != nil {
 			problems = append(problems, path+": "+err.Error())
 			continue
-		}
-		if conflictProblem == "" {
-			warnings = append(warnings, ruleFieldWarnings(path, raw, part)...)
 		}
 		if !sameCleanPath(m.out, decisionPath) && fragmentHasNoFields(raw, part) {
 			warnings = append(warnings, path+itemHasNoFieldsWarning)
@@ -5147,9 +5137,10 @@ func fragmentKindField(line string) (string, bool) {
 	return strings.TrimSpace(value), true
 }
 
-func ruleFieldWarnings(path string, raw, body []byte) []string {
+func ruleFieldWarnings(path string, raw []byte) []string {
 	values := fragmentHeaderValues(raw)
-	isNotRule := fragmentIsNotRule(raw, body)
+	header := fragmentHeader(raw)
+	isNotRule := fragmentIsNotRule(raw, raw[len(header):])
 	isRule := !isNotRule && len(values["тип"]) > 0 && values["тип"][len(values["тип"])-1] == "правило"
 	for _, field := range []string{"цель", "основание", "снять_когда"} {
 		if !isNotRule && len(values[field]) > 0 && values[field][len(values[field])-1] != "" {
@@ -5167,7 +5158,6 @@ func ruleFieldWarnings(path string, raw, body []byte) []string {
 			}
 		}
 	}
-	header := fragmentHeader(raw)
 	if len(header) > 0 && hasUserQuoteInText(raw[len(header):]) {
 		warnings = append(warnings, path+textQuoteWarning)
 	}
@@ -5238,9 +5228,22 @@ func sameCleanPath(a, b string) bool {
 	if a == "" || b == "" {
 		return false
 	}
-	absA, errA := filepath.Abs(a)
-	absB, errB := filepath.Abs(b)
-	return errA == nil && errB == nil && filepath.Clean(absA) == filepath.Clean(absB)
+	resolvedA, errA := resolvedPath(a)
+	resolvedB, errB := resolvedPath(b)
+	return errA == nil && errB == nil && resolvedA == resolvedB
+}
+
+// resolvedPath is the absolute path with symlinks resolved, so the journal named through a link is still the journal;
+// a path that does not exist yet stays absolute.
+func resolvedPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", path, err)
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return real, nil
+	}
+	return abs, nil
 }
 
 // Rule field and text warnings of lex check, as they follow the fragment path.

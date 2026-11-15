@@ -294,3 +294,53 @@ func TestImportRefreshPreservesFragmentKind(t *testing.T) {
 		t.Fatalf("refresh lost вид: шаг: %s, err = %v", raw, err)
 	}
 }
+
+func decisionAndOtherCodex(t *testing.T, root string) (codex, decisionOutput, otherOutput string) {
+	t.Helper()
+	codex = filepath.Join(root, "codex")
+	decisionOutput = filepath.Join(root, "decisions.md")
+	otherOutput = filepath.Join(root, "other.md")
+	if err := importData(codex, decisionOutput, "decisions.md", []byte("- decision item\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := importData(codex, otherOutput, "other.md", []byte("- instruction item\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	return codex, decisionOutput, otherOutput
+}
+
+func TestBrokenToolsJSONKeepsDiskCheckAndItemCount(t *testing.T) {
+	codex, _, otherOutput := decisionAndOtherCodex(t, t.TempDir())
+	mustWrite(t, filepath.Join(codex, "tools.json"), []byte(`{"text_refs":{"exceptions":[{"path":"/abs","kind":1,"contains":"x","reason":"y"}]}}`))
+	mustWrite(t, otherOutput, []byte("- instruction item, edited by hand\n"))
+	warnings, err := CheckWithWarnings(codex, CheckOptions{})
+	if err == nil || !strings.Contains(err.Error(), "built output differs") {
+		t.Fatalf("check error = %v, want the disk drift of other.md", err)
+	}
+	if got := RuleWarningSummary(warnings); !strings.HasSuffix(got, "пунктов без полей: 1") {
+		t.Fatalf("summary = %q, want the instruction item counted and the journal (default path) left out", got)
+	}
+}
+
+func TestDecisionJournalNamedThroughSymlinkIsExcluded(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	codex, _, _ := decisionAndOtherCodex(t, real)
+	alias := filepath.Join(base, "alias")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Fatal(err)
+	}
+	warnings, err := CheckWithWarnings(codex, CheckOptions{Decisions: filepath.Join(alias, "decisions.md")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := RuleWarningSummary(warnings); !strings.HasSuffix(got, "пунктов без полей: 1") {
+		t.Fatalf("summary = %q, warnings = %v", got, warnings)
+	}
+}
