@@ -1717,6 +1717,18 @@ func absorbEditedFragment(codex, selected string, m manifest, built, actual, fil
 	if err != nil {
 		return err
 	}
+	// With printed goals the goal line under a rule names its fragment, so the plan
+	// already follows the file; without them an unchanged rule line keeps its goal.
+	if err := checkAbsorbPurposeOwners(codex, m, plan); err != nil && purpose == nil {
+		repaired, ok, repairErr := repairAbsorbPurposeOwners(codex, selected, m, actual, fileBytes, catalog)
+		if repairErr != nil {
+			return repairErr
+		}
+		if !ok {
+			return err
+		}
+		plan = repaired
+	}
 	if err := verifyAbsorbPlan(codex, plan, actual, options.DraftDir, manifestKey(selected), m.out, fileBytes); err != nil {
 		return err
 	}
