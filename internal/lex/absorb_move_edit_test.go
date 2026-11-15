@@ -249,3 +249,89 @@ func TestAbsorbMoveKeepsGoalsOfRepeatedRules(t *testing.T) {
 		})
 	}
 }
+
+func TestAbsorbMoveEditDoesNotReplaceGoalFragment(t *testing.T) {
+	const head = "# Guide\n\n## Tasks\n"
+	for _, tc := range []struct {
+		name, input, edited string
+		goals               []string
+		mustPass            bool
+	}{
+		{"L1 перенос и правка перенесённого соседа", "- Alpha rule\n- Beta rule\n", "- Beta rule\n- Alpha rule!\n", []string{"ga", "gb"}, false},
+		{"L2 перенос и правка обоих соседей", "- Alpha rule\n- Beta rule\n- Gamma rule\n", "- Gamma rule\n- Alpha rule!\n- Beta rule!\n", []string{"ga", "gb", "gc"}, false},
+		{"L3 перенос правленого правила мимо повторов", "- same rule\n- other rule\n- same rule\n", "- other rule edited\n- same rule\n- same rule\n", []string{"ga", "gc", "gb"}, false},
+		{"L4 удаление повтора, перенос и правка соседа", "- Do it\n- Beta rule\n- Do it\n- Gamma rule\n- Do it\n", "- Gamma rule\n- Do it\n- Beta rule!\n- Do it\n", []string{"ga", "gb", "gc", "gd", "ge"}, false},
+		{"P1 перенос без правки", "- Alpha rule\n- Beta rule\n", "- Beta rule\n- Alpha rule\n", []string{"ga", "gb"}, true},
+		{"P2 удаление правила", "- Alpha rule\n- Beta rule\n", "- Beta rule\n", []string{"ga", "gb"}, true},
+		{"P3 новое правило", "- Alpha rule\n- Beta rule\n", "- Alpha rule\n- Beta rule\n- New rule\n", []string{"ga", "gb"}, true},
+		{"P4 правка на месте", "- Alpha rule\n- Beta rule\n", "- Alpha rewritten\n- Beta rule\n", []string{"ga", "gb"}, true},
+		{"P5 удаление первого и правка последнего на месте", "- Alpha rule\n- Beta rule\n- Gamma rule\n", "- Beta rule\n- Gamma rule!\n", []string{"ga", "gb", "gc"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			codex, out, mp, m := purposeFixture(t, head+tc.input)
+			goals := append([]string{"", ""}, tc.goals...)
+			if len(m.parts) != len(goals) {
+				t.Fatalf("BROKEN части %v, целей %d", m.parts, len(goals))
+			}
+			setPurposeGoals(t, codex, mp, m, goals...)
+			if err := Build(codex, false); err != nil {
+				t.Fatal(err)
+			}
+			before := map[string]string{}
+			for _, id := range mustReadManifest(t, mp).parts {
+				raw, err := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(id)+".md"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				before[id] = purposeValue(raw)
+			}
+			beforeFiles, err := snapshotCodexFiles(codex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, out, []byte(head+tc.edited))
+			if err := Absorb(codex, out, AbsorbOptions{}); err != nil {
+				afterFiles, snapshotErr := snapshotCodexFiles(codex)
+				if snapshotErr != nil {
+					t.Fatal(snapshotErr)
+				}
+				if changed := changedCodexFiles(beforeFiles, afterFiles); len(changed) != 0 {
+					t.Errorf("refusal changed codex: %v", changed)
+				}
+				if !strings.Contains(err.Error(), "first") || !strings.Contains(err.Error(), "then") {
+					t.Errorf("missing two-pass advice: %v", err)
+				}
+				if tc.mustPass {
+					t.Errorf("отказ там, где подмены нет: %v", err)
+				}
+				return
+			}
+			after := map[string]string{}
+			for _, id := range mustReadManifest(t, mp).parts {
+				raw, err := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(id)+".md"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				after[id] = purposeValue(raw)
+				if g := after[id]; g != "" && g != before[id] {
+					t.Errorf("захват цели: %s получил %q, было %q", id, g, before[id])
+				}
+			}
+			var gone, added []string
+			for id, g := range before {
+				if _, ok := after[id]; !ok && g != "" {
+					gone = append(gone, id+"("+g+")")
+				}
+			}
+			for id := range after {
+				if _, ok := before[id]; !ok {
+					added = append(added, id)
+				}
+			}
+			if len(gone) > 0 && len(added) > 0 {
+				t.Errorf("подмена: исчезли %s, появились %s — цель потеряна молча", strings.Join(gone, ", "), strings.Join(added, ", "))
+			}
+			assertAbsorbedOutputEquals(t, codex, out, []byte(head+tc.edited))
+		})
+	}
+}
