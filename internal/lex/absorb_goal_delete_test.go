@@ -319,7 +319,66 @@ func TestAbsorbPurposeRefusalForKeptRuleDoesNotAdviseTwoPasses(t *testing.T) {
 	}
 	mustWrite(t, out, bytes.Replace(data, []byte("  Зачем: one\n"), []byte("  more about one\n"), 1))
 	err = Absorb(codex, out, AbsorbOptions{DraftDir: codex})
-	if err == nil || !strings.Contains(err.Error(), `"  Зачем: one"`) || strings.Contains(err.Error(), "deleted on purpose") {
+	if err == nil || !strings.Contains(err.Error(), `"  Зачем: one"`) || strings.Contains(err.Error(), "on purpose") {
 		t.Fatalf("refusal for a kept rule = %v; want the line named without the advice for a deleted rule", err)
+	}
+}
+
+func TestAbsorbTwoPassAdviceDropsAdviceAlreadyFollowed(t *testing.T) {
+	codex, out, _, _ := goalDeleteFixture(t, "# Alpha\n## Beta\n- rule one text\n- rule two text\n", []string{"", "", "reason one", "reason two"})
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, out, bytes.Replace(data, []byte("# Alpha\n## Beta\n- rule one text\n  Зачем: reason one\n"), []byte("# Gamma\n"), 1))
+	err = Absorb(codex, out, AbsorbOptions{})
+	if err == nil {
+		t.Fatal("Absorb accepted a deleted rule with an edit next to it")
+	}
+	if msg := err.Error(); strings.Contains(msg, "delete the rule together with it") || !strings.Contains(msg, "in one pass") {
+		t.Fatalf("refusal = %q; want only the two-pass advice: the rule and its line were already deleted together", msg)
+	}
+}
+
+// A rule rewritten in place with its goal line edited or dropped is not a deletion next to an
+// edit: deleting the rule together with its goal line resolves the refusal, so it stays offered.
+func TestAbsorbRewrittenRuleKeepsDeleteAdvice(t *testing.T) {
+	for _, tc := range []struct{ name, new string }{
+		{"goal edited", "- rule two EDITED\n  Зачем: reason CHANGED\n"},
+		{"goal dropped", "- rule two EDITED\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			codex, out, _, _ := goalDeleteFixture(t, "- rule one text\n- rule two text\n- rule three text\n", []string{"reason one", "reason two", "reason three"})
+			data, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			edited := bytes.Replace(data, []byte("- rule two text\n  Зачем: reason two\n"), []byte(tc.new), 1)
+			if bytes.Equal(edited, data) {
+				t.Fatal("fixture lacks rule two with its goal")
+			}
+			mustWrite(t, out, edited)
+			err = Absorb(codex, out, AbsorbOptions{})
+			if err == nil || !strings.Contains(err.Error(), "delete the rule together with it") {
+				t.Fatalf("refusal = %v; want the advice to delete the rule together with its goal line", err)
+			}
+		})
+	}
+}
+
+func TestAbsorbTwoPassAdviceForSeveralDeletedRules(t *testing.T) {
+	codex, out, _, _ := goalDeleteFixture(t, "- rule one text\n- rule two text\n- rule three text\n", []string{"reason one", "reason two", ""})
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := bytes.Replace(data, []byte("- rule one text\n  Зачем: reason one\n- rule two text\n  Зачем: reason two\n- rule three text\n"), []byte("- rule three edited\n"), 1)
+	if bytes.Equal(edited, data) {
+		t.Fatalf("fixture lacks the rules: %q", data)
+	}
+	mustWrite(t, out, edited)
+	err = Absorb(codex, out, AbsorbOptions{})
+	if err == nil || !strings.Contains(err.Error(), "those rules together with them") || strings.Contains(err.Error(), "the rule together with it") {
+		t.Fatalf("refusal = %v; want the two-pass advice in the plural", err)
 	}
 }

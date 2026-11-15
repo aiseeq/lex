@@ -450,10 +450,30 @@ func (p purposeLayout) refuseRemovedGoals(oldLines, newLines [][]byte, failed []
 	if hi := failedHunk[first]; hi >= 0 && purposeSpanCovered(p.owners, oldLines, p.spanAt(first), hunks[hi].oldStart, hunks[hi].oldEnd) {
 		apart = "; if the rule was deleted on purpose, delete it in one pass and make the edit next to it in another"
 	}
+	if hi := failedHunk[first]; apart != "" && hunkReachesBeyond(oldLines, p.spanAt(first), hunks[hi]) {
+		// The rule falls into one change with an edit of the text next to it: deleting the
+		// rule together with its goal line would not resolve this refusal, so it is not offered.
+		lines, rule := "the line "+quoted[0], "the rule together with it"
+		if len(quoted) > 1 {
+			lines, rule = "each of the lines "+strings.Join(quoted, ", "), "those rules together with them"
+		}
+		return fmt.Errorf("%s: missing or edited цель; put %s back under its rule; if you deleted %s on purpose, delete in one pass and make the edit next to it in another", id, lines, rule)
+	}
 	if len(quoted) == 1 {
 		return fmt.Errorf("%s: missing or edited цель; put the line %s back under its rule or delete the rule together with it%s", id, quoted[0], apart)
 	}
 	return fmt.Errorf("%s: missing or edited цель; put each of the lines %s back under its rule or delete that rule together with it%s", id, strings.Join(quoted, ", "), apart)
+}
+
+// hunkReachesBeyond reports whether the change also covers nonblank text outside the rule,
+// so the rule's lines and its neighbour's edit cannot be told apart in it.
+func hunkReachesBeyond(oldLines [][]byte, span purposeSpan, h lineHunk) bool {
+	for i := h.oldStart; i < h.oldEnd; i++ {
+		if (i < span.start || i >= span.end) && strings.TrimSpace(string(oldLines[i])) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func purposeMatchesWithCandidate(matches [][2]int, oldIndex, newIndex int) ([][2]int, map[int]int) {
