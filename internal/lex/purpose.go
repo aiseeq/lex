@@ -259,7 +259,11 @@ func (p purposeLayout) checkMovedGoals(oldLines [][]byte, matches [][2]int, newL
 		}
 		span := p.spanAt(pair[0])
 		oldIndex, ok := newToOld[previous]
-		if previous < 0 || (ok && (oldIndex < span.start || oldIndex >= span.end)) {
+		moved := previous < 0 || ok && (oldIndex < span.start || oldIndex >= span.end)
+		if !ok && previous >= 0 && p.editedRuleBelongsToOther(span, newLines[previous], oldLines, newToOld) {
+			moved = true
+		}
+		if moved {
 			if !p.ruleTextPresent(span, oldLines, newLines, matches) {
 				return false, fmt.Errorf("%s: цель line %q has no rule text; delete the line or restore its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n"))
 			}
@@ -305,6 +309,42 @@ func (p purposeLayout) ruleTextPresent(span purposeSpan, oldLines, newLines [][]
 		}
 	}
 	return false
+}
+
+func (p purposeLayout) editedRuleBelongsToOther(span purposeSpan, line []byte, oldLines [][]byte, newToOld map[int]int) bool {
+	text := bytes.TrimSpace(line)
+	own, other := 0, 0
+	for index, oldLine := range oldLines {
+		if !p.isRuleText(index, oldLines) {
+			continue
+		}
+		score := commonPrefixLength(text, bytes.TrimSpace(oldLine))
+		if p.spanAt(index) == span {
+			own = max(own, score)
+		} else {
+			matched := false
+			for _, oldIndex := range newToOld {
+				if oldIndex == index {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				other = max(other, score)
+			}
+		}
+	}
+	return other >= 4 && other-own >= 4
+}
+
+func commonPrefixLength(a, b []byte) int {
+	limit := min(len(a), len(b))
+	for i := range limit {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+	return limit
 }
 
 func (p purposeLayout) existingRuleText(span purposeSpan, oldLines, newLines [][]byte, matches [][2]int) bool {

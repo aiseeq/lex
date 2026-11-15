@@ -2016,7 +2016,38 @@ func writeAbsorbPlan(selected string, plan absorbPlan, catalog *manifestCatalog)
 func splitPurposeHunks(spans []purposeSpan, owners map[int]string, oldLines, newLines [][]byte, hunks []lineHunk) []lineHunk {
 	result := make([]lineHunk, 0, len(hunks))
 	for _, hunk := range hunks {
-		result = append(result, splitPurposeHunk(spans, owners, oldLines, newLines, hunk)...)
+		for _, piece := range splitHunkAtUnchangedLines(hunk, oldLines, newLines) {
+			result = append(result, splitPurposeHunk(spans, owners, oldLines, newLines, piece)...)
+		}
+	}
+	return result
+}
+
+// splitHunkAtUnchangedLines keeps an unchanged purpose line as a boundary when
+// another edit in the same diff hunk sits on either side of it.
+func splitHunkAtUnchangedLines(hunk lineHunk, oldLines, newLines [][]byte) []lineHunk {
+	oldPart := oldLines[hunk.oldStart:hunk.oldEnd]
+	newPart := newLines[hunk.newStart:hunk.newEnd]
+	matches := myersLineMatches(oldPart, newPart)
+	if len(matches) == 0 {
+		return []lineHunk{hunk}
+	}
+	result := make([]lineHunk, 0, len(matches)+1)
+	oldAt, newAt := 0, 0
+	for _, match := range matches {
+		if oldAt < match[0] || newAt < match[1] {
+			result = append(result, lineHunk{
+				oldStart: hunk.oldStart + oldAt, oldEnd: hunk.oldStart + match[0],
+				newStart: hunk.newStart + newAt, newEnd: hunk.newStart + match[1],
+			})
+		}
+		oldAt, newAt = match[0]+1, match[1]+1
+	}
+	if oldAt < len(oldPart) || newAt < len(newPart) {
+		result = append(result, lineHunk{
+			oldStart: hunk.oldStart + oldAt, oldEnd: hunk.oldEnd,
+			newStart: hunk.newStart + newAt, newEnd: hunk.newEnd,
+		})
 	}
 	return result
 }
