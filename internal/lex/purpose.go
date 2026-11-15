@@ -259,11 +259,7 @@ func (p purposeLayout) checkMovedGoals(oldLines [][]byte, matches [][2]int, newL
 		}
 		span := p.spanAt(pair[0])
 		oldIndex, ok := newToOld[previous]
-		moved := previous < 0 || ok && (oldIndex < span.start || oldIndex >= span.end)
-		if !ok && previous >= 0 && p.editedRuleBelongsToOther(span, newLines[previous], oldLines, newLines) {
-			moved = true
-		}
-		if moved {
+		if previous < 0 || (ok && (oldIndex < span.start || oldIndex >= span.end)) {
 			if !p.ruleTextPresent(span, oldLines, newLines, matches) {
 				return false, fmt.Errorf("%s: цель line %q has no rule text; delete the line or restore its rule", id, strings.TrimRight(string(oldLines[pair[0]]), "\r\n"))
 			}
@@ -309,69 +305,6 @@ func (p purposeLayout) ruleTextPresent(span purposeSpan, oldLines, newLines [][]
 		}
 	}
 	return false
-}
-
-func (p purposeLayout) editedRuleBelongsToOther(span purposeSpan, line []byte, oldLines, newLines [][]byte) bool {
-	text := bytes.TrimSpace(line)
-	own, other := 0, 0
-	otherSpans := map[purposeSpan]bool{}
-	for index, oldLine := range oldLines {
-		if !p.isRuleText(index, oldLines) {
-			continue
-		}
-		ruleSpan := p.spanAt(index)
-		score := fullLineSimilarity(text, bytes.TrimSpace(oldLine))
-		if ruleSpan == span {
-			own = max(own, score)
-		} else if ruleSpan.id != "" && p.purposeDisappeared(ruleSpan, oldLines, newLines) {
-			otherSpans[ruleSpan] = true
-			other = max(other, score)
-		}
-	}
-	return len(otherSpans) > 0 && other >= 600 && other > own+100
-}
-
-func (p purposeLayout) purposeDisappeared(span purposeSpan, oldLines, newLines [][]byte) bool {
-	for index := span.start; index < span.end; index++ {
-		if _, isGoal := p.owners[index]; !isGoal {
-			continue
-		}
-		goal := bytes.TrimRight(oldLines[index], "\r\n")
-		for _, line := range newLines {
-			if bytes.Equal(bytes.TrimRight(line, "\r\n"), goal) {
-				return false
-			}
-		}
-		return true
-	}
-	return false
-}
-
-// fullLineSimilarity returns a 0..1000 normalized edit similarity, so shared
-// opening words alone cannot make two rules look like the same fragment.
-func fullLineSimilarity(a, b []byte) int {
-	left, right := []rune(string(a)), []rune(string(b))
-	width := max(len(left), len(right))
-	if width == 0 {
-		return 1000
-	}
-	previous := make([]int, len(right)+1)
-	for j := range previous {
-		previous[j] = j
-	}
-	for i, r := range left {
-		current := make([]int, len(right)+1)
-		current[0] = i + 1
-		for j, other := range right {
-			cost := 0
-			if r != other {
-				cost = 1
-			}
-			current[j+1] = min(current[j]+1, previous[j+1]+1, previous[j]+cost)
-		}
-		previous = current
-	}
-	return (width - previous[len(right)]) * 1000 / width
 }
 
 func (p purposeLayout) existingRuleText(span purposeSpan, oldLines, newLines [][]byte, matches [][2]int) bool {

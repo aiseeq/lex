@@ -3,7 +3,7 @@ package lex
 import (
 	"bytes"
 	"os"
-	"strings"
+	"path/filepath"
 	"testing"
 )
 
@@ -24,27 +24,7 @@ func TestAbsorbPurposeEditAndInsertionBelowPurpose(t *testing.T) {
 	assertAbsorbedOutputEquals(t, codex, out, want)
 }
 
-func TestAbsorbRefusesPurposeReassignedAfterRuleDeletion(t *testing.T) {
-	codex, out, _, _ := goalDeleteFixture(t, "- rule four text\n- rule five text\n", []string{"reason four", "reason five"})
-	built, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	edited := bytes.Replace(built, []byte("- rule four text\n  Зачем: reason four\n"), nil, 1)
-	edited = bytes.Replace(edited, []byte("- rule five text\n"), []byte("- rule five edited\n"), 1)
-	edited = bytes.Replace(edited, []byte("  Зачем: reason five\n"), []byte("  Зачем: reason four\n"), 1)
-	mustWrite(t, out, edited)
-	before := treeBytes(t, codex)
-	err = Absorb(codex, out, AbsorbOptions{DraftDir: codex})
-	if err == nil || !strings.Contains(err.Error(), "цель moved to another fragment") {
-		t.Fatalf("Absorb refusal = %v; want a moved goal refusal", err)
-	}
-	if after := treeBytes(t, codex); !bytes.Equal(before, after) {
-		t.Fatal("refused absorb changed the codex")
-	}
-}
-
-func TestAbsorbGoalSimilarityDoesNotRefuseLegitimateEdits(t *testing.T) {
+func TestAbsorbEditNextToDeletedRuleIsNotRefused(t *testing.T) {
 	type replacement struct{ old, new string }
 	cases := []struct {
 		name, input string
@@ -107,21 +87,44 @@ func TestAbsorbGoalSimilarityDoesNotRefuseLegitimateEdits(t *testing.T) {
 	}
 }
 
-func TestAbsorbRefusesShortRuleGoalReassignment(t *testing.T) {
-	codex, out, _, _ := goalDeleteFixture(t, "- Ab\n- Cd\n", []string{"ga", "gb"})
-	built, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	edited := bytes.Replace(built, []byte("- Ab\n  Зачем: ga\n"), nil, 1)
-	edited = bytes.Replace(edited, []byte("- Cd\n  Зачем: gb\n"), []byte("- Cd!\n  Зачем: ga\n"), 1)
-	mustWrite(t, out, edited)
-	before := treeBytes(t, codex)
-	err = Absorb(codex, out, AbsorbOptions{DraftDir: codex})
-	if err == nil || !strings.Contains(err.Error(), "цель moved to another fragment") {
-		t.Fatalf("Absorb refusal = %v; want moved goal refusal", err)
-	}
-	if after := treeBytes(t, codex); !bytes.Equal(before, after) {
-		t.Fatal("refused absorb changed the codex")
+// With printed goals the goal line under a rule names its fragment: a deleted rule's goal
+// under an edited neighbour keeps the deleted rule's fragment (its other fields stay with
+// its goal), and no fragment takes over another fragment's goal.
+func TestAbsorbGoalLineKeepsItsFragment(t *testing.T) {
+	for _, tc := range []struct{ name, input, del, old, new string }{
+		{"long rules", "- rule four text\n- rule five text\n", "- rule four text\n  Зачем: reason four\n", "- rule five text\n  Зачем: reason five\n", "- rule five edited\n  Зачем: reason four\n"},
+		{"short rules", "- Ab\n- Cd\n", "- Ab\n  Зачем: reason four\n", "- Cd\n  Зачем: reason five\n", "- Cd!\n  Зачем: reason four\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			codex, out, mp, m := goalDeleteFixture(t, tc.input, []string{"reason four", "reason five"})
+			before := map[string]string{}
+			for _, id := range m.parts {
+				raw, err := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(id)+".md"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				before[id] = purposeValue(raw)
+			}
+			built, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			edited := bytes.Replace(built, []byte(tc.del), nil, 1)
+			edited = bytes.Replace(edited, []byte(tc.old), []byte(tc.new), 1)
+			mustWrite(t, out, edited)
+			if err := Absorb(codex, out, AbsorbOptions{}); err != nil {
+				t.Fatalf("Absorb: %v", err)
+			}
+			for _, id := range mustReadManifest(t, mp).parts {
+				raw, err := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(id)+".md"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if goal := purposeValue(raw); goal != before[id] {
+					t.Fatalf("fragment %s took goal %q, had %q", id, goal, before[id])
+				}
+			}
+			assertAbsorbedOutputEquals(t, codex, out, edited)
+		})
 	}
 }
