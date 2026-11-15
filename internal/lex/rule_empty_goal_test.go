@@ -47,6 +47,97 @@ func TestRuleFieldWarningsEmptyGoalOnlyForRules(t *testing.T) {
 	}
 }
 
+func TestRuleFieldWarningsExcludeKindsHeadingsAndSkillHeaders(t *testing.T) {
+	cases := []struct {
+		name, body, header string
+	}{
+		{"kind", "Текст шага.\n", "вид: шаг\n"},
+		{"heading", "## Раздел\n\n### Подраздел\n", ""},
+		{"skill front matter", "\n---\nname: demo\ndescription: skill\n---\n", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			codex, output, frag := ruleBasisFixture(t, "обычный текст\n", "цель: ", "основание: источник", "снять_когда: ")
+			raw, err := os.ReadFile(frag)
+			if err != nil {
+				t.Fatal(err)
+			}
+			closeAt := bytes.LastIndex(raw, []byte("---\n"))
+			if tc.header != "" {
+				raw = bytes.Replace(raw, []byte("тип: правило\n"), nil, 1)
+				closeAt = bytes.LastIndex(raw, []byte("---\n"))
+			}
+			raw = append(bytes.Clone(raw[:closeAt]), append([]byte(tc.header+"---\n"+tc.body), []byte{}...)...)
+			mustWrite(t, frag, raw)
+			mustWrite(t, output, []byte(tc.body))
+			warnings, err := CheckWithWarnings(codex, CheckOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"цель", "основание", "снять_когда"} {
+				if countWarningsContaining(warnings, frag+": rule has empty "+field) != 0 {
+					t.Fatalf("%s warned for %s: %v", tc.name, field, warnings)
+				}
+			}
+			if strings.Contains(RuleWarningSummary(warnings), "правил без цели: 1") {
+				t.Fatalf("summary = %s", RuleWarningSummary(warnings))
+			}
+		})
+	}
+	if fragmentIsNotRule([]byte("---\nid: x\nцель: \nоснование: след\nснять_когда: \n---\n"), []byte("Jira и коммиты\n")) {
+		t.Fatal("plain text without # was treated as a heading")
+	}
+}
+
+func TestRuleAndKindConflictIsProblem(t *testing.T) {
+	codex, _, frag := ruleBasisFixture(t, "Текст.\n", "цель: ", "основание: ", "снять_когда: ")
+	raw, err := os.ReadFile(frag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeAt := bytes.LastIndex(raw, []byte("---\n"))
+	raw = append(bytes.Clone(raw[:closeAt]), append([]byte("вид: шаг\n"), raw[closeAt:]...)...)
+	mustWrite(t, frag, raw)
+	warnings, err := CheckWithWarnings(codex, CheckOptions{})
+	if err == nil || !strings.Contains(err.Error(), "тип") || !strings.Contains(err.Error(), "вид") {
+		t.Fatalf("check error = %v, want problem naming тип and вид", err)
+	}
+	if countWarningsContaining(warnings, frag+": rule has empty") != 0 {
+		t.Fatalf("conflicting header emitted rule warnings: %v", warnings)
+	}
+}
+
+func TestDecisionManifestItemsAreExcludedFromUnmarkedCount(t *testing.T) {
+	root := t.TempDir()
+	codex := filepath.Join(root, "codex")
+	decisionOutput := filepath.Join(root, "decisions.md")
+	otherOutput := filepath.Join(root, "other.md")
+	if err := importData(codex, decisionOutput, "decisions.md", []byte("- decision item\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := importData(codex, otherOutput, "other.md", []byte("- instruction item\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	warnings, err := CheckWithWarnings(codex, CheckOptions{Decisions: decisionOutput})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasSuffix(RuleWarningSummary(warnings), "пунктов без полей: 1") == false {
+		t.Fatalf("summary = %q, warnings = %v", RuleWarningSummary(warnings), warnings)
+	}
+	if countWarningsContaining(warnings, itemHasNoFieldsWarning) != 1 {
+		t.Fatalf("unmarked warnings = %v", warnings)
+	}
+	for _, warning := range warnings {
+		if strings.Contains(warning, filepath.Join(codex, "frag", "decisions")) && strings.HasSuffix(warning, itemHasNoFieldsWarning) {
+			t.Fatalf("decision item printed as unmarked: %v", warnings)
+		}
+	}
+}
+
 func TestRuleTypedListItemIsNotUnmarked(t *testing.T) {
 	codex, _, rule := ruleBasisFixture(t, "- Правило пунктом.\n", "цель: ", "основание: ", "снять_когда: ")
 	warnings, err := CheckWithWarnings(codex, CheckOptions{})

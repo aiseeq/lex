@@ -436,6 +436,14 @@ func (r *corpusReader) decisionPath(codex, override string, settings textRefSett
 	return filepath.Clean(journal), nil
 }
 
+func (r *corpusReader) decisionPathForCheck(codex, override string) (string, error) {
+	settings, err := r.textRefSettings(codex)
+	if err != nil {
+		return "", err
+	}
+	return r.decisionPath(codex, override, settings)
+}
+
 func loadTextCorpus(codex string, o CheckOptions) (textCorpus, textCorpus, string, []textRefException, map[string]bool, error) {
 	paths, err := filepath.Glob(filepath.Join(codex, "manifest", "*.yaml"))
 	if err != nil {

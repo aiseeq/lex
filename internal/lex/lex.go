@@ -3329,11 +3329,19 @@ func CheckWithWarnings(codex string, options CheckOptions) ([]string, error) {
 	if !options.RefsOnly {
 		switch {
 		case options.Staged:
-			warnings, checkErr = checkStaged(codex)
+			decisionPath, pathErr := (&corpusReader{}).decisionPathForCheck(codex, options.Decisions)
+			if pathErr != nil {
+				return nil, pathErr
+			}
+			warnings, checkErr = checkStaged(codex, decisionPath)
 		case options.OutputsUnder != "":
-			warnings, checkErr = checkDiskUnder(codex, options.OutputsUnder, options.Tree)
+			warnings, checkErr = checkDiskUnder(codex, options.OutputsUnder, options.Tree, options.Decisions)
 		default:
-			warnings, checkErr = checkDisk(codex)
+			decisionPath, pathErr := (&corpusReader{}).decisionPathForCheck(codex, options.Decisions)
+			if pathErr != nil {
+				return nil, pathErr
+			}
+			warnings, checkErr = checkDisk(codex, decisionPath)
 		}
 		if checkErr != nil {
 			return warnings, checkErr
@@ -3447,7 +3455,7 @@ type selectedManifestUnder struct {
 	links  []outputLink
 }
 
-func checkDiskUnder(codex, under, tree string) ([]string, error) {
+func checkDiskUnder(codex, under, tree, decisions string) ([]string, error) {
 	abs, err := filepath.Abs(under)
 	if err != nil {
 		return nil, fmt.Errorf("%s: resolve output path: %w", under, err)
@@ -3473,7 +3481,7 @@ func checkDiskUnder(codex, under, tree string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return checkSelectedOutputs(codex, tree, codexInMain, selected, warnings, problems, catalog)
+	return checkSelectedOutputs(codex, tree, codexInMain, selected, warnings, problems, catalog, decisions)
 }
 
 // codexInMainTree reports a codex under the checked main tree and outside the --tree copy: lex absorb then changes the main tree's fragments.
@@ -3545,13 +3553,17 @@ func selectManifestsUnder(catalog *manifestCatalog, underText, under, tree strin
 	return selected, warnings, problems, nil
 }
 
-func checkSelectedOutputs(codex, tree string, codexInMain bool, selected []*selectedManifestUnder, warnings, problems []string, catalog *manifestCatalog) ([]string, error) {
+func checkSelectedOutputs(codex, tree string, codexInMain bool, selected []*selectedManifestUnder, warnings, problems []string, catalog *manifestCatalog, decisions string) ([]string, error) {
 	hasOutput := false
 	for _, entry := range selected {
 		hasOutput = hasOutput || entry.output
 	}
 	if !hasOutput {
 		return finishCheck(warnings, problems)
+	}
+	decisionPath, err := (&corpusReader{}).decisionPathForCheck(codex, decisions)
+	if err != nil {
+		return nil, err
 	}
 	checker, err := loadToolChecker(codex)
 	if err != nil {
@@ -3576,7 +3588,7 @@ func checkSelectedOutputs(codex, tree string, codexInMain bool, selected []*sele
 			}
 			return b, err
 		}
-		body, missing, draftWarnings := checkedManifestBody(codex, entry.path, entry.m, referenced, read, purposeEnabled)
+		body, missing, draftWarnings := checkedManifestBody(codex, entry.path, entry.m, referenced, read, purposeEnabled, decisionPath)
 		warnings = append(warnings, draftWarnings...)
 		problems = append(problems, missing...)
 		if len(missing) > 0 {
@@ -3610,7 +3622,7 @@ func checkSelectedOutputs(codex, tree string, codexInMain bool, selected []*sele
 }
 
 // checkDisk - сверка собранных файлов на диске со всем кодексом.
-func checkDisk(codex string) ([]string, error) {
+func checkDisk(codex, decisionPath string) ([]string, error) {
 	checker, err := loadToolChecker(codex)
 	if err != nil {
 		return nil, err
@@ -3633,7 +3645,7 @@ func checkDisk(codex string) ([]string, error) {
 			continue
 		}
 		problems = append(problems, diskLinkProblems(m.links)...)
-		body, missing, draftWarnings := checkedManifestBody(codex, path, m, referenced, os.ReadFile, purposeEnabled)
+		body, missing, draftWarnings := checkedManifestBody(codex, path, m, referenced, os.ReadFile, purposeEnabled, decisionPath)
 		warnings = append(warnings, draftWarnings...)
 		problems = append(problems, missing...)
 		if len(missing) > 0 {
@@ -3675,7 +3687,7 @@ func checkDisk(codex string) ([]string, error) {
 // Собранный файл проверяется, если в коммите он сам, его манифест или любой его фрагмент; фрагменты и манифест
 // читаются из индекса, так что незакоммиченная работа другой сессии (диск) чужой коммит не останавливает,
 // а закоммиченный собранный файл совпадает с закоммиченными фрагментами.
-func checkStaged(codex string) ([]string, error) {
+func checkStaged(codex, decisionPath string) ([]string, error) {
 	checker, err := loadToolChecker(codex)
 	if err != nil {
 		return nil, err
@@ -3722,7 +3734,7 @@ func checkStaged(codex string) ([]string, error) {
 	referenced := map[string]bool{}
 	var warnings, problems []string
 	for _, path := range paths {
-		w, p, err := checkStagedManifest(commit, codex, path, referenced, checker, catalog)
+		w, p, err := checkStagedManifest(commit, codex, path, referenced, checker, catalog, decisionPath)
 		if err != nil {
 			return nil, err
 		}
@@ -3747,7 +3759,7 @@ func stagedManifestTouched(commit *stagedPaths, codex, path string, m manifest, 
 
 // checkStagedManifest - проверка одного манифеста коммита; части каждого читаемого манифеста индекса
 // помечаются в referenced: манифест, удалённый в коммите, сюда не попадает, и его фрагменты станут сиротами.
-func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map[string]bool, checker *toolChecker, catalog *manifestCatalog) (warnings, problems []string, err error) {
+func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map[string]bool, checker *toolChecker, catalog *manifestCatalog, decisionPath string) (warnings, problems []string, err error) {
 	raw, rerr := commit.read(path)
 	if rerr != nil {
 		if commit.has(path) {
@@ -3796,7 +3808,7 @@ func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map
 		}
 		return b, err
 	}
-	body, missing, draftWarnings := checkedManifestBody(codex, path, m, referenced, read, checker.purpose)
+	body, missing, draftWarnings := checkedManifestBody(codex, path, m, referenced, read, checker.purpose, decisionPath)
 	warnings = append(warnings, draftWarnings...)
 	problems = append(problems, missing...)
 	if len(missing) == 0 {
@@ -4083,7 +4095,7 @@ func stagedDiskMissingFragments(commit *stagedPaths, paths, ids []string, manife
 	return missing
 }
 
-func checkedManifestBody(codex, manifestPath string, m manifest, referenced map[string]bool, read func(string) ([]byte, error), purposeEnabled bool) ([]byte, []string, []string) {
+func checkedManifestBody(codex, manifestPath string, m manifest, referenced map[string]bool, read func(string) ([]byte, error), purposeEnabled bool, decisionPath string) ([]byte, []string, []string) {
 	var body []byte
 	var problems, warnings []string
 	for _, id := range m.parts {
@@ -4097,7 +4109,10 @@ func checkedManifestBody(codex, manifestPath string, m manifest, referenced map[
 		if fragmentIsDraft(raw) {
 			warnings = append(warnings, path+": draft: true")
 		}
-		warnings = append(warnings, ruleFieldWarnings(path, raw)...)
+		conflictProblem := conflictingRuleKindProblem(path, raw)
+		if conflictProblem != "" {
+			problems = append(problems, conflictProblem)
+		}
 		warnings = append(warnings, codeLinkWarnings(path, raw)...)
 		warnings = append(warnings, overrideWarnings(codex, id, raw, read)...)
 		if fragmentIsRecord(raw) {
@@ -4109,7 +4124,10 @@ func checkedManifestBody(codex, manifestPath string, m manifest, referenced map[
 			problems = append(problems, path+": "+err.Error())
 			continue
 		}
-		if fragmentHasNoFields(raw, part) {
+		if conflictProblem == "" {
+			warnings = append(warnings, ruleFieldWarnings(path, raw, part)...)
+		}
+		if !sameCleanPath(m.out, decisionPath) && fragmentHasNoFields(raw, part) {
 			warnings = append(warnings, path+itemHasNoFieldsWarning)
 		}
 		part, warning, err := renderPurpose(path, raw, part, purposeEnabled)
@@ -5129,11 +5147,12 @@ func fragmentKindField(line string) (string, bool) {
 	return strings.TrimSpace(value), true
 }
 
-func ruleFieldWarnings(path string, raw []byte) []string {
+func ruleFieldWarnings(path string, raw, body []byte) []string {
 	values := fragmentHeaderValues(raw)
-	isRule := len(values["тип"]) > 0 && values["тип"][len(values["тип"])-1] == "правило"
+	isNotRule := fragmentIsNotRule(raw, body)
+	isRule := !isNotRule && len(values["тип"]) > 0 && values["тип"][len(values["тип"])-1] == "правило"
 	for _, field := range []string{"цель", "основание", "снять_когда"} {
-		if len(values[field]) > 0 && values[field][len(values[field])-1] != "" {
+		if !isNotRule && len(values[field]) > 0 && values[field][len(values[field])-1] != "" {
 			isRule = true
 		}
 	}
@@ -5153,6 +5172,75 @@ func ruleFieldWarnings(path string, raw []byte) []string {
 		warnings = append(warnings, path+textQuoteWarning)
 	}
 	return warnings
+}
+
+func fragmentIsNotRule(raw, body []byte) bool {
+	values := fragmentHeaderValues(raw)
+	if nonemptyHeaderValue(values, "вид") {
+		return true
+	}
+	lines := bytes.Split(body, []byte("\n"))
+	allHeadings := len(lines) > 0
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(string(rawLine))
+		if line == "" {
+			continue
+		}
+		if !heading(line) {
+			allHeadings = false
+			break
+		}
+	}
+	if allHeadings {
+		for _, line := range lines {
+			if strings.TrimSpace(string(line)) != "" {
+				return true
+			}
+		}
+	}
+	first, firstIndex := "", -1
+	for i, rawLine := range lines {
+		if line := strings.TrimSpace(string(rawLine)); line != "" {
+			first = line
+			firstIndex = i
+			break
+		}
+	}
+	if first != "---" {
+		return false
+	}
+	name, description, closed := false, false, false
+	for _, rawLine := range lines[firstIndex+1:] {
+		line := strings.TrimSpace(string(rawLine))
+		if line == "---" {
+			closed = true
+			break
+		}
+		if strings.HasPrefix(line, "name:") {
+			name = true
+		}
+		if strings.HasPrefix(line, "description:") {
+			description = true
+		}
+	}
+	return closed && name && description
+}
+
+func conflictingRuleKindProblem(path string, raw []byte) string {
+	values := fragmentHeaderValues(raw)
+	if len(values["тип"]) > 0 && values["тип"][len(values["тип"])-1] == "правило" && nonemptyHeaderValue(values, "вид") {
+		return fmt.Sprintf("%s: fragment header cannot combine тип: правило and non-empty вид", path)
+	}
+	return ""
+}
+
+func sameCleanPath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	return errA == nil && errB == nil && filepath.Clean(absA) == filepath.Clean(absB)
 }
 
 // Rule field and text warnings of lex check, as they follow the fragment path.
@@ -5193,6 +5281,9 @@ func RuleWarningSummary(warnings []string) string {
 }
 
 func fragmentHasNoFields(raw, body []byte) bool {
+	if fragmentIsNotRule(raw, body) {
+		return false
+	}
 	values := fragmentHeaderValues(raw)
 	for _, field := range []string{"цель", "основание", "снять_когда", "тип", "вид"} {
 		if nonemptyHeaderValue(values, field) {
