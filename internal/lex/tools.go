@@ -600,7 +600,6 @@ func (t loadedTool) problem(words []string) string {
 	if problem != "" || i == len(words) {
 		return problem
 	}
-	reg := t.registry
 	start := i
 	if pathPlaceholder(words[start]) {
 		return ""
@@ -610,30 +609,40 @@ func (t loadedTool) problem(words []string) string {
 		return problem
 	}
 	if best == nil {
-		if strings.HasSuffix(words[start], ":") {
-			return ""
-		}
-		if longest == 0 && slices.Contains(reg.Tasks, words[start]) {
-			if command := t.taskCommand(); command != nil {
-				return t.commandFlags(words, start+1, command)
-			}
-			return ""
-		}
-		if root := t.rootCommand(); root != nil && (root.Rest != "none" || strings.HasPrefix(words[start], "-")) {
-			return t.commandFlags(words, start, root)
-		}
-		if root := t.rootCommand(); root != nil && root.Rest == "none" && !strings.HasPrefix(words[start], "-") {
-			return fmt.Sprintf("%s takes no arguments: %s", t.config.Name, words[start])
-		}
-		if longest == 0 && t.tasksKnown && len(reg.Tasks) == 0 && len(t.config.TaskCommand) == 0 {
-			return fmt.Sprintf("%s has no command %s", t.config.Name, words[start])
-		}
-		if longest == 0 && t.tasksKnown {
-			return fmt.Sprintf("%s has no command or task %s", t.config.Name, words[start])
+		return t.unmatchedFirstWord(words, start, longest)
+	}
+	return t.commandFlags(words, i+len(best.Path), best)
+}
+
+// unmatchedFirstWord checks the first word after global flags that is not a full registered command path.
+// A word that starts a longer path (longest > 0) names a command group and is not reported. A tool with tasks
+// keeps «has no command or task»: the word may be a misspelt task even when the root takes no arguments.
+func (t loadedTool) unmatchedFirstWord(words []string, start, longest int) string {
+	word := words[start]
+	if strings.HasSuffix(word, ":") {
+		return ""
+	}
+	if longest == 0 && slices.Contains(t.registry.Tasks, word) {
+		if command := t.taskCommand(); command != nil {
+			return t.commandFlags(words, start+1, command)
 		}
 		return ""
 	}
-	return t.commandFlags(words, i+len(best.Path), best)
+	root := t.rootCommand()
+	if root != nil && (root.Rest != "none" || strings.HasPrefix(word, "-")) {
+		return t.commandFlags(words, start, root)
+	}
+	if longest > 0 || !t.tasksKnown {
+		return ""
+	}
+	switch {
+	case len(t.registry.Tasks) > 0 || len(t.config.TaskCommand) > 0:
+		return fmt.Sprintf("%s has no command or task %s", t.config.Name, word)
+	case root != nil:
+		return fmt.Sprintf("%s takes no arguments: %s", t.config.Name, word)
+	default:
+		return fmt.Sprintf("%s has no command %s", t.config.Name, word)
+	}
 }
 
 func (t loadedTool) rootCommand() *toolCommand {

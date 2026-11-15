@@ -166,6 +166,13 @@ func TestToolCommandFlagForms(t *testing.T) {
 	testProblem("dash_args single dash", dashArgs, []string{"tool", "-"}, "tool takes no arguments: -")
 	testProblem("dash_args two dashes and name", dashArgs, []string{"tool", "--long=value"}, "")
 	testProblem("dash word without dash_args", toolCommand{Path: []string{}, Rest: "none"}, []string{"tool", "-1"}, "tool has no flag -1")
+
+	// The features apply to the command a word is parsed in, a subcommand as well as the root.
+	sub := func(c toolCommand) toolCommand { c.Path = []string{"e"}; return c }
+	testProblem("subcommand no_equals", sub(noEquals), []string{"tool", "e", "--runs=4"}, "tool e has no form --runs=")
+	testProblem("subcommand only-after-dashdash", sub(onlyAfter), []string{"tool", "e", "item"}, "tool e takes arguments only after --: item")
+	testProblem("subcommand no_dashdash", sub(toolCommand{Rest: "args", NoDashDash: true}), []string{"tool", "e", "--", "foo"}, "tool e has no flag --")
+	testProblem("subcommand dash_args", sub(dashArgs), []string{"tool", "e", "-1"}, "tool e takes no arguments: -1")
 }
 
 func TestToolUnknownFirstWordDiagnostics(t *testing.T) {
@@ -178,6 +185,9 @@ func TestToolUnknownFirstWordDiagnostics(t *testing.T) {
 		{"no tasks", loadedTool{config: configuredTool{Name: "busy"}, tasksKnown: true, registry: toolRegistry{}}, "busy has no command now"},
 		{"has tasks", loadedTool{config: configuredTool{Name: "busy"}, tasksKnown: true, registry: toolRegistry{Tasks: []string{"build"}}}, "busy has no command or task now"},
 		{"task command configured", loadedTool{config: configuredTool{Name: "busy", TaskCommand: []string{"run"}}, tasksKnown: true, registry: toolRegistry{}}, "busy has no command or task now"},
+		{"root none with tasks", loadedTool{config: configuredTool{Name: "busy"}, tasksKnown: true, registry: toolRegistry{Tasks: []string{"build"}, Commands: []toolCommand{{Path: []string{}, Rest: "none"}}}}, "busy has no command or task now"},
+		{"root none group of subcommands", loadedTool{config: configuredTool{Name: "busy"}, tasksKnown: true, registry: toolRegistry{Commands: []toolCommand{{Path: []string{}, Rest: "none"}, {Path: []string{"now", "leaf"}, Rest: "none"}}}}, ""},
+		{"root none tasks unknown", loadedTool{config: configuredTool{Name: "busy"}, registry: toolRegistry{Commands: []toolCommand{{Path: []string{}, Rest: "none"}}}}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.tool.problem([]string{"busy", "now"}); got != tc.want {
