@@ -55,7 +55,8 @@ var (
 	numberedHeading  = regexp.MustCompile(`^#{2,6}\s+([0-9]{1,6})([a-zа-я]?)\.\s+`)
 	stepHeading      = regexp.MustCompile(`(?i)^#{2,6}\s+шаг\s+([0-9]+[a-z]?)\b`)
 	stepRef          = regexp.MustCompile(`(?i)шаг[а-я]*\s+([0-9]+[a-z]?(?:\s*[–—-]\s*[0-9]+[a-z]?)?(?:\s+и\s+[0-9]+[a-z]?)*)`)
-	stepNumber       = regexp.MustCompile(`([0-9]+[a-z]?)(?:\s*[–—-]\s*([0-9]+[a-z]?))?`)
+	stepNumber       = regexp.MustCompile(`(?i)([0-9]+[a-z]?)(?:\s*[–—-]\s*([0-9]+[a-z]?))?`)
+	stepFileRef      = regexp.MustCompile("(?i)(?:^|[^а-яё])в\\s+`([^`\\n]+\\.md)`")
 	skillNameRef     = regexp.MustCompile("(?i)скилл[а-я]*\\s+`([a-z0-9-]+)`")
 	nearbyRef        = regexp.MustCompile("`([^`\\n]+\\.md)`\\s+рядом")
 	backDecision     = regexp.MustCompile("`([a-z0-9]+(?:-[a-z0-9]+)+)`\\s+в\\s+`[^`]*decisions\\.md`")
@@ -502,7 +503,7 @@ type refScanner struct {
 	last, headings  map[int]int
 	steps           map[string]bool
 	realKeys        map[string]string
-	listInterrupted bool
+	listInterrupted map[int]bool
 }
 
 // resolve is resolveRefTarget that also finds a corpus file reached through a
@@ -809,6 +810,14 @@ func dropDeeper(numbers map[int]int, level int) {
 	}
 }
 
+func dropDeeperFlags(flags map[int]bool, level int) {
+	for k := range flags {
+		if k > level {
+			delete(flags, k)
+		}
+	}
+}
+
 func (s *refScanner) heading(trim string) {
 	if !strings.HasPrefix(trim, "#") {
 		return
@@ -844,8 +853,13 @@ func (s *refScanner) list() {
 		}
 		if strings.HasPrefix(trim, "#") {
 			clear(s.last)
+			clear(s.listInterrupted)
 		}
-		s.listInterrupted = true
+		if s.line[0] != ' ' && s.line[0] != '\t' {
+			for indent := range s.last {
+				s.listInterrupted[indent] = true
+			}
+		}
 		return
 	}
 	indent := len(match[1])
@@ -858,20 +872,28 @@ func (s *refScanner) list() {
 		return
 	}
 	expected := s.last[indent] + 1
-	if !(expected == 1 && n == 0) && n != expected && !(s.listInterrupted && n == 1) {
+	if !(expected == 1 && n == 0) && n != expected && !(s.listInterrupted[indent] && (n == 0 || n == 1)) {
 		s.add(4, fmt.Sprintf("ожидался пункт %d, найден %d", expected, n))
 	}
 	s.last[indent] = n
 	dropDeeper(s.last, indent)
-	s.listInterrupted = false
+	delete(s.listInterrupted, indent)
+	dropDeeperFlags(s.listInterrupted, indent)
 }
 
 func (s *refScanner) numbering() {
-	for _, match := range stepRef.FindAllStringSubmatch(s.line, -1) {
-		for _, number := range stepNumber.FindAllStringSubmatch(match[1], -1) {
-			if strings.IndexFunc(number[1], func(r rune) bool { return r >= 'a' && r <= 'z' }) >= 0 {
-				if !s.stepAvailable(number[1]) {
-					s.add(4, "нет шага "+number[1])
+	stepMatches := stepRef.FindAllStringSubmatchIndex(s.line, -1)
+	for i, match := range stepMatches {
+		before := len(s.line)
+		if i+1 < len(stepMatches) {
+			before = stepMatches[i+1][0]
+		}
+		stepText := s.line[match[2]:match[3]]
+		for _, number := range stepNumber.FindAllStringSubmatch(stepText, -1) {
+			step := strings.ToLower(number[1])
+			if strings.IndexFunc(step, func(r rune) bool { return r >= 'a' && r <= 'z' }) >= 0 {
+				if !s.stepAvailable(step, match[1], before) {
+					s.add(4, "нет шага "+step)
 				}
 				continue
 			}
@@ -882,7 +904,7 @@ func (s *refScanner) numbering() {
 			}
 			last := first
 			if number[2] != "" {
-				last, err = strconv.Atoi(number[2])
+				last, err = strconv.Atoi(strings.ToLower(number[2]))
 				if err != nil {
 					s.add(4, fmt.Sprintf("неверный номер шага %s: %v", number[2], err))
 					continue
@@ -890,7 +912,7 @@ func (s *refScanner) numbering() {
 			}
 			for n := first; n <= last; n++ {
 				step := strconv.Itoa(n)
-				if !s.stepAvailable(step) {
+				if !s.stepAvailable(step, match[1], before) {
 					s.add(4, "нет шага "+step)
 				}
 			}
@@ -901,12 +923,18 @@ func (s *refScanner) numbering() {
 	s.list()
 }
 
-func (s *refScanner) stepAvailable(step string) bool {
-	for _, match := range fileRef.FindAllStringSubmatch(s.line, -1) {
-		target := s.resolve(match[1])
-		if body, ok := s.corpus[target]; ok && !s.external[target] && stepExistsInBody(string(body), step) {
+func (s *refScanner) stepAvailable(step string, after, before int) bool {
+	step = strings.ToLower(step)
+	for _, match := range stepFileRef.FindAllStringSubmatchIndex(s.line, -1) {
+		if match[0] < after || match[0] >= before {
+			continue
+		}
+		target := s.resolve(s.line[match[2]:match[3]])
+		body, ok := s.corpus[target]
+		if !ok || s.external[target] {
 			return true
 		}
+		return stepExistsInBody(string(body), step)
 	}
 	if match := skillNameRef.FindStringSubmatch(s.line); match != nil {
 		target := filepath.Join(filepath.Dir(filepath.Dir(s.path)), match[1], "SKILL.md")
@@ -936,13 +964,13 @@ func stepExistsAnywhere(corpus textCorpus, step string, excluded map[string]bool
 
 func stepExistsInBody(body, step string) bool {
 	for line := range strings.SplitSeq(body, "\n") {
-		if item := listItem.FindStringSubmatch(line); item != nil && item[2]+item[3] == step {
+		if item := listItem.FindStringSubmatch(line); item != nil && strings.EqualFold(item[2]+item[3], step) {
 			return true
 		}
-		if heading := numberedHeading.FindStringSubmatch(strings.TrimSpace(line)); heading != nil && heading[1]+heading[2] == step {
+		if heading := numberedHeading.FindStringSubmatch(strings.TrimSpace(line)); heading != nil && strings.EqualFold(heading[1]+heading[2], step) {
 			return true
 		}
-		if heading := stepHeading.FindStringSubmatch(strings.TrimSpace(line)); heading != nil && heading[1] == step {
+		if heading := stepHeading.FindStringSubmatch(strings.TrimSpace(line)); heading != nil && strings.EqualFold(heading[1], step) {
 			return true
 		}
 	}
@@ -952,7 +980,7 @@ func stepExistsInBody(body, step string) bool {
 func (s *refScanner) scan(path string) {
 	s.path = path
 	s.last, s.headings, s.steps = map[int]int{}, map[int]int{}, map[string]bool{}
-	s.listInterrupted = false
+	s.listInterrupted = map[int]bool{}
 	lines := strings.Split(string(s.corpus[path]), "\n")
 	stepLines := lines
 	if sibling, ok := s.corpus[filepath.Join(filepath.Dir(path), "SKILL.md")]; ok && filepath.Base(path) != "SKILL.md" {
@@ -960,26 +988,35 @@ func (s *refScanner) scan(path string) {
 	}
 	for _, line := range stepLines {
 		if m := listItem.FindStringSubmatch(line); m != nil {
-			s.steps[m[2]+m[3]] = true
+			s.steps[strings.ToLower(m[2]+m[3])] = true
 		}
 		if m := numberedHeading.FindStringSubmatch(line); m != nil {
-			s.steps[m[1]+m[2]] = true
+			s.steps[strings.ToLower(m[1]+m[2])] = true
 		}
 		if m := stepHeading.FindStringSubmatch(line); m != nil {
-			s.steps[m[1]] = true
+			s.steps[strings.ToLower(m[1])] = true
 		}
 	}
-	fence := false
+	fence, fenceInItem := false, false
 	for i, line := range lines {
 		trim := strings.TrimSpace(line)
 		if strings.HasPrefix(trim, "```") || strings.HasPrefix(trim, "~~~") {
+			if !fence {
+				fenceInItem = line[0] == ' ' || line[0] == '\t'
+			}
 			fence = !fence
-			s.listInterrupted = true
+			if !fenceInItem {
+				for indent := range s.last {
+					s.listInterrupted[indent] = true
+				}
+			}
 			continue
 		}
 		if fence {
-			if trim != "" {
-				s.listInterrupted = true
+			if trim != "" && !fenceInItem {
+				for indent := range s.last {
+					s.listInterrupted[indent] = true
+				}
 			}
 			continue
 		}

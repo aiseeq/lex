@@ -88,6 +88,80 @@ func TestNumberingStillFindsRealGapsAndRestarts(t *testing.T) {
 	}
 }
 
+func TestNumberingInterruptionRequiresUnindentedText(t *testing.T) {
+	for _, tc := range []struct {
+		name, between string
+	}{
+		{"indented prose", "   Пояснение.\n"},
+		{"nested bullet", "   - вложенный пункт\n"},
+		{"indented code fence", "   ```\n   код\n   ```\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "1. a\n" + tc.between + "1. b\n"
+			findings := numberingFindings(filepath.Join(t.TempDir(), "guide.md"), body)
+			if !hasNumberingFinding(findings, "ожидался пункт 2, найден 1") {
+				t.Fatalf("отступный текст не должен прерывать список: %v", findings)
+			}
+		})
+	}
+}
+
+func TestNumberingRestartAfterTextAcceptsZero(t *testing.T) {
+	body := "1. a\n2. b\n\nТекст.\n\n0. c\n1. d\n"
+	findings := numberingFindings(filepath.Join(t.TempDir(), "guide.md"), body)
+	if hasNumberingFinding(findings, "ожидался пункт") {
+		t.Fatalf("после текста новый список может начинаться с нуля: %v", findings)
+	}
+}
+
+func TestNumberingStepUsesNearestNamedFile(t *testing.T) {
+	dir := t.TempDir()
+	skill := filepath.Join(dir, "SKILL.md")
+	a := filepath.Join(dir, "a.md")
+	b := filepath.Join(dir, "b.md")
+	corpus := textCorpus{
+		skill: []byte("Шаг 5 в `a.md`, шаг 2 в `b.md`.\n"),
+		a:     []byte("1. a\n2. b\n"),
+		b:     []byte("1. a\n2. b\n3. c\n4. d\n5. e\n"),
+	}
+	findings := numberingFindingsFromCorpus(corpus, skill)
+	if !hasNumberingFinding(findings, "нет шага 5") {
+		t.Fatalf("шаг 5 должен проверяться в ближайшем файле a.md: %v", findings)
+	}
+}
+
+func TestNumberingNamedFileControlsStepLookup(t *testing.T) {
+	t.Run("missing file is not checked", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "SKILL.md")
+		findings := numberingFindings(path, "Шаг 5 в `other.md`.\n")
+		if hasNumberingFinding(findings, "нет шага 5") {
+			t.Fatalf("отсутствующий файл не должен откатываться на локальные шаги: %v", findings)
+		}
+	})
+
+	t.Run("present file is exclusive", func(t *testing.T) {
+		dir := t.TempDir()
+		skill := filepath.Join(dir, "SKILL.md")
+		commands := filepath.Join(dir, "commands.md")
+		corpus := textCorpus{
+			skill:    []byte("1. a\n2. b\n3. c\n4. d\n5. e\nШаг 5 в `commands.md`.\n"),
+			commands: []byte("1. a\n2. b\n3. c\n"),
+		}
+		findings := numberingFindingsFromCorpus(corpus, skill)
+		if !hasNumberingFinding(findings, "нет шага 5") {
+			t.Fatalf("при наличии commands.md нужно проверять только его: %v", findings)
+		}
+	})
+}
+
+func TestNumberingStepSuffixIsCaseInsensitive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "SKILL.md")
+	findings := numberingFindings(path, "## ШАГ 2A\n\nСм. шаг 2a.\n")
+	if hasNumberingFinding(findings, "нет шага") {
+		t.Fatalf("буквенный суффикс шага должен сравниваться без учёта регистра: %v", findings)
+	}
+}
+
 func numberingFindings(path, body string) []textRefFinding {
 	return numberingFindingsFromCorpus(textCorpus{path: []byte(body)}, path)
 }
@@ -104,4 +178,12 @@ func hasNumberingFinding(findings []textRefFinding, contains string) bool {
 		}
 	}
 	return false
+}
+
+func TestNumberingSkipsIndentedCodeInsideItem(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "guide.md")
+	findings := numberingFindings(path, "1. a\n   ```\n   3. x\n   шаг 9\n   ```\n2. b\n")
+	if len(findings) > 0 {
+		t.Fatalf("код с отступом внутри пункта проверен как текст: %v", findings)
+	}
 }
