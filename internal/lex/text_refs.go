@@ -76,8 +76,8 @@ var (
 	// before a capital it ends the sentence; «т. е.», «т. к.», initials do not.
 	listEnd = regexp.MustCompile(`(?i)(?:^|[^а-яёa-z])(?:т\.\s*[дп]|др|пр)$`)
 	// wordEnd is a one-letter word that ends a sentence, not an abbreviation:
-	// a unit after a number («2026 г.», «2 ч.») or «я».
-	wordEnd = regexp.MustCompile(`(?:[0-9]\s*[а-яё]|(?:^|\s)я)$`)
+	// a unit after a number («2026 г.», «2 ч.», «5 мин.») or «я».
+	wordEnd = regexp.MustCompile(`(?:[0-9]\s*(?:[а-яё]|мин|сек|шт)|(?:^|\s)я)$`)
 	// sentenceNext is the start of a sentence: a capital, a quote, code, bold, a
 	// Markdown link or a number; after a unit («п. 9», «3 ч. 2») a number goes on
 	// with it, so wordNext leaves the number out.
