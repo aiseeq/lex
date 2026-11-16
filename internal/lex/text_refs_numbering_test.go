@@ -239,3 +239,56 @@ func TestNumberingNamedFileWithoutStepsIsStepOutput(t *testing.T) {
 		t.Fatalf("файл без шагов принят за место шага: %v", findings)
 	}
 }
+
+// A paragraph that puts steps 1–4 in another file's section counts them: the
+// list of this file goes on from step 5 and the steps are not missing.
+func TestNumberingStepsInAnotherFileSection(t *testing.T) {
+	dir := t.TempDir()
+	skill := filepath.Join(dir, "SKILL.md")
+	guide := filepath.Join(dir, "guide.md")
+	body := "Шаги 1–4 делает мастер по `%s`, «Приёмка»; шаг 5 — свой.\n\n5. Пятый шаг\n"
+	cases := []struct {
+		name, ref string
+		corpus    textCorpus
+	}{
+		{"file outside the corpus", "/elsewhere/CLAUDE.md", textCorpus{}},
+		{"file in the corpus with the section", "guide.md", textCorpus{guide: []byte("## Приёмка\n1. a\n2. b\n3. c\n4. d\n")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.corpus[skill] = []byte(strings.Replace(body, "%s", tc.ref, 1))
+			findings := numberingFindingsFromCorpus(tc.corpus, skill)
+			if hasNumberingFinding(findings, "нет шага") || hasNumberingFinding(findings, "ожидался пункт") {
+				t.Fatalf("шаги из раздела другого файла не засчитаны: %v", findings)
+			}
+		})
+	}
+}
+
+func TestNumberingStepsElsewhereStillNeedFileSectionAndSteps(t *testing.T) {
+	dir := t.TempDir()
+	skill := filepath.Join(dir, "SKILL.md")
+	guide := filepath.Join(dir, "guide.md")
+	cases := []struct {
+		name, body, guide, want string
+	}{
+		{"no section", "Шаги 1–4 делает мастер по `/elsewhere/CLAUDE.md`.\n\n5. Пятый шаг\n", "", "ожидался пункт 1, найден 5"},
+		{"no file", "Шаги 1–4 делает мастер, «Приёмка».\n\n5. Пятый шаг\n", "", "нет шага 1"},
+		{"section after the clause", "Шаги 1–4 делает мастер; см. `/elsewhere/CLAUDE.md`, «Приёмка».\n\n5. Пятый шаг\n", "", "нет шага 2"},
+		{"section missing in the corpus file", "Шаги 1–4 по `guide.md`, «Приёмка».\n\n5. Пятый шаг\n", "## Другое\n1. a\n2. b\n3. c\n4. d\n", "нет шага 3"},
+		{"step missing in the corpus file", "Шаги 1–4 по `guide.md`, «Приёмка».\n\n5. Пятый шаг\n", "## Приёмка\n1. a\n2. b\n3. c\n", "нет шага 4"},
+		{"list skips past the counted steps", "Шаги 1–2 по `/elsewhere/CLAUDE.md`, «Приёмка».\n\n4. Четвёртый шаг\n", "", "ожидался пункт 1, найден 4"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			corpus := textCorpus{skill: []byte(tc.body)}
+			if tc.guide != "" {
+				corpus[guide] = []byte(tc.guide)
+			}
+			findings := numberingFindingsFromCorpus(corpus, skill)
+			if !hasNumberingFinding(findings, tc.want) {
+				t.Fatalf("не найдена ожидаемая находка %q: %v", tc.want, findings)
+			}
+		})
+	}
+}

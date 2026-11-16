@@ -58,8 +58,12 @@ var (
 	stepNumber       = regexp.MustCompile(`(?i)([0-9]+[a-z]?)(?:\s*[–—-]\s*([0-9]+[a-z]?))?`)
 	stepFileRef      = regexp.MustCompile("(?i)^\\s+(?:в|из)(?:\\s+файл[а-я]*)?\\s+(?:`([^`\\n]+\\.md)`|\\[[^\\]\\n]+\\]\\(([^)\\s#]+\\.md)(?:#[^)\\s]*)?\\))")
 	skillNameRef     = regexp.MustCompile("(?i)скилл[а-я]*\\s+`([a-z0-9-]+)`")
-	nearbyRef        = regexp.MustCompile("`([^`\\n]+\\.md)`\\s+рядом")
-	backDecision     = regexp.MustCompile("`([a-z0-9]+(?:-[a-z0-9]+)+)`\\s+в\\s+`[^`]*decisions\\.md`")
+	// stepSectionRef is a file and its section named in the clause after a step
+	// number: «Шаги 1–4 делает мастер по `x.md`, «Тикет»» — the steps are that section's.
+	stepSectionRef = regexp.MustCompile("`([^`\\n]+\\.md)`,?\\s*(?:раздел[а-я]*\\s+)?«([^«»]+)»")
+	clauseEnd      = regexp.MustCompile(`;|\.(?:\s|$)`)
+	nearbyRef      = regexp.MustCompile("`([^`\\n]+\\.md)`\\s+рядом")
+	backDecision   = regexp.MustCompile("`([a-z0-9]+(?:-[a-z0-9]+)+)`\\s+в\\s+`[^`]*decisions\\.md`")
 )
 
 type textRefException struct {
@@ -510,6 +514,7 @@ type refScanner struct {
 	found           []textRefFinding
 	last, headings  map[int]int
 	steps           map[string]bool
+	elsewhere       map[int]bool
 	realKeys        map[string]string
 	listInterrupted map[int]bool
 }
@@ -880,7 +885,7 @@ func (s *refScanner) list() {
 		return
 	}
 	expected := s.last[indent] + 1
-	if !(expected == 1 && n == 0) && n != expected && !(s.listInterrupted[indent] && (n == 0 || n == 1)) {
+	if !(expected == 1 && n == 0) && n != expected && !(s.listInterrupted[indent] && (n == 0 || n == 1)) && !s.numberedElsewhere(expected, n) {
 		s.add(4, fmt.Sprintf("ожидался пункт %d, найден %d", expected, n))
 	}
 	s.last[indent] = n
@@ -892,9 +897,13 @@ func (s *refScanner) list() {
 func (s *refScanner) numbering() {
 	for _, match := range stepRef.FindAllStringSubmatchIndex(s.line, -1) {
 		stepText := s.line[match[2]:match[3]]
+		away, awayBody := s.stepSection(match[1])
 		for _, number := range stepNumber.FindAllStringSubmatch(stepText, -1) {
 			step := strings.ToLower(number[1])
 			if strings.IndexFunc(step, func(r rune) bool { return r >= 'a' && r <= 'z' }) >= 0 {
+				if away && (awayBody == "" || stepExistsInBody(awayBody, step)) {
+					continue
+				}
 				if !s.stepAvailable(step, match[1]) {
 					s.add(4, "нет шага "+step)
 				}
@@ -915,6 +924,10 @@ func (s *refScanner) numbering() {
 			}
 			for n := first; n <= last; n++ {
 				step := strconv.Itoa(n)
+				if away && (awayBody == "" || stepExistsInBody(awayBody, step)) {
+					s.elsewhere[n] = true
+					continue
+				}
 				if !s.stepAvailable(step, match[1]) {
 					s.add(4, "нет шага "+step)
 				}
@@ -924,6 +937,46 @@ func (s *refScanner) numbering() {
 	trim := strings.TrimSpace(s.line)
 	s.heading(trim)
 	s.list()
+}
+
+// stepSection reports whether the clause after a step reference, up to «;» or the
+// end of the sentence, names a file and its section, so the steps are numbered
+// there. body is that file when the corpus holds it and the section is in it, for
+// the steps to be checked against; a file outside the corpus or external is
+// trusted, as elsewhere in the check, and body is empty.
+func (s *refScanner) stepSection(after int) (bool, string) {
+	clause := s.line[after:]
+	if end := clauseEnd.FindStringIndex(clause); end != nil {
+		clause = clause[:end[0]]
+	}
+	match := stepSectionRef.FindStringSubmatch(clause)
+	if match == nil {
+		return false, ""
+	}
+	target := s.resolve(match[1])
+	body, ok := s.corpus[target]
+	if !ok || s.external[target] {
+		return true, ""
+	}
+	if !sectionExists(string(body), match[2], s.line) {
+		return false, ""
+	}
+	return true, string(body)
+}
+
+// numberedElsewhere reports whether the list numbers from expected up to n, not
+// including n, are steps a reference in this file put in another file's section:
+// a list that goes on from them does not skip a number.
+func (s *refScanner) numberedElsewhere(expected, n int) bool {
+	if n <= expected {
+		return false
+	}
+	for k := expected; k < n; k++ {
+		if !s.elsewhere[k] {
+			return false
+		}
+	}
+	return true
 }
 
 // stepAvailable reports whether step exists where the reference may point. A
@@ -986,7 +1039,7 @@ func stepExistsInBody(body, step string) bool {
 
 func (s *refScanner) scan(path string) {
 	s.path = path
-	s.last, s.headings, s.steps = map[int]int{}, map[int]int{}, map[string]bool{}
+	s.last, s.headings, s.steps, s.elsewhere = map[int]int{}, map[int]int{}, map[string]bool{}, map[int]bool{}
 	s.listInterrupted = map[int]bool{}
 	lines := strings.Split(string(s.corpus[path]), "\n")
 	stepLines := lines
