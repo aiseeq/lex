@@ -71,15 +71,18 @@ var (
 	// clauseEnd is «;» or a sentence end: a dot before a space or the line end.
 	// The dot of an abbreviation («т. е.», «см.») is skipped by stepClause.
 	clauseEnd       = regexp.MustCompile(`;|[.!?](?:\s|$)`)
-	abbreviationEnd = regexp.MustCompile(`(?i)(?:^|[^а-яёa-z])(?:[а-яё]|см|напр|др|пр|стр|ср)$`)
+	abbreviationEnd = regexp.MustCompile(`(?i)(?:^|[^а-яёa-z])(?:[а-яё]|см|напр|др|пр|стр|ср|мин|сек|тыс|шт)$`)
 	// listEnd is an abbreviation that closes an enumeration («и т. д.», «и др.»):
 	// before a capital it ends the sentence; «т. е.», «т. к.», initials do not.
 	listEnd = regexp.MustCompile(`(?i)(?:^|[^а-яёa-z])(?:т\.\s*[дп]|др|пр)$`)
 	// wordEnd is a one-letter word that ends a sentence, not an abbreviation:
 	// a unit after a number («2026 г.», «2 ч.») or «я».
 	wordEnd = regexp.MustCompile(`(?:[0-9]\s*[а-яё]|(?:^|\s)я)$`)
-	// sentenceNext is the start of a sentence: a capital, a quote, code, bold or a number.
-	sentenceNext    = regexp.MustCompile("^\\s+[А-ЯЁA-Z«`*0-9]")
+	// sentenceNext is the start of a sentence: a capital, a quote, code, bold, a
+	// Markdown link or a number; after a unit («п. 9», «3 ч. 2») a number goes on
+	// with it, so wordNext leaves the number out.
+	sentenceNext    = regexp.MustCompile("^\\s+[А-ЯЁA-Z«`*\\[0-9]")
+	wordNext        = regexp.MustCompile("^\\s+[А-ЯЁA-Z«`*\\[]")
 	sectionNumbered = regexp.MustCompile(`^[0-9]{1,6}[a-zа-я]?\.\s+`)
 	boldLine        = regexp.MustCompile(`^\*\*[^*]+\*\*:?$`)
 	nearbyRef       = regexp.MustCompile("`([^`\\n]+\\.md)`\\s+рядом")
@@ -1025,8 +1028,10 @@ func stepClause(text string) string {
 		}
 		end := from + loc[0]
 		inQuote := strings.Count(text[:end], "«") > strings.Count(text[:end], "»")
-		abbreviation := text[end] == '.' && abbreviationEnd.MatchString(text[:end]) &&
-			!((listEnd.MatchString(text[:end]) || wordEnd.MatchString(text[:end])) && sentenceNext.MatchString(text[end+1:]))
+		before, after := text[:end], text[end+1:]
+		endsSentence := listEnd.MatchString(before) && sentenceNext.MatchString(after) ||
+			wordEnd.MatchString(before) && wordNext.MatchString(after)
+		abbreviation := text[end] == '.' && abbreviationEnd.MatchString(before) && !endsSentence
 		if inQuote || abbreviation {
 			from = end + 1
 			continue
