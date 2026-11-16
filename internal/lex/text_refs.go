@@ -60,7 +60,9 @@ var (
 	skillNameRef     = regexp.MustCompile("(?i)скилл[а-я]*\\s+`([a-z0-9-]+)`")
 	// stepSectionRef is a file and its section named in the clause after a step
 	// number: «Шаги 1–4 делает мастер по `x.md`, «Тикет»» — the steps are that section's.
-	stepSectionRef = regexp.MustCompile("`([^`\\n]+\\.md)`,?\\s*(?:раздел[а-я]*\\s+)?«([^«»]+)»")
+	// The file stands right after «по», «в» or «из»: a file and a quote that only
+	// sit in the same sentence («пример — `x.md`, «Пример»») are not where the steps are.
+	stepSectionRef = regexp.MustCompile("(?i)(?:^|\\s)(?:по|в|из)(?:\\s+файл[а-я]*)?\\s+`([^`\\n]+\\.md)`,?\\s*(?:раздел[а-я]*\\s+)?«([^«»]+)»")
 	clauseEnd      = regexp.MustCompile(`;|\.(?:\s|$)`)
 	nearbyRef      = regexp.MustCompile("`([^`\\n]+\\.md)`\\s+рядом")
 	backDecision   = regexp.MustCompile("`([a-z0-9]+(?:-[a-z0-9]+)+)`\\s+в\\s+`[^`]*decisions\\.md`")
@@ -515,6 +517,7 @@ type refScanner struct {
 	last, headings  map[int]int
 	steps           map[string]bool
 	elsewhere       map[int]bool
+	elsewhereLine   int
 	realKeys        map[string]string
 	listInterrupted map[int]bool
 }
@@ -867,6 +870,7 @@ func (s *refScanner) list() {
 		if strings.HasPrefix(trim, "#") {
 			clear(s.last)
 			clear(s.listInterrupted)
+			clear(s.elsewhere)
 		}
 		if s.line[0] != ' ' && s.line[0] != '\t' {
 			for indent := range s.last {
@@ -885,8 +889,12 @@ func (s *refScanner) list() {
 		return
 	}
 	expected := s.last[indent] + 1
-	if !(expected == 1 && n == 0) && n != expected && !(s.listInterrupted[indent] && (n == 0 || n == 1)) && !s.numberedElsewhere(expected, n) {
+	if !(expected == 1 && n == 0) && n != expected && !(s.listInterrupted[indent] && (n == 0 || n == 1)) && !s.numberedElsewhere(indent, expected, n) {
 		s.add(4, fmt.Sprintf("ожидался пункт %d, найден %d", expected, n))
+	}
+	// The counted steps are for the first top-level item after the reference only.
+	if indent == 0 && s.number != s.elsewhereLine {
+		clear(s.elsewhere)
 	}
 	s.last[indent] = n
 	dropDeeper(s.last, indent)
@@ -897,11 +905,11 @@ func (s *refScanner) list() {
 func (s *refScanner) numbering() {
 	for _, match := range stepRef.FindAllStringSubmatchIndex(s.line, -1) {
 		stepText := s.line[match[2]:match[3]]
-		away, awayBody := s.stepSection(match[1])
+		awayBody, away := s.stepSection(match[1])
 		for _, number := range stepNumber.FindAllStringSubmatch(stepText, -1) {
 			step := strings.ToLower(number[1])
 			if strings.IndexFunc(step, func(r rune) bool { return r >= 'a' && r <= 'z' }) >= 0 {
-				if away && (awayBody == "" || stepExistsInBody(awayBody, step)) {
+				if away && stepExistsInBody(awayBody, step) {
 					continue
 				}
 				if !s.stepAvailable(step, match[1]) {
@@ -924,8 +932,9 @@ func (s *refScanner) numbering() {
 			}
 			for n := first; n <= last; n++ {
 				step := strconv.Itoa(n)
-				if away && (awayBody == "" || stepExistsInBody(awayBody, step)) {
+				if away && stepExistsInBody(awayBody, step) {
 					s.elsewhere[n] = true
+					s.elsewhereLine = s.number
 					continue
 				}
 				if !s.stepAvailable(step, match[1]) {
@@ -939,40 +948,93 @@ func (s *refScanner) numbering() {
 	s.list()
 }
 
-// stepSection reports whether the clause after a step reference, up to «;» or the
-// end of the sentence, names a file and its section, so the steps are numbered
-// there. body is that file when the corpus holds it and the section is in it, for
-// the steps to be checked against; a file outside the corpus or external is
-// trusted, as elsewhere in the check, and body is empty.
-func (s *refScanner) stepSection(after int) (bool, string) {
+// stepSection returns the section that the clause after a step reference, up to
+// «;» or the end of the sentence, names in a file — the steps are numbered there.
+// The file is the corpus copy or, outside the corpus, the file on disk; a file
+// that is in neither does not hold the steps.
+func (s *refScanner) stepSection(after int) (string, bool) {
 	clause := s.line[after:]
 	if end := clauseEnd.FindStringIndex(clause); end != nil {
 		clause = clause[:end[0]]
 	}
 	match := stepSectionRef.FindStringSubmatch(clause)
 	if match == nil {
-		return false, ""
+		return "", false
 	}
 	target := s.resolve(match[1])
 	body, ok := s.corpus[target]
-	if !ok || s.external[target] {
-		return true, ""
+	if !ok {
+		data, err := os.ReadFile(target)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			// No file holds no section: the steps stay to be found here, and the
+			// step check names the missing ones.
+		case err != nil:
+			s.add(4, fmt.Sprintf("не прочитан файл шагов %s: %v", target, err))
+			return "", false
+		}
+		body = data
 	}
-	if !sectionExists(string(body), match[2], s.line) {
-		return false, ""
-	}
-	return true, string(body)
+	return sectionBody(string(body), match[2])
 }
 
-// numberedElsewhere reports whether the list numbers from expected up to n, not
-// including n, are steps a reference in this file put in another file's section:
-// a list that goes on from them does not skip a number.
-func (s *refScanner) numberedElsewhere(expected, n int) bool {
-	if n <= expected {
+// sectionBody returns the lines under the heading equal to title: a # heading
+// up to the next heading of its level or above, a plain line (the shared
+// CLAUDE.md form) or a bold line up to the next # heading.
+func sectionBody(body, title string) (string, bool) {
+	norm := func(s string) string {
+		s = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(s), "#"))
+		s = strings.TrimSuffix(strings.TrimPrefix(s, "**"), "**")
+		return strings.ToLower(strings.ReplaceAll(strings.TrimSuffix(strings.TrimSpace(s), ":"), "ё", "е"))
+	}
+	title = norm(title)
+	lines := strings.Split(body, "\n")
+	start, inFence := -1, false
+	for i, line := range lines {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~") {
+			inFence = !inFence
+			continue
+		}
+		if !inFence && line == strings.TrimLeft(line, " \t") && !listItem.MatchString(line) && norm(t) == title {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return "", false
+	}
+	heading := strings.TrimSpace(lines[start])
+	level := len(heading) - len(strings.TrimLeft(heading, "#"))
+	end := len(lines)
+	for j := start + 1; j < len(lines); j++ {
+		next := strings.TrimSpace(lines[j])
+		if !strings.HasPrefix(next, "#") {
+			continue
+		}
+		if nextLevel := len(next) - len(strings.TrimLeft(next, "#")); level == 0 || nextLevel <= level {
+			end = j
+			break
+		}
+	}
+	return strings.Join(lines[start+1:end], "\n"), true
+}
+
+// numberedElsewhere reports whether a top-level list may go on from n although
+// expected comes next: the numbers from expected up to n are steps a reference
+// put in another file's section, and the list has not used any of those steps
+// itself.
+func (s *refScanner) numberedElsewhere(indent, expected, n int) bool {
+	if indent != 0 || n <= expected {
 		return false
 	}
 	for k := expected; k < n; k++ {
 		if !s.elsewhere[k] {
+			return false
+		}
+	}
+	for k := 1; k < expected; k++ {
+		if s.elsewhere[k] {
 			return false
 		}
 	}
