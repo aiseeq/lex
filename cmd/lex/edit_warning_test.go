@@ -50,6 +50,36 @@ func warningFixture(t *testing.T) (string, string, string) {
 	return root, codex, output
 }
 
+func TestBuildRefusalNamesOtherSession(t *testing.T) {
+	_, codex, output := warningFixture(t)
+	manual := []byte("# Sample\n\nUnfinished edit from another session.\n")
+	if err := os.WriteFile(output, manual, 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := captureRun(t, "build", "--codex", codex, output)
+	if err == nil {
+		t.Fatal("build unexpectedly accepted a manual edit")
+	}
+	full := err.Error()
+	_, message, found := strings.Cut(full, "output has manual edits")
+	if !found {
+		t.Fatalf("refusal does not identify manual edits: %q", full)
+	}
+	session := strings.Index(message, "session")
+	absorb := strings.Index(message, "lex absorb")
+	force := strings.Index(message, "--force")
+	if session < 0 || absorb < 0 || force < 0 || session > absorb || session > force {
+		t.Errorf("refusal must name the other session before absorb and force: %q", full)
+	}
+	after, readErr := os.ReadFile(output)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(after, manual) {
+		t.Errorf("build overwrote manual edit: got %q, want %q", after, manual)
+	}
+}
+
 func unsetGitEnvironment(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"} {

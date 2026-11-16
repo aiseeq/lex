@@ -603,7 +603,7 @@ type BuildCheckOptionsValue struct {
 	Output   string
 }
 
-var errManualOutputEdits = errors.New("output has manual edits; use lex absorb or --force")
+var errManualOutputEdits = errors.New("output has manual edits; if you did not make them, another session may be mid-edit — let it finish; your own edit: lex absorb --codex DIR <file> (keep) or lex build --codex DIR --force <file> (discard)")
 
 func BuildCheckOptions(codex string, options BuildCheckOptionsValue) error {
 	codex, err := canonicalCodex(codex, false)
