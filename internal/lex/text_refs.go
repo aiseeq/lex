@@ -67,11 +67,13 @@ var (
 	// («по разделу «Тикет» в `x.md`»).
 	stepSectionRef = regexp.MustCompile("(?i)(?:^|\\s)(?:по|в|из)(?:\\s+файл[а-я]*)?\\s+" + stepFileToken +
 		",?\\s*\\(?(?:в\\s+)?(?:раздел[а-я]*\\s+)?«([^«»]+)»")
-	stepSectionFirstRef = regexp.MustCompile("(?i)(?:^|\\s)(?:по|в|из)\\s+раздел[а-я]*\\s+«([^«»]+)»,?\\s+(?:в|из)(?:\\s+файл[а-я]*)?\\s+" + stepFileToken)
+	stepSectionFirstRef = regexp.MustCompile("(?i)(?:^|\\s)(?:по|в|из)\\s+раздел[а-я]*\\s+«([^«»]+)»,?\\s+(?:(?:в|из)(?:\\s+файл[а-я]*)?|файла)\\s+" + stepFileToken)
 	// clauseEnd is «;» or a sentence end: a dot before a space or the line end.
 	// The dot of an abbreviation («т. е.», «см.») is skipped by stepClause.
 	clauseEnd       = regexp.MustCompile(`;|[.!?](?:\s|$)`)
 	abbreviationEnd = regexp.MustCompile(`(?i)(?:^|[^а-яёa-z])(?:[а-яё]|см|напр|др|пр|стр|ср)$`)
+	letterEnd       = regexp.MustCompile(`(?i)(?:^|[^а-яёa-z])[а-яё]$`)
+	capitalNext     = regexp.MustCompile(`^\s+[А-ЯЁA-Z]`)
 	sectionNumbered = regexp.MustCompile(`^[0-9]{1,6}[a-zа-я]?\.\s+`)
 	boldLine        = regexp.MustCompile(`^\*\*[^*]+\*\*:?$`)
 	nearbyRef       = regexp.MustCompile("`([^`\\n]+\\.md)`\\s+рядом")
@@ -1004,8 +1006,9 @@ func (s *refScanner) stepSection(after int) (string, bool) {
 	return sectionBody(string(body), title)
 }
 
-// stepClause is text up to «;» or the end of its sentence; the dot of an
-// abbreviation (a one-letter word, «см.», «напр.») does not end it.
+// stepClause is text up to «;» or the end of its sentence. The dot of an
+// abbreviation («т. е.», «см.», «напр.») does not end it, but a one-letter one
+// before a capital does («и т. д. Формат»), and neither does a dot inside «…».
 func stepClause(text string) string {
 	from := 0
 	for {
@@ -1014,7 +1017,10 @@ func stepClause(text string) string {
 			return text
 		}
 		end := from + loc[0]
-		if text[end] == '.' && abbreviationEnd.MatchString(text[:end]) {
+		inQuote := strings.Count(text[:end], "«") > strings.Count(text[:end], "»")
+		abbreviation := text[end] == '.' && abbreviationEnd.MatchString(text[:end]) &&
+			!(letterEnd.MatchString(text[:end]) && capitalNext.MatchString(text[end+1:]))
+		if inQuote || abbreviation {
 			from = end + 1
 			continue
 		}
@@ -1057,19 +1063,29 @@ func sectionBody(body, title string) (string, bool) {
 	if start < 0 {
 		return "", false
 	}
+	return strings.Join(lines[start+1:sectionEnd(lines, start)], "\n"), true
+}
+
+// sectionEnd is the index of the first line after the section whose title is
+// lines[start], by the rules of sectionBody.
+func sectionEnd(lines []string, start int) int {
 	heading := strings.TrimSpace(lines[start])
 	level := len(heading) - len(strings.TrimLeft(heading, "#"))
-	end, inList, blank, stepHeadings := len(lines), false, false, false
+	inList, blank, stepHeadings, stepLevel := false, false, false, 0
 	for j := start + 1; j < len(lines); j++ {
 		line, next := lines[j], strings.TrimSpace(lines[j])
 		if strings.HasPrefix(next, "#") {
+			nextLevel := len(next) - len(strings.TrimLeft(next, "#"))
 			if level == 0 && stepHeading.MatchString(next) {
-				stepHeadings = true
+				stepHeadings, stepLevel = true, nextLevel
 				continue
 			}
-			if nextLevel := len(next) - len(strings.TrimLeft(next, "#")); level == 0 || nextLevel <= level {
-				end = j
-				break
+			// A heading under a step heading («#### Пример») is part of the step.
+			if stepHeadings && nextLevel > stepLevel {
+				continue
+			}
+			if level == 0 || nextLevel <= level {
+				return j
 			}
 			continue
 		}
@@ -1077,13 +1093,12 @@ func sectionBody(body, title string) (string, bool) {
 			if listItem.MatchString(line) {
 				inList = true
 			} else if inList || blank {
-				end = j
-				break
+				return j
 			}
 		}
 		blank = next == ""
 	}
-	return strings.Join(lines[start+1:end], "\n"), true
+	return len(lines)
 }
 
 // codeFreeLines is the lines of body with the code blocks left out: a « # » line

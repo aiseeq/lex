@@ -439,3 +439,38 @@ func TestNumberingStepsElsewhereFormsStayNarrow(t *testing.T) {
 		})
 	}
 }
+
+// Sentence ends after an abbreviation, headings inside a step, the numbered
+// title quoted in full and the genitive «файла» form.
+func TestNumberingStepsElsewhereClauseAndSectionEdges(t *testing.T) {
+	dir := t.TempDir()
+	skill := filepath.Join(dir, "SKILL.md")
+	guide := filepath.Join(dir, "guide.md")
+	full := "## Приёмка\n1. a\n2. b\n3. c\n4. d\n"
+	for _, tc := range []struct{ name, ref, guide string }{
+		{"multi-letter abbreviation", "Шаги 1–4 делает мастер, см. по `guide.md`, «Приёмка».", full},
+		{"heading inside a step heading", "Шаги 1–4 по `guide.md`, «Приёмка».", "Приёмка\n### Шаг 1\n#### Пример\nТекст.\n### Шаг 2\n### Шаг 3\n### Шаг 4\n"},
+		{"numbered title quoted in full", "Шаги 1–4 по `guide.md`, «3. Приёмка».", "## 3. Приёмка\n1. a\n2. b\n3. c\n4. d\n"},
+		{"genitive file after the section", "Шаги 1–4 — в разделе «Приёмка» файла `guide.md`.", full},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			corpus := textCorpus{skill: []byte(tc.ref + "\n\n5. e\n"), guide: []byte(tc.guide)}
+			findings := numberingFindingsFromCorpus(corpus, skill)
+			if hasNumberingFinding(findings, "нет шага") || hasNumberingFinding(findings, "ожидался пункт") {
+				t.Fatalf("верная ссылка дала находку: %v", findings)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, ref, guide, want string }{
+		{"one-letter abbreviation ends a sentence before a capital", "Шаги 1–4: сборка, тесты и т. д. Формат — по `guide.md`, «Приёмка».", full, "нет шага 1"},
+		{"file not right after the section", "Шаги 1–4 по разделу «Приёмка», пример лежит в `guide.md`.", full, "нет шага 1"},
+		{"step headings of another plain section", "Шаги 1–4 по `guide.md`, «Приёмка».", "Приёмка\n### Шаг 1\n### Шаг 2\n## Деплой\n### Шаг 3\n### Шаг 4\n", "нет шага 3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			corpus := textCorpus{skill: []byte(tc.ref + "\n\n5. e\n"), guide: []byte(tc.guide)}
+			if findings := numberingFindingsFromCorpus(corpus, skill); !hasNumberingFinding(findings, tc.want) {
+				t.Fatalf("не найдена ожидаемая находка %q: %v", tc.want, findings)
+			}
+		})
+	}
+}
