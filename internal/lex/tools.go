@@ -158,7 +158,9 @@ func toolDirs(codex, path string, tool configuredTool) ([]string, error) {
 	return dirs, nil
 }
 
-func (c *toolChecker) checkDiskFragmentsWithWarnings(codex string, references ...map[string]bool) (warnings, problems []string) {
+// checkDiskFragmentsWithWarnings проверяет фрагменты codex/frag. references — id фрагментов из манифестов:
+// при nil отбора нет, и purpose действует на все фрагменты; иначе — только на фрагменты из references.
+func (c *toolChecker) checkDiskFragmentsWithWarnings(codex string, references map[string]bool) (warnings, problems []string) {
 	if len(c.tools) == 0 {
 		return nil, nil
 	}
@@ -178,13 +180,13 @@ func (c *toolChecker) checkDiskFragmentsWithWarnings(codex string, references ..
 			return err
 		}
 		purpose := c.purpose
-		if len(references) > 0 {
+		if references != nil {
 			rel, relErr := filepath.Rel(root, path)
 			if relErr != nil {
 				return relErr
 			}
 			id := strings.TrimSuffix(filepath.ToSlash(rel), ".md")
-			c.purpose = purpose && references[0][id]
+			c.purpose = purpose && references[id]
 		}
 		w, p := c.checkWithWarnings(path, raw)
 		warnings = append(warnings, w...)

@@ -18,7 +18,7 @@ func combinedToolCheck(c *toolChecker, path string, raw []byte) []string {
 }
 
 func combinedDiskToolCheck(c *toolChecker, codex string) []string {
-	warnings, problems := c.checkDiskFragmentsWithWarnings(codex)
+	warnings, problems := c.checkDiskFragmentsWithWarnings(codex, nil)
 	return append(problems, warnings...)
 }
 

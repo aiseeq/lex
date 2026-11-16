@@ -630,7 +630,7 @@ func BuildCheckOptions(codex string, options BuildCheckOptionsValue) error {
 		if err != nil {
 			return err
 		}
-		linkProblems = append(linkProblems, diskLinkProblems(m.links)...)
+		linkProblems = append(linkProblems, diskLinkProblems(m.links, false)...)
 		manifests = append(manifests, m)
 	}
 	if len(linkProblems) > 0 {
@@ -737,7 +737,7 @@ func prepareBuildLinks(catalog *manifestCatalog, paths []string, check bool) err
 			return err
 		}
 		if check {
-			linkProblems = append(linkProblems, diskLinkProblems(m.links)...)
+			linkProblems = append(linkProblems, diskLinkProblems(m.links, false)...)
 		} else if err := prepareLinks(m.links); err != nil {
 			return err
 		}
@@ -1000,10 +1000,10 @@ func pathUnder(path, under string) (bool, error) {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)), nil
 }
 
-func diskLinkProblems(links []outputLink, inTree ...bool) []string {
+func diskLinkProblems(links []outputLink, inTree bool) []string {
 	var problems []string
 	formatMismatch := linkMismatch
-	if len(inTree) > 0 && inTree[0] {
+	if inTree {
 		formatMismatch = linkMismatchInTree
 	}
 	for _, link := range links {
@@ -3637,7 +3637,7 @@ func checkDisk(codex, decisionPath string) ([]string, error) {
 			problems = append(problems, invalidManifestProblem(path, err))
 			continue
 		}
-		problems = append(problems, diskLinkProblems(m.links)...)
+		problems = append(problems, diskLinkProblems(m.links, false)...)
 		body, missing, draftWarnings := checkedManifestBody(codex, path, m, referenced, os.ReadFile, purposeEnabled, decisionPath)
 		warnings = append(warnings, draftWarnings...)
 		problems = append(problems, missing...)
