@@ -72,7 +72,9 @@ var (
 	// The dot of an abbreviation («т. е.», «см.») is skipped by stepClause.
 	clauseEnd       = regexp.MustCompile(`;|[.!?](?:\s|$)`)
 	abbreviationEnd = regexp.MustCompile(`(?i)(?:^|[^а-яёa-z])(?:[а-яё]|см|напр|др|пр|стр|ср)$`)
-	letterEnd       = regexp.MustCompile(`(?i)(?:^|[^а-яёa-z])[а-яё]$`)
+	// listEnd is an abbreviation that closes an enumeration («и т. д.», «и др.»):
+	// before a capital it ends the sentence; «т. е.», «т. к.», initials do not.
+	listEnd         = regexp.MustCompile(`(?i)(?:^|[^а-яёa-z])(?:т\.\s*[дп]|др|пр)$`)
 	capitalNext     = regexp.MustCompile(`^\s+[А-ЯЁA-Z]`)
 	sectionNumbered = regexp.MustCompile(`^[0-9]{1,6}[a-zа-я]?\.\s+`)
 	boldLine        = regexp.MustCompile(`^\*\*[^*]+\*\*:?$`)
@@ -1007,8 +1009,9 @@ func (s *refScanner) stepSection(after int) (string, bool) {
 }
 
 // stepClause is text up to «;» or the end of its sentence. The dot of an
-// abbreviation («т. е.», «см.», «напр.») does not end it, but a one-letter one
-// before a capital does («и т. д. Формат»), and neither does a dot inside «…».
+// abbreviation («т. е.», «см.», «напр.», initials) does not end it, but one that
+// closes an enumeration before a capital does («и т. д. Формат», «и др. Формат»),
+// and neither does a dot inside «…».
 func stepClause(text string) string {
 	from := 0
 	for {
@@ -1019,7 +1022,7 @@ func stepClause(text string) string {
 		end := from + loc[0]
 		inQuote := strings.Count(text[:end], "«") > strings.Count(text[:end], "»")
 		abbreviation := text[end] == '.' && abbreviationEnd.MatchString(text[:end]) &&
-			!(letterEnd.MatchString(text[:end]) && capitalNext.MatchString(text[end+1:]))
+			!(listEnd.MatchString(text[:end]) && capitalNext.MatchString(text[end+1:]))
 		if inQuote || abbreviation {
 			from = end + 1
 			continue

@@ -449,6 +449,9 @@ func TestNumberingStepsElsewhereClauseAndSectionEdges(t *testing.T) {
 	full := "## Приёмка\n1. a\n2. b\n3. c\n4. d\n"
 	for _, tc := range []struct{ name, ref, guide string }{
 		{"multi-letter abbreviation", "Шаги 1–4 делает мастер, см. по `guide.md`, «Приёмка».", full},
+		{"т. е. before a proper name", "Шаги 1–4 гоняет CI, т. е. GitHub Actions, по `guide.md`, «Приёмка».", full},
+		{"т. к. before a capital", "Шаги 1–4 делает мастер, т. к. Боец их не видит, по `guide.md`, «Приёмка».", full},
+		{"initials", "Шаги 1–4 делает А. Б. Иванов по `guide.md`, «Приёмка».", full},
 		{"heading inside a step heading", "Шаги 1–4 по `guide.md`, «Приёмка».", "Приёмка\n### Шаг 1\n#### Пример\nТекст.\n### Шаг 2\n### Шаг 3\n### Шаг 4\n"},
 		{"numbered title quoted in full", "Шаги 1–4 по `guide.md`, «3. Приёмка».", "## 3. Приёмка\n1. a\n2. b\n3. c\n4. d\n"},
 		{"genitive file after the section", "Шаги 1–4 — в разделе «Приёмка» файла `guide.md`.", full},
@@ -463,6 +466,8 @@ func TestNumberingStepsElsewhereClauseAndSectionEdges(t *testing.T) {
 	}
 	for _, tc := range []struct{ name, ref, guide, want string }{
 		{"one-letter abbreviation ends a sentence before a capital", "Шаги 1–4: сборка, тесты и т. д. Формат — по `guide.md`, «Приёмка».", full, "нет шага 1"},
+		{"и др. ends a sentence before a capital", "Шаги 1–4: сборка, тесты и др. Формат — по `guide.md`, «Приёмка».", full, "нет шага 1"},
+		{"и т. п. ends a sentence before a capital", "Шаги 1–4: сборка, тесты и т. п. Формат — по `guide.md`, «Приёмка».", full, "нет шага 1"},
 		{"file not right after the section", "Шаги 1–4 по разделу «Приёмка», пример лежит в `guide.md`.", full, "нет шага 1"},
 		{"step headings of another plain section", "Шаги 1–4 по `guide.md`, «Приёмка».", "Приёмка\n### Шаг 1\n### Шаг 2\n## Деплой\n### Шаг 3\n### Шаг 4\n", "нет шага 3"},
 	} {
