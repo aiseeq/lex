@@ -74,8 +74,12 @@ var (
 	abbreviationEnd = regexp.MustCompile(`(?i)(?:^|[^а-яёa-z])(?:[а-яё]|см|напр|др|пр|стр|ср)$`)
 	// listEnd is an abbreviation that closes an enumeration («и т. д.», «и др.»):
 	// before a capital it ends the sentence; «т. е.», «т. к.», initials do not.
-	listEnd         = regexp.MustCompile(`(?i)(?:^|[^а-яёa-z])(?:т\.\s*[дп]|др|пр)$`)
-	capitalNext     = regexp.MustCompile(`^\s+[А-ЯЁA-Z]`)
+	listEnd = regexp.MustCompile(`(?i)(?:^|[^а-яёa-z])(?:т\.\s*[дп]|др|пр)$`)
+	// wordEnd is a one-letter word that ends a sentence, not an abbreviation:
+	// a unit after a number («2026 г.», «2 ч.») or «я».
+	wordEnd = regexp.MustCompile(`(?:[0-9]\s*[а-яё]|(?:^|\s)я)$`)
+	// sentenceNext is the start of a sentence: a capital, a quote, code, bold or a number.
+	sentenceNext    = regexp.MustCompile("^\\s+[А-ЯЁA-Z«`*0-9]")
 	sectionNumbered = regexp.MustCompile(`^[0-9]{1,6}[a-zа-я]?\.\s+`)
 	boldLine        = regexp.MustCompile(`^\*\*[^*]+\*\*:?$`)
 	nearbyRef       = regexp.MustCompile("`([^`\\n]+\\.md)`\\s+рядом")
@@ -1022,7 +1026,7 @@ func stepClause(text string) string {
 		end := from + loc[0]
 		inQuote := strings.Count(text[:end], "«") > strings.Count(text[:end], "»")
 		abbreviation := text[end] == '.' && abbreviationEnd.MatchString(text[:end]) &&
-			!(listEnd.MatchString(text[:end]) && capitalNext.MatchString(text[end+1:]))
+			!((listEnd.MatchString(text[:end]) || wordEnd.MatchString(text[:end])) && sentenceNext.MatchString(text[end+1:]))
 		if inQuote || abbreviation {
 			from = end + 1
 			continue
