@@ -68,9 +68,10 @@ var (
 	stepSectionRef = regexp.MustCompile("(?i)(?:^|\\s)(?:по|в|из)(?:\\s+файл[а-я]*)?\\s+" + stepFileToken +
 		",?\\s*\\(?(?:в\\s+)?(?:раздел[а-я]*\\s+)?«([^«»]+)»")
 	stepSectionFirstRef = regexp.MustCompile("(?i)(?:^|\\s)(?:по|в|из)\\s+раздел[а-я]*\\s+«([^«»]+)»,?\\s+(?:в|из)(?:\\s+файл[а-я]*)?\\s+" + stepFileToken)
-	// clauseEnd is «;» or a sentence end: a dot before a capital or the line end,
-	// not the dot of an abbreviation («т. е.», «см.»).
-	clauseEnd       = regexp.MustCompile(`;|\.(?:\s+[А-ЯЁA-Z]|\s*$)`)
+	// clauseEnd is «;» or a sentence end: a dot before a space or the line end.
+	// The dot of an abbreviation («т. е.», «см.») is skipped by stepClause.
+	clauseEnd       = regexp.MustCompile(`;|[.!?](?:\s|$)`)
+	abbreviationEnd = regexp.MustCompile(`(?i)(?:^|[^а-яёa-z])(?:[а-яё]|см|напр|др|пр|стр|ср)$`)
 	sectionNumbered = regexp.MustCompile(`^[0-9]{1,6}[a-zа-я]?\.\s+`)
 	boldLine        = regexp.MustCompile(`^\*\*[^*]+\*\*:?$`)
 	nearbyRef       = regexp.MustCompile("`([^`\\n]+\\.md)`\\s+рядом")
@@ -982,11 +983,7 @@ func (s *refScanner) numbering() {
 // The file is the corpus copy or, outside the corpus, the file on disk; a file
 // that is in neither does not hold the steps.
 func (s *refScanner) stepSection(after int) (string, bool) {
-	clause := s.line[after:]
-	if end := clauseEnd.FindStringIndex(clause); end != nil {
-		clause = clause[:end[0]]
-	}
-	file, title, ok := stepSectionTarget(clause)
+	file, title, ok := stepSectionTarget(stepClause(s.line[after:]))
 	if !ok {
 		return "", false
 	}
@@ -1005,6 +1002,24 @@ func (s *refScanner) stepSection(after int) (string, bool) {
 		body = data
 	}
 	return sectionBody(string(body), title)
+}
+
+// stepClause is text up to «;» or the end of its sentence; the dot of an
+// abbreviation (a one-letter word, «см.», «напр.») does not end it.
+func stepClause(text string) string {
+	from := 0
+	for {
+		loc := clauseEnd.FindStringIndex(text[from:])
+		if loc == nil {
+			return text
+		}
+		end := from + loc[0]
+		if text[end] == '.' && abbreviationEnd.MatchString(text[:end]) {
+			from = end + 1
+			continue
+		}
+		return text[:end]
+	}
 }
 
 // stepSectionTarget finds the file and the section a step reference names in clause.
@@ -1048,7 +1063,7 @@ func sectionBody(body, title string) (string, bool) {
 	for j := start + 1; j < len(lines); j++ {
 		line, next := lines[j], strings.TrimSpace(lines[j])
 		if strings.HasPrefix(next, "#") {
-			if level == 0 && (stepHeading.MatchString(next) || numberedHeading.MatchString(next)) {
+			if level == 0 && stepHeading.MatchString(next) {
 				stepHeadings = true
 				continue
 			}
@@ -1092,8 +1107,16 @@ func codeFreeLines(body string) []string {
 // stepInSection reports whether the section numbers step as a top-level list
 // item or a heading: a sub-item of one item is not a step of the section.
 func stepInSection(section, step string) bool {
+	// A section of step headings numbers its steps by them: a list in it is
+	// the text of a step, not a step.
+	headingSteps := false
 	for line := range strings.SplitSeq(section, "\n") {
-		if item := listItem.FindStringSubmatch(line); item != nil && item[1] == "" && strings.EqualFold(item[2]+item[3], step) {
+		if stepHeading.MatchString(strings.TrimSpace(line)) {
+			headingSteps = true
+		}
+	}
+	for line := range strings.SplitSeq(section, "\n") {
+		if item := listItem.FindStringSubmatch(line); item != nil && !headingSteps && item[1] == "" && strings.EqualFold(item[2]+item[3], step) {
 			return true
 		}
 		trim := strings.TrimSpace(line)

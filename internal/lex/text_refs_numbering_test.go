@@ -414,3 +414,28 @@ func TestNumberingStepsElsewhereReferenceForms(t *testing.T) {
 		})
 	}
 }
+
+// A sentence ends at a dot before a space whatever starts the next one, and a
+// plain or bold section does not take numbered sections or a stray list.
+func TestNumberingStepsElsewhereFormsStayNarrow(t *testing.T) {
+	dir := t.TempDir()
+	skill := filepath.Join(dir, "SKILL.md")
+	guide := filepath.Join(dir, "guide.md")
+	full := "## Приёмка\n1. a\n2. b\n3. c\n4. d\n"
+	for _, tc := range []struct{ name, ref, guide, want string }{
+		{"next sentence starts with code", "Шаги 1–4 делает мастер. `lex check` гоняй по `guide.md`, «Приёмка».", full, "нет шага 1"},
+		{"next sentence starts with bold", "Шаги 1–4 делает мастер. **Боец** смотрит по `guide.md`, «Приёмка».", full, "нет шага 1"},
+		{"next sentence starts with a quote", "Шаги 1–4 делает мастер. «Пример» лежит по `guide.md`, «Приёмка».", full, "нет шага 1"},
+		{"next sentence after an exclamation", "Шаги 1–4 делает мастер! Пример по `guide.md`, «Приёмка».", full, "нет шага 1"},
+		{"bold section before numbered sections", "Шаги 1–4 по `guide.md`, «Приёмка».", "**Приёмка**\n1. a\n2. b\n## 3. Деплой\n## 4. Итог\n", "нет шага 3"},
+		{"plain section before a numbered section with a list", "Шаги 1–4 по `guide.md`, «Приёмка».", "Приёмка\n1. a\n2. b\n## 1. Деплой\n1. a\n2. b\n3. c\n4. d\n", "нет шага 3"},
+		{"stray list after step headings", "Шаги 1–4 по `guide.md`, «Приёмка».", "Приёмка\n### Шаг 1\n### Шаг 2\nДругая тема.\n\n1. a\n2. b\n3. c\n4. d\n", "нет шага 3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			corpus := textCorpus{skill: []byte(tc.ref + "\n\n5. e\n"), guide: []byte(tc.guide)}
+			if findings := numberingFindingsFromCorpus(corpus, skill); !hasNumberingFinding(findings, tc.want) {
+				t.Fatalf("не найдена ожидаемая находка %q: %v", tc.want, findings)
+			}
+		})
+	}
+}
