@@ -332,3 +332,46 @@ func TestNumberingStepsFileUnreadableIsReported(t *testing.T) {
 		t.Fatalf("нечитаемый файл шагов не назван: %v", findings)
 	}
 }
+
+// The section of a plain or bold line is one block, code blocks hold no steps
+// and no headings, and the counted steps go to the list right after the reference.
+func TestNumberingStepsElsewhereSectionBounds(t *testing.T) {
+	dir := t.TempDir()
+	skill := filepath.Join(dir, "SKILL.md")
+	guide := filepath.Join(dir, "guide.md")
+	ref := "Шаги 1–4 по `guide.md`, «Приёмка».\n\n"
+	full := "## Приёмка\n1. a\n2. b\n3. c\n4. d\n"
+	cases := []struct {
+		name, body, guide, want string
+	}{
+		{"plain section stops at the next plain section", ref + "5. e\n", "Приёмка\nТекст без шагов.\n\nДругое\n1. a\n2. b\n3. c\n4. d\n", "нет шага 1"},
+		{"bold section stops at the next bold section", ref + "5. e\n", "**Приёмка**\nТекст.\n\n**Другое**\n1. a\n2. b\n3. c\n4. d\n", "нет шага 1"},
+		{"plain section stops at unindented text after its list", ref + "5. e\n", "Приёмка\n1. a\n2. b\nДругое\n3. c\n4. d\n", "нет шага 3"},
+		{"steps only in a code block", ref + "5. e\n", "## Приёмка\n```\n1. a\n2. b\n3. c\n4. d\n```\n", "нет шага 1"},
+		{"steps only as sub-items", ref + "5. e\n", "## Приёмка\n- пункт\n  1. a\n  2. b\n  3. c\n  4. d\n", "нет шага 1"},
+		{"list starts at the last counted step", ref + "4. e\n5. f\n", full, "ожидался пункт 1, найден 4"},
+		{"list starts inside the counted steps", ref + "2. e\n3. f\n4. g\n", full, "ожидался пункт 1, найден 2"},
+		{"another bold section between", ref + "**Другой раздел**\nТекст.\n5. e\n", full, "ожидался пункт 1, найден 5"},
+		{"another paragraph between", ref + "Другой текст.\n\n5. e\n", full, "ожидался пункт 1, найден 5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := numberingFindingsFromCorpus(textCorpus{skill: []byte(tc.body), guide: []byte(tc.guide)}, skill)
+			if !hasNumberingFinding(findings, tc.want) {
+				t.Fatalf("не найдена ожидаемая находка %q: %v", tc.want, findings)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, guide string }{
+		{"code block with a # line before the steps", "## Приёмка\n```\n# setup\n```\n1. a\n2. b\n3. c\n4. d\n"},
+		{"plain section with a code block before the steps", "Приёмка\n```\n# setup\n```\n1. a\n2. b\n3. c\n4. d\n"},
+		{"plain section with a lead-in and indented lines", "Приёмка\nВводная:\n\n1. a\n   пояснение\n  Зачем: так\n2. b\n3. c\n4. d\n\nДальше другое.\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := numberingFindingsFromCorpus(textCorpus{skill: []byte(ref + "5. e\n"), guide: []byte(tc.guide)}, skill)
+			if hasNumberingFinding(findings, "нет шага") || hasNumberingFinding(findings, "ожидался пункт") {
+				t.Fatalf("верная ссылка дала находку: %v", findings)
+			}
+		})
+	}
+}

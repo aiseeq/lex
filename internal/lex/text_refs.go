@@ -64,6 +64,7 @@ var (
 	// sit in the same sentence («пример — `x.md`, «Пример»») are not where the steps are.
 	stepSectionRef = regexp.MustCompile("(?i)(?:^|\\s)(?:по|в|из)(?:\\s+файл[а-я]*)?\\s+`([^`\\n]+\\.md)`,?\\s*(?:раздел[а-я]*\\s+)?«([^«»]+)»")
 	clauseEnd      = regexp.MustCompile(`;|\.(?:\s|$)`)
+	boldLine       = regexp.MustCompile(`^\*\*[^*]+\*\*:?$`)
 	nearbyRef      = regexp.MustCompile("`([^`\\n]+\\.md)`\\s+рядом")
 	backDecision   = regexp.MustCompile("`([a-z0-9]+(?:-[a-z0-9]+)+)`\\s+в\\s+`[^`]*decisions\\.md`")
 )
@@ -518,6 +519,7 @@ type refScanner struct {
 	steps           map[string]bool
 	elsewhere       map[int]bool
 	elsewhereLine   int
+	prevBlank       bool
 	realKeys        map[string]string
 	listInterrupted map[int]bool
 }
@@ -860,25 +862,39 @@ func (s *refScanner) heading(trim string) {
 	s.headings[level] = n
 }
 
+// textLine follows a line that is not a list item: a heading ends the lists, an
+// unindented line interrupts them, and a new paragraph or a bold line between a
+// step reference and the list is another block, so the counted steps are not its list's.
+func (s *refScanner) textLine() {
+	trim := strings.TrimSpace(s.line)
+	prevBlank := s.prevBlank
+	s.prevBlank = trim == ""
+	if trim == "" {
+		return
+	}
+	unindented := s.line[0] != ' ' && s.line[0] != '\t'
+	if s.number != s.elsewhereLine && unindented && (prevBlank || boldLine.MatchString(trim)) {
+		clear(s.elsewhere)
+	}
+	if strings.HasPrefix(trim, "#") {
+		clear(s.last)
+		clear(s.listInterrupted)
+		clear(s.elsewhere)
+	}
+	if unindented {
+		for indent := range s.last {
+			s.listInterrupted[indent] = true
+		}
+	}
+}
+
 func (s *refScanner) list() {
 	match := listItem.FindStringSubmatch(s.line)
 	if match == nil {
-		trim := strings.TrimSpace(s.line)
-		if trim == "" {
-			return
-		}
-		if strings.HasPrefix(trim, "#") {
-			clear(s.last)
-			clear(s.listInterrupted)
-			clear(s.elsewhere)
-		}
-		if s.line[0] != ' ' && s.line[0] != '\t' {
-			for indent := range s.last {
-				s.listInterrupted[indent] = true
-			}
-		}
+		s.textLine()
 		return
 	}
+	s.prevBlank = false
 	indent := len(match[1])
 	n, err := strconv.Atoi(match[2])
 	if err != nil {
@@ -909,7 +925,7 @@ func (s *refScanner) numbering() {
 		for _, number := range stepNumber.FindAllStringSubmatch(stepText, -1) {
 			step := strings.ToLower(number[1])
 			if strings.IndexFunc(step, func(r rune) bool { return r >= 'a' && r <= 'z' }) >= 0 {
-				if away && stepExistsInBody(awayBody, step) {
+				if away && stepInSection(awayBody, step) {
 					continue
 				}
 				if !s.stepAvailable(step, match[1]) {
@@ -932,7 +948,7 @@ func (s *refScanner) numbering() {
 			}
 			for n := first; n <= last; n++ {
 				step := strconv.Itoa(n)
-				if away && stepExistsInBody(awayBody, step) {
+				if away && stepInSection(awayBody, step) {
 					s.elsewhere[n] = true
 					s.elsewhereLine = s.number
 					continue
@@ -978,9 +994,11 @@ func (s *refScanner) stepSection(after int) (string, bool) {
 	return sectionBody(string(body), match[2])
 }
 
-// sectionBody returns the lines under the heading equal to title: a # heading
-// up to the next heading of its level or above, a plain line (the shared
-// CLAUDE.md form) or a bold line up to the next # heading.
+// sectionBody returns the lines under the heading equal to title, without the
+// lines of code blocks. A # heading runs up to the next heading of its level or
+// above. A plain line (the shared CLAUDE.md form) or a bold line is a section of
+// one block: its list, maybe after a lead-in, up to the next # heading, the next
+// paragraph before the list starts or the first unindented text after it.
 func sectionBody(body, title string) (string, bool) {
 	norm := func(s string) string {
 		s = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(s), "#"))
@@ -988,15 +1006,10 @@ func sectionBody(body, title string) (string, bool) {
 		return strings.ToLower(strings.ReplaceAll(strings.TrimSuffix(strings.TrimSpace(s), ":"), "ё", "е"))
 	}
 	title = norm(title)
-	lines := strings.Split(body, "\n")
-	start, inFence := -1, false
+	lines := codeFreeLines(body)
+	start := -1
 	for i, line := range lines {
-		t := strings.TrimSpace(line)
-		if strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~") {
-			inFence = !inFence
-			continue
-		}
-		if !inFence && line == strings.TrimLeft(line, " \t") && !listItem.MatchString(line) && norm(t) == title {
+		if line == strings.TrimLeft(line, " \t") && !listItem.MatchString(line) && norm(line) == title {
 			start = i
 			break
 		}
@@ -1006,26 +1019,71 @@ func sectionBody(body, title string) (string, bool) {
 	}
 	heading := strings.TrimSpace(lines[start])
 	level := len(heading) - len(strings.TrimLeft(heading, "#"))
-	end := len(lines)
+	end, inList, blank := len(lines), false, false
 	for j := start + 1; j < len(lines); j++ {
-		next := strings.TrimSpace(lines[j])
-		if !strings.HasPrefix(next, "#") {
+		line, next := lines[j], strings.TrimSpace(lines[j])
+		if strings.HasPrefix(next, "#") {
+			if nextLevel := len(next) - len(strings.TrimLeft(next, "#")); level == 0 || nextLevel <= level {
+				end = j
+				break
+			}
 			continue
 		}
-		if nextLevel := len(next) - len(strings.TrimLeft(next, "#")); level == 0 || nextLevel <= level {
-			end = j
-			break
+		if level == 0 && next != "" && line == strings.TrimLeft(line, " \t") {
+			if listItem.MatchString(line) {
+				inList = true
+			} else if inList || blank {
+				end = j
+				break
+			}
 		}
+		blank = next == ""
 	}
 	return strings.Join(lines[start+1:end], "\n"), true
 }
 
+// codeFreeLines is the lines of body with the code blocks left out: a « # » line
+// in a block is no heading and a numbered line in it is no step.
+func codeFreeLines(body string) []string {
+	var lines []string
+	inFence := false
+	for line := range strings.SplitSeq(body, "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~") {
+			inFence = !inFence
+			continue
+		}
+		if !inFence {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// stepInSection reports whether the section numbers step as a top-level list
+// item or a heading: a sub-item of one item is not a step of the section.
+func stepInSection(section, step string) bool {
+	for line := range strings.SplitSeq(section, "\n") {
+		if item := listItem.FindStringSubmatch(line); item != nil && item[1] == "" && strings.EqualFold(item[2]+item[3], step) {
+			return true
+		}
+		trim := strings.TrimSpace(line)
+		if heading := numberedHeading.FindStringSubmatch(trim); heading != nil && strings.EqualFold(heading[1]+heading[2], step) {
+			return true
+		}
+		if heading := stepHeading.FindStringSubmatch(trim); heading != nil && strings.EqualFold(heading[1], step) {
+			return true
+		}
+	}
+	return false
+}
+
 // numberedElsewhere reports whether a top-level list may go on from n although
 // expected comes next: the numbers from expected up to n are steps a reference
-// put in another file's section, and the list has not used any of those steps
-// itself.
+// put in another file's section, and neither n nor the numbers the list has
+// used already are among those steps.
 func (s *refScanner) numberedElsewhere(indent, expected, n int) bool {
-	if indent != 0 || n <= expected {
+	if indent != 0 || n <= expected || s.elsewhere[n] {
 		return false
 	}
 	for k := expected; k < n; k++ {
@@ -1102,6 +1160,7 @@ func stepExistsInBody(body, step string) bool {
 func (s *refScanner) scan(path string) {
 	s.path = path
 	s.last, s.headings, s.steps, s.elsewhere = map[int]int{}, map[int]int{}, map[string]bool{}, map[int]bool{}
+	s.prevBlank = false
 	s.listInterrupted = map[int]bool{}
 	lines := strings.Split(string(s.corpus[path]), "\n")
 	stepLines := lines
