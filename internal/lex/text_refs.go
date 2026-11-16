@@ -62,12 +62,23 @@ var (
 	// number: «Шаги 1–4 делает мастер по `x.md`, «Тикет»» — the steps are that section's.
 	// The file stands right after «по», «в» or «из»: a file and a quote that only
 	// sit in the same sentence («пример — `x.md`, «Пример»») are not where the steps are.
-	stepSectionRef = regexp.MustCompile("(?i)(?:^|\\s)(?:по|в|из)(?:\\s+файл[а-я]*)?\\s+`([^`\\n]+\\.md)`,?\\s*(?:раздел[а-я]*\\s+)?«([^«»]+)»")
-	clauseEnd      = regexp.MustCompile(`;|\.(?:\s|$)`)
-	boldLine       = regexp.MustCompile(`^\*\*[^*]+\*\*:?$`)
-	nearbyRef      = regexp.MustCompile("`([^`\\n]+\\.md)`\\s+рядом")
-	backDecision   = regexp.MustCompile("`([a-z0-9]+(?:-[a-z0-9]+)+)`\\s+в\\s+`[^`]*decisions\\.md`")
+	// The file is `x.md` or a Markdown link; the section follows it («`x.md`, «Тикет»»,
+	// «`x.md`, в разделе «Тикет»», «`x.md` (раздел «Тикет»)») or comes first
+	// («по разделу «Тикет» в `x.md`»).
+	stepSectionRef = regexp.MustCompile("(?i)(?:^|\\s)(?:по|в|из)(?:\\s+файл[а-я]*)?\\s+" + stepFileToken +
+		",?\\s*\\(?(?:в\\s+)?(?:раздел[а-я]*\\s+)?«([^«»]+)»")
+	stepSectionFirstRef = regexp.MustCompile("(?i)(?:^|\\s)(?:по|в|из)\\s+раздел[а-я]*\\s+«([^«»]+)»,?\\s+(?:в|из)(?:\\s+файл[а-я]*)?\\s+" + stepFileToken)
+	// clauseEnd is «;» or a sentence end: a dot before a capital or the line end,
+	// not the dot of an abbreviation («т. е.», «см.»).
+	clauseEnd       = regexp.MustCompile(`;|\.(?:\s+[А-ЯЁA-Z]|\s*$)`)
+	sectionNumbered = regexp.MustCompile(`^[0-9]{1,6}[a-zа-я]?\.\s+`)
+	boldLine        = regexp.MustCompile(`^\*\*[^*]+\*\*:?$`)
+	nearbyRef       = regexp.MustCompile("`([^`\\n]+\\.md)`\\s+рядом")
+	backDecision    = regexp.MustCompile("`([a-z0-9]+(?:-[a-z0-9]+)+)`\\s+в\\s+`[^`]*decisions\\.md`")
 )
+
+// stepFileToken is a file named as `x.md` or as a Markdown link [x](x.md#part).
+const stepFileToken = "(?:`([^`\\n]+\\.md)`|\\[[^\\]\\n]+\\]\\(([^)\\s#]+\\.md)(?:#[^)\\s]*)?\\))"
 
 type textRefException struct {
 	Path     string `json:"path"`
@@ -879,7 +890,9 @@ func (s *refScanner) textLine() {
 	if strings.HasPrefix(trim, "#") {
 		clear(s.last)
 		clear(s.listInterrupted)
-		clear(s.elsewhere)
+		if s.number != s.elsewhereLine {
+			clear(s.elsewhere)
+		}
 	}
 	if unindented {
 		for indent := range s.last {
@@ -973,11 +986,11 @@ func (s *refScanner) stepSection(after int) (string, bool) {
 	if end := clauseEnd.FindStringIndex(clause); end != nil {
 		clause = clause[:end[0]]
 	}
-	match := stepSectionRef.FindStringSubmatch(clause)
-	if match == nil {
+	file, title, ok := stepSectionTarget(clause)
+	if !ok {
 		return "", false
 	}
-	target := s.resolve(match[1])
+	target := s.resolve(file)
 	body, ok := s.corpus[target]
 	if !ok {
 		data, err := os.ReadFile(target)
@@ -991,7 +1004,18 @@ func (s *refScanner) stepSection(after int) (string, bool) {
 		}
 		body = data
 	}
-	return sectionBody(string(body), match[2])
+	return sectionBody(string(body), title)
+}
+
+// stepSectionTarget finds the file and the section a step reference names in clause.
+func stepSectionTarget(clause string) (file, title string, ok bool) {
+	if m := stepSectionRef.FindStringSubmatch(clause); m != nil {
+		return m[1] + m[2], m[3], true
+	}
+	if m := stepSectionFirstRef.FindStringSubmatch(clause); m != nil {
+		return m[2] + m[3], m[1], true
+	}
+	return "", "", false
 }
 
 // sectionBody returns the lines under the heading equal to title, without the
@@ -1003,6 +1027,7 @@ func sectionBody(body, title string) (string, bool) {
 	norm := func(s string) string {
 		s = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(s), "#"))
 		s = strings.TrimSuffix(strings.TrimPrefix(s, "**"), "**")
+		s = sectionNumbered.ReplaceAllString(s, "")
 		return strings.ToLower(strings.ReplaceAll(strings.TrimSuffix(strings.TrimSpace(s), ":"), "ё", "е"))
 	}
 	title = norm(title)
@@ -1019,17 +1044,21 @@ func sectionBody(body, title string) (string, bool) {
 	}
 	heading := strings.TrimSpace(lines[start])
 	level := len(heading) - len(strings.TrimLeft(heading, "#"))
-	end, inList, blank := len(lines), false, false
+	end, inList, blank, stepHeadings := len(lines), false, false, false
 	for j := start + 1; j < len(lines); j++ {
 		line, next := lines[j], strings.TrimSpace(lines[j])
 		if strings.HasPrefix(next, "#") {
+			if level == 0 && (stepHeading.MatchString(next) || numberedHeading.MatchString(next)) {
+				stepHeadings = true
+				continue
+			}
 			if nextLevel := len(next) - len(strings.TrimLeft(next, "#")); level == 0 || nextLevel <= level {
 				end = j
 				break
 			}
 			continue
 		}
-		if level == 0 && next != "" && line == strings.TrimLeft(line, " \t") {
+		if level == 0 && !stepHeadings && next != "" && line == strings.TrimLeft(line, " \t") {
 			if listItem.MatchString(line) {
 				inList = true
 			} else if inList || blank {

@@ -375,3 +375,42 @@ func TestNumberingStepsElsewhereSectionBounds(t *testing.T) {
 		})
 	}
 }
+
+// More forms of a reference to steps in another file's section.
+func TestNumberingStepsElsewhereReferenceForms(t *testing.T) {
+	dir := t.TempDir()
+	skill := filepath.Join(dir, "SKILL.md")
+	guide := filepath.Join(dir, "guide.md")
+	full := "## Приёмка\n1. a\n2. b\n3. c\n4. d\n"
+	for _, tc := range []struct{ name, ref, guide string }{
+		{"section before the file", "Шаги 1–4 по разделу «Приёмка» в `guide.md`.", full},
+		{"markdown link", "Шаги 1–4 по [гайду](guide.md), «Приёмка».", full},
+		{"markdown link with an anchor", "Шаги 1–4 по [гайду](guide.md#priemka), «Приёмка».", full},
+		{"section in parentheses", "Шаги 1–4 по `guide.md` (раздел «Приёмка»).", full},
+		{"в разделе after the file", "Шаги 1–4 по `guide.md`, в разделе «Приёмка».", full},
+		{"abbreviation in the clause", "Шаги 1–4 делает мастер, т. е. по `guide.md`, «Приёмка».", full},
+		{"reference in a heading", "### Шаги 1–4 делает мастер по `guide.md`, «Приёмка»", full},
+		{"numbered heading of the section", "Шаги 1–4 по `guide.md`, «Приёмка».", "## 3. Приёмка\n1. a\n2. b\n3. c\n4. d\n"},
+		{"plain section with step headings", "Шаги 1–4 по `guide.md`, «Приёмка».", "Приёмка\n### Шаг 1\nОписание.\n\n### Шаг 2\nОписание.\n### Шаг 3\n### Шаг 4\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			corpus := textCorpus{skill: []byte(tc.ref + "\n\n5. e\n"), guide: []byte(tc.guide)}
+			findings := numberingFindingsFromCorpus(corpus, skill)
+			if hasNumberingFinding(findings, "нет шага") || hasNumberingFinding(findings, "ожидался пункт") {
+				t.Fatalf("верная ссылка дала находку: %v", findings)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, ref, guide, want string }{
+		{"section first without a file", "Шаги 1–4 по разделу «Приёмка».", full, "нет шага 1"},
+		{"sentence ends before the file", "Шаги 1–4 делает мастер. Пример — по `guide.md`, «Приёмка».", full, "нет шага 1"},
+		{"plain section with step headings stops at another heading", "Шаги 1–4 по `guide.md`, «Приёмка».", "Приёмка\n### Шаг 1\n### Шаг 2\n## Другое\n### Шаг 3\n### Шаг 4\n", "нет шага 3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			corpus := textCorpus{skill: []byte(tc.ref + "\n\n5. e\n"), guide: []byte(tc.guide)}
+			if findings := numberingFindingsFromCorpus(corpus, skill); !hasNumberingFinding(findings, tc.want) {
+				t.Fatalf("не найдена ожидаемая находка %q: %v", tc.want, findings)
+			}
+		})
+	}
+}
