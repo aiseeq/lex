@@ -1948,7 +1948,7 @@ func planAbsorbManifest(codex, selected string, m manifest, bounds [][2]int, edi
 	if err != nil {
 		return absorbPlan{}, err
 	}
-	fragments, err := planInsertedFragments(codex, selected, m.parts, additions, newLines)
+	fragments, err := planInsertedFragments(codex, selected, m.parts, additions, newLines, catalog)
 	if err != nil {
 		return absorbPlan{}, err
 	}
@@ -2489,19 +2489,15 @@ type plannedFragment struct {
 	raw      []byte
 }
 
-func planInsertedFragments(codex, selected string, parts []string, additions map[int][]lineHunk, newLines [][]byte) (map[int][]plannedFragment, error) {
+func planInsertedFragments(codex, selected string, parts []string, additions map[int][]lineHunk, newLines [][]byte, catalog *manifestCatalog) (map[int][]plannedFragment, error) {
 	created := make(map[int][]plannedFragment)
-	counts := make(map[string]int)
+	counts := insertedFragmentCounts(parts)
+	occupied, err := occupiedFragmentIDs(codex, catalog)
+	if err != nil {
+		return nil, err
+	}
 	for _, part := range parts {
-		base := filepath.Base(part)
-		if dash := strings.LastIndexByte(base, '-'); dash >= 0 {
-			if n, err := strconv.Atoi(base[dash+1:]); err == nil {
-				label := base[:dash]
-				if n > counts[label] {
-					counts[label] = n
-				}
-			}
-		}
+		occupied[part] = true
 	}
 	for _, position := range slices.Sorted(maps.Keys(additions)) {
 		hunks := additions[position]
@@ -2514,8 +2510,7 @@ func planInsertedFragments(codex, selected string, parts []string, additions map
 				if label == "" {
 					label = "fragment"
 				}
-				counts[label]++
-				id := fmt.Sprintf("%s/%s-%d", manifestKey(selected), label, counts[label])
+				id := nextInsertedFragmentID(selected, label, counts, occupied)
 				path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
 				raw := append([]byte("---\nid: "+id+"\nцель: \nоснование: \nснять_когда: \n---\n"), unit...)
 				created[position] = append(created[position], plannedFragment{id: id, path: path, raw: raw})
@@ -2523,6 +2518,83 @@ func planInsertedFragments(codex, selected string, parts []string, additions map
 		}
 	}
 	return created, nil
+}
+
+func insertedFragmentCounts(parts []string) map[string]int {
+	counts := make(map[string]int)
+	for _, part := range parts {
+		base := filepath.Base(part)
+		dash := strings.LastIndexByte(base, '-')
+		if dash < 0 {
+			continue
+		}
+		n, valid := parseFragmentNumber(base[dash+1:])
+		if !valid {
+			continue
+		}
+		label := base[:dash]
+		if n > counts[label] {
+			counts[label] = n
+		}
+	}
+	return counts
+}
+
+func parseFragmentNumber(text string) (int, bool) {
+	maxInt := int(^uint(0) >> 1)
+	n := 0
+	for i := 0; i < len(text); i++ {
+		digit := int(text[i] - '0')
+		if digit < 0 || digit > 9 || n > (maxInt-digit)/10 {
+			return 0, false
+		}
+		n = n*10 + digit
+	}
+	return n, len(text) > 0
+}
+
+func occupiedFragmentIDs(codex string, catalog *manifestCatalog) (map[string]bool, error) {
+	occupied := make(map[string]bool)
+	if catalog != nil {
+		for _, path := range catalog.paths {
+			m, err := catalog.read(path)
+			if err != nil {
+				return nil, err
+			}
+			for _, part := range m.parts {
+				occupied[part] = true
+			}
+		}
+	}
+	fragRoot := filepath.Join(codex, "frag")
+	err := filepath.WalkDir(fragRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".md" {
+			return nil
+		}
+		rel, err := filepath.Rel(fragRoot, path)
+		if err != nil {
+			return err
+		}
+		occupied[strings.TrimSuffix(filepath.ToSlash(rel), ".md")] = true
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("%s: list fragments for absorb: %w", fragRoot, err)
+	}
+	return occupied, nil
+}
+
+func nextInsertedFragmentID(selected, label string, counts map[string]int, occupied map[string]bool) string {
+	for counts[label]++; ; counts[label]++ {
+		id := fmt.Sprintf("%s/%s-%d", manifestKey(selected), label, counts[label])
+		if !occupied[id] {
+			occupied[id] = true
+			return id
+		}
+	}
 }
 
 // attachLeadingBlankUnits joins leading blank separator units to the first unit with text, so the
