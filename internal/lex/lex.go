@@ -179,8 +179,60 @@ func removedSharedOutputs(removed []removedSharedFragment) []string {
 	return slices.Compact(outputs)
 }
 
-func sharedDropTwoPassAdvice(id string, outputs []string) string {
-	return "; first delete only the shared paragraph `" + id + "` (still used by " + strings.Join(outputs, ", ") + ") and run `lex absorb`, then make the other edit and run `lex absorb` again"
+func sharedDropTwoPassAdvice(ids, outputs []string) string {
+	ids = slices.Clone(ids)
+	sort.Strings(ids)
+	ids = slices.Compact(ids)
+	outputs = slices.Clone(outputs)
+	sort.Strings(outputs)
+	outputs = slices.Compact(outputs)
+	paragraph := "paragraph"
+	if len(ids) != 1 {
+		paragraph = "paragraphs"
+	}
+	quotedIDs := make([]string, len(ids))
+	for i, id := range ids {
+		quotedIDs[i] = "`" + id + "`"
+	}
+	return "; first delete only the shared " + paragraph + " " + strings.Join(quotedIDs, ", ") + " (still used by " + strings.Join(outputs, ", ") + ") and run `lex absorb`, then make the other edit and run `lex absorb` again"
+}
+
+// otherOutputsForPart returns the sorted outputs that use part except selected.
+func otherOutputsForPart(part, selected string, catalog *manifestCatalog) ([]string, error) {
+	outputs, err := catalog.manifestsUsing(part)
+	if err != nil {
+		return nil, err
+	}
+	others := make([]string, 0, len(outputs))
+	for _, output := range outputs {
+		if output != selected {
+			others = append(others, output)
+		}
+	}
+	sort.Strings(others)
+	return slices.Compact(others), nil
+}
+
+func firstSharedOtherOutputs(parts []string, owners []int, selected string, catalog *manifestCatalog) ([]string, error) {
+	checked := make(map[string]bool)
+	for _, owner := range owners {
+		if owner < 0 || owner >= len(parts) {
+			continue
+		}
+		part := parts[owner]
+		if checked[part] {
+			continue
+		}
+		checked[part] = true
+		others, err := otherOutputsForPart(part, selected, catalog)
+		if err != nil {
+			return nil, err
+		}
+		if len(others) > 0 {
+			return others, nil
+		}
+	}
+	return nil, nil
 }
 
 func refreshRemovedSharedOutputs(codex, topic string, m manifest, cleanData []byte, purposeEnabled bool, catalog *manifestCatalog) ([]removedSharedFragment, error) {
@@ -205,19 +257,12 @@ func refreshRemovedSharedOutputs(codex, topic string, m manifest, cleanData []by
 		if newPartSet[id] {
 			continue
 		}
-		outputs, err := catalog.manifestsUsing(id)
+		outputs, err := otherOutputsForPart(id, m.out, catalog)
 		if err != nil {
 			return nil, err
 		}
-		var others []string
-		for _, output := range outputs {
-			if output != m.out {
-				others = append(others, output)
-			}
-		}
-		if len(others) > 0 {
-			sort.Strings(others)
-			removed = append(removed, removedSharedFragment{id: id, outputs: others})
+		if len(outputs) > 0 {
+			removed = append(removed, removedSharedFragment{id: id, outputs: outputs})
 		}
 	}
 	sort.Slice(removed, func(i, j int) bool { return removed[i].id < removed[j].id })
@@ -256,18 +301,18 @@ func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byt
 		if turnedWhollyCRLF(layout.rendered, sourceData) {
 			return assessment, wholeFileCRLFRefusal(m.out, "lex import --refresh")
 		}
-		sharedFlag, sharedHint, hintErr := codexSharedForceHint(codex, m, layout.rendered, sourceData, catalog)
-		if hintErr != nil {
-			if absorbBoundaryConflict(hintErr) {
-				removed, removalErr := refreshRemovedSharedOutputs(codex, topic, m, assessment.cleanData, purposeEnabled, catalog)
-				if removalErr != nil {
-					return assessment, removalErr
-				}
-				if len(removed) > 0 {
-					return assessment, refreshSharedRemovalRefusal(m.out, codex, removed, true)
-				}
-			}
+		sharedFlag, sharedHint, hintErr := codexSharedForceHintDetailed(codex, m, layout.rendered, sourceData, catalog)
+		if hintErr != nil && !sharedHintPlanRefusal(hintErr) {
 			return assessment, hintErr
+		}
+		if absorbBoundaryConflict(hintErr) {
+			removed, removalErr := refreshRemovedSharedOutputs(codex, topic, m, assessment.cleanData, purposeEnabled, catalog)
+			if removalErr != nil {
+				return assessment, removalErr
+			}
+			if len(removed) > 0 {
+				return assessment, refreshSharedRemovalRefusal(m.out, codex, removed, true)
+			}
 		}
 		if sharedFlag != "" {
 			return assessment, fmt.Errorf("%s: refresh would edit a shared fragment%s; run `lex absorb%s --codex %s %s`", m.out, sharedHint, sharedFlag, ShellQuoteArg(codex), ShellQuoteArg(m.out))
@@ -288,8 +333,13 @@ func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byt
 
 func refreshSharedRemovalRefusal(output, codex string, removed []removedSharedFragment, adviseTwoPasses bool) error {
 	refusal := fmt.Sprintf("%s: refresh would remove a fragment still used by %s", output, strings.Join(removedSharedOutputs(removed), ", "))
-	if adviseTwoPasses && len(removed) == 1 {
-		return errors.New(refusal + sharedDropTwoPassAdvice(removed[0].id, removed[0].outputs))
+	if adviseTwoPasses && len(removed) > 0 {
+		ids := make([]string, 0, len(removed))
+		for _, fragment := range removed {
+			ids = append(ids, fragment.id)
+		}
+		command := fmt.Sprintf("; run `lex absorb --codex %s %s`", ShellQuoteArg(codex), ShellQuoteArg(output))
+		return errors.New(refusal + command + sharedDropTwoPassAdvice(ids, removedSharedOutputs(removed)))
 	}
 	return fmt.Errorf("%s; run `lex absorb --codex %s %s`", refusal, ShellQuoteArg(codex), ShellQuoteArg(output))
 }
@@ -1963,12 +2013,14 @@ type absorbPlan struct {
 func planAbsorbEdits(codex, selected string, m manifest, bounds [][2]int, oldLines, newLines [][]byte, hunks []lineHunk, fileBytes []byte, options AbsorbOptions, printedPurpose bool, catalog *manifestCatalog) ([]preparedFragmentEdit, []int, map[int][]lineHunk, error) {
 	owners, deltas, additions, err := assignAbsorbHunks(bounds, m.parts, oldLines, newLines, hunks, options.DraftDir, manifestKey(selected), m.out, fileBytes)
 	if err != nil {
-		var draftErr *absorbDraftError
-		if errors.As(err, &draftErr) && draftErr.reason == "boundary conflict" {
+		if absorbBoundaryConflict(err) {
 			if advice, ok, adviceErr := sharedDropAdvice(m.out, m.parts, bounds, oldLines, newLines, catalog); adviceErr != nil {
 				return nil, nil, nil, adviceErr
 			} else if ok {
-				draftErr.reason += advice
+				var draftErr *absorbDraftError
+				if errors.As(err, &draftErr) {
+					draftErr.advice = advice
+				}
 			}
 		}
 		return nil, nil, nil, err
@@ -1997,30 +2049,29 @@ func planAbsorbEdits(codex, selected string, m manifest, bounds [][2]int, oldLin
 }
 
 func sharedDropAdvice(selected string, parts []string, bounds [][2]int, oldLines, newLines [][]byte, catalog *manifestCatalog) (string, bool, error) {
+	var ids, outputs []string
+	seenParts := make(map[string]bool)
 	for i, id := range parts {
-		if i >= len(bounds) || fragmentLinesPresent(oldLines[bounds[i][0]:bounds[i][1]], newLines) {
+		if i >= len(bounds) || seenParts[id] || fragmentLinesPresent(oldLines[bounds[i][0]:bounds[i][1]], newLines) {
 			continue
 		}
-		outputs, err := catalog.manifestsUsing(id)
+		seenParts[id] = true
+		others, err := otherOutputsForPart(id, selected, catalog)
 		if err != nil {
 			return "", false, err
-		}
-		if len(outputs) < 2 {
-			continue
-		}
-		others := make([]string, 0, len(outputs)-1)
-		for _, output := range outputs {
-			if output != selected {
-				others = append(others, output)
-			}
 		}
 		if len(others) == 0 {
 			continue
 		}
-		sort.Strings(others)
-		return sharedDropTwoPassAdvice(id, others), true, nil
+		ids = append(ids, id)
+		outputs = append(outputs, others...)
 	}
-	return "", false, nil
+	if len(ids) == 0 {
+		return "", false, nil
+	}
+	sort.Strings(ids)
+	sort.Strings(outputs)
+	return sharedDropTwoPassAdvice(ids, slices.Compact(outputs)), true, nil
 }
 
 func fragmentLinesPresent(fragment, output [][]byte) bool {
@@ -3245,8 +3296,7 @@ func forceRefusal(codex, target, selected string, built, actual []byte, m manife
 }
 
 func sharedHintPlanRefusal(err error) bool {
-	var draftErr *absorbDraftError
-	return errors.As(err, &draftErr) && draftErr.reason == "boundary conflict" || errors.Is(err, errInvalidEditedFragmentLineBounds)
+	return absorbBoundaryConflict(err) || errors.Is(err, errInvalidEditedFragmentLineBounds)
 }
 
 type purposeAdviceRefusal struct{ err error }
@@ -3260,6 +3310,14 @@ func isPurposeAdviceRefusal(err error) bool {
 }
 
 func codexSharedForceHint(codex string, m manifest, built, actual []byte, catalog *manifestCatalog) (string, string, error) {
+	flag, hint, err := codexSharedForceHintDetailed(codex, m, built, actual, catalog)
+	if sharedHintPlanRefusal(err) {
+		return "", "", nil
+	}
+	return flag, hint, err
+}
+
+func codexSharedForceHintDetailed(codex string, m manifest, built, actual []byte, catalog *manifestCatalog) (string, string, error) {
 	selected, parts := m.out, m.parts
 	manifestPath, manifest, err := catalog.findOutputManifest(selected)
 	if err != nil {
@@ -3292,7 +3350,7 @@ func codexSharedForceHint(codex string, m manifest, built, actual []byte, catalo
 		return "", "", err
 	}
 	if isMove {
-		affected, err := firstSharedEdit(parts, moveOwners, catalog)
+		affected, err := firstSharedOtherOutputs(parts, moveOwners, selected, catalog)
 		if err != nil {
 			return "", "", err
 		}
@@ -3302,22 +3360,12 @@ func codexSharedForceHint(codex string, m manifest, built, actual []byte, catalo
 	}
 	_, owners, _, _, err := planEditedFragment(codex, selected, manifest, built, actual, actual, AbsorbOptions{Shared: true}, purpose, catalog)
 	if err != nil {
-		if sharedHintPlanRefusal(err) {
-			return "", "", nil
-		}
 		return "", "", err
 	}
-	affected, err := firstSharedEdit(parts, owners, catalog)
+	others, err := firstSharedOtherOutputs(parts, owners, selected, catalog)
 	if err != nil {
 		return "", "", err
 	}
-	var others []string
-	for _, output := range affected {
-		if output != selected {
-			others = append(others, output)
-		}
-	}
-	sort.Strings(others)
 	if len(others) == 0 {
 		return "", "", nil
 	}
@@ -3454,14 +3502,19 @@ func fragmentIsDraft(fragment []byte) bool {
 
 type absorbDraftError struct {
 	output, reason, path string
+	advice               string
 	draftDirMissing      bool
 }
 
 func (e *absorbDraftError) Error() string {
-	if e.draftDirMissing {
-		return fmt.Sprintf("%s: %s; draft directory must be provided", e.output, e.reason)
+	message := fmt.Sprintf("%s: %s", e.output, e.reason)
+	if e.advice != "" {
+		message += e.advice
 	}
-	return fmt.Sprintf("%s: %s; draft saved to %s", e.output, e.reason, e.path)
+	if e.draftDirMissing {
+		return message + "; draft directory must be provided"
+	}
+	return message + "; draft saved to " + e.path
 }
 
 func writeAbsorbDraft(dir, key, output string, data []byte, reason string) error {
