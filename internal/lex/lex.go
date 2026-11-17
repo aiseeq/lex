@@ -165,7 +165,25 @@ type refreshAssessment struct {
 	noChange       bool
 }
 
-func refreshRemovedSharedOutputs(codex, topic string, m manifest, cleanData []byte, purposeEnabled bool, catalog *manifestCatalog) ([]string, error) {
+type removedSharedFragment struct {
+	id      string
+	outputs []string
+}
+
+func removedSharedOutputs(removed []removedSharedFragment) []string {
+	var outputs []string
+	for _, fragment := range removed {
+		outputs = append(outputs, fragment.outputs...)
+	}
+	sort.Strings(outputs)
+	return slices.Compact(outputs)
+}
+
+func sharedDropTwoPassAdvice(id string, outputs []string) string {
+	return "; first delete only the shared paragraph `" + id + "` (still used by " + strings.Join(outputs, ", ") + ") and run `lex absorb`, then make the other edit and run `lex absorb` again"
+}
+
+func refreshRemovedSharedOutputs(codex, topic string, m manifest, cleanData []byte, purposeEnabled bool, catalog *manifestCatalog) ([]removedSharedFragment, error) {
 	headers, err := readFragmentHeaders(codex, m.parts)
 	if err != nil {
 		return nil, err
@@ -182,7 +200,7 @@ func refreshRemovedSharedOutputs(codex, topic string, m manifest, cleanData []by
 	for _, id := range newParts {
 		newPartSet[id] = true
 	}
-	var otherOutputs []string
+	var removed []removedSharedFragment
 	for _, id := range m.parts {
 		if newPartSet[id] {
 			continue
@@ -191,14 +209,19 @@ func refreshRemovedSharedOutputs(codex, topic string, m manifest, cleanData []by
 		if err != nil {
 			return nil, err
 		}
+		var others []string
 		for _, output := range outputs {
 			if output != m.out {
-				otherOutputs = append(otherOutputs, output)
+				others = append(others, output)
 			}
 		}
+		if len(others) > 0 {
+			sort.Strings(others)
+			removed = append(removed, removedSharedFragment{id: id, outputs: others})
+		}
 	}
-	sort.Strings(otherOutputs)
-	return slices.Compact(otherOutputs), nil
+	sort.Slice(removed, func(i, j int) bool { return removed[i].id < removed[j].id })
+	return removed, nil
 }
 
 func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byte, catalog *manifestCatalog) (refreshAssessment, error) {
@@ -235,6 +258,15 @@ func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byt
 		}
 		sharedFlag, sharedHint, hintErr := codexSharedForceHint(codex, m, layout.rendered, sourceData, catalog)
 		if hintErr != nil {
+			if absorbBoundaryConflict(hintErr) {
+				removed, removalErr := refreshRemovedSharedOutputs(codex, topic, m, assessment.cleanData, purposeEnabled, catalog)
+				if removalErr != nil {
+					return assessment, removalErr
+				}
+				if len(removed) > 0 {
+					return assessment, refreshSharedRemovalRefusal(m.out, codex, removed, true)
+				}
+			}
 			return assessment, hintErr
 		}
 		if sharedFlag != "" {
@@ -245,13 +277,26 @@ func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byt
 			return assessment, err
 		}
 		if len(otherOutputs) > 0 {
-			return assessment, fmt.Errorf("%s: refresh would remove a fragment still used by %s; run `lex absorb --codex %s %s`", m.out, strings.Join(otherOutputs, ", "), ShellQuoteArg(codex), ShellQuoteArg(m.out))
+			return assessment, refreshSharedRemovalRefusal(m.out, codex, otherOutputs, false)
 		}
 	}
 	if !assessment.noChange && validationErr != nil {
 		return assessment, validationErr
 	}
 	return assessment, nil
+}
+
+func refreshSharedRemovalRefusal(output, codex string, removed []removedSharedFragment, adviseTwoPasses bool) error {
+	refusal := fmt.Sprintf("%s: refresh would remove a fragment still used by %s", output, strings.Join(removedSharedOutputs(removed), ", "))
+	if adviseTwoPasses && len(removed) == 1 {
+		return errors.New(refusal + sharedDropTwoPassAdvice(removed[0].id, removed[0].outputs))
+	}
+	return fmt.Errorf("%s; run `lex absorb --codex %s %s`", refusal, ShellQuoteArg(codex), ShellQuoteArg(output))
+}
+
+func absorbBoundaryConflict(err error) bool {
+	var draftErr *absorbDraftError
+	return errors.As(err, &draftErr) && draftErr.reason == "boundary conflict"
 }
 
 type ImportOptions struct {
@@ -1918,6 +1963,14 @@ type absorbPlan struct {
 func planAbsorbEdits(codex, selected string, m manifest, bounds [][2]int, oldLines, newLines [][]byte, hunks []lineHunk, fileBytes []byte, options AbsorbOptions, printedPurpose bool, catalog *manifestCatalog) ([]preparedFragmentEdit, []int, map[int][]lineHunk, error) {
 	owners, deltas, additions, err := assignAbsorbHunks(bounds, m.parts, oldLines, newLines, hunks, options.DraftDir, manifestKey(selected), m.out, fileBytes)
 	if err != nil {
+		var draftErr *absorbDraftError
+		if errors.As(err, &draftErr) && draftErr.reason == "boundary conflict" {
+			if advice, ok, adviceErr := sharedDropAdvice(m.out, m.parts, bounds, oldLines, newLines, catalog); adviceErr != nil {
+				return nil, nil, nil, adviceErr
+			} else if ok {
+				draftErr.reason += advice
+			}
+		}
 		return nil, nil, nil, err
 	}
 	edits, err := prepareFragmentEdits(codex, m.parts, bounds, owners, deltas, newLines, additions, printedPurpose)
@@ -1941,6 +1994,55 @@ func planAbsorbEdits(codex, selected string, m manifest, bounds [][2]int, oldLin
 		return nil, nil, nil, err
 	}
 	return edits, editable, additions, nil
+}
+
+func sharedDropAdvice(selected string, parts []string, bounds [][2]int, oldLines, newLines [][]byte, catalog *manifestCatalog) (string, bool, error) {
+	for i, id := range parts {
+		if i >= len(bounds) || fragmentLinesPresent(oldLines[bounds[i][0]:bounds[i][1]], newLines) {
+			continue
+		}
+		outputs, err := catalog.manifestsUsing(id)
+		if err != nil {
+			return "", false, err
+		}
+		if len(outputs) < 2 {
+			continue
+		}
+		others := make([]string, 0, len(outputs)-1)
+		for _, output := range outputs {
+			if output != selected {
+				others = append(others, output)
+			}
+		}
+		if len(others) == 0 {
+			continue
+		}
+		sort.Strings(others)
+		return sharedDropTwoPassAdvice(id, others), true, nil
+	}
+	return "", false, nil
+}
+
+func fragmentLinesPresent(fragment, output [][]byte) bool {
+	var meaningful [][]byte
+	for _, line := range fragment {
+		if len(bytes.TrimSpace(line)) > 0 {
+			meaningful = append(meaningful, line)
+		}
+	}
+	if len(meaningful) == 0 {
+		return false
+	}
+	next := 0
+	for _, line := range output {
+		if bytes.Equal(line, meaningful[next]) {
+			next++
+			if next == len(meaningful) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func planAbsorbManifest(codex, selected string, m manifest, bounds [][2]int, edits []preparedFragmentEdit, additions map[int][]lineHunk, newLines [][]byte, fileBytes []byte, catalog *manifestCatalog) (absorbPlan, error) {
