@@ -546,30 +546,24 @@ func uniformLineEnding(lines [][]byte) lineEndingKind {
 	return ending
 }
 
-// turnedWhollyCRLF reports a file whose every line ends in CRLF while the
-// fragments it was built from use LF.
+// turnedWhollyCRLF reports a file whose every line ends in CRLF while its
+// fragments were built with LF or mixed line endings.
 func turnedWhollyCRLF(built, actual []byte) bool {
 	if uniformLineEnding(absorbLines(actual)) != lineEndingCRLF {
 		return false
 	}
 	builtEnding := uniformLineEnding(absorbLines(built))
-	if builtEnding == lineEndingLF {
-		return true
-	}
-	if builtEnding != lineEndingMixed {
-		return false
-	}
-	toLF := func(data []byte) []byte {
-		return bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
-	}
-	return bytes.Equal(toLF(built), toLF(actual))
+	return builtEnding == lineEndingLF || builtEnding == lineEndingMixed
 }
 
 func allLinesCRLF(lines [][]byte) bool {
 	return uniformLineEnding(lines) == lineEndingCRLF
 }
 
-func wholeFileCRLFRefusal(file, command string) error {
+func wholeFileCRLFRefusal(file, codex, command string, built []byte) error {
+	if uniformLineEnding(absorbLines(built)) == lineEndingMixed {
+		return fmt.Errorf("%s: line endings changed to CRLF, but the fragments mix LF and CRLF; restore the previous line endings and run `%s` again (if the text is unchanged, `lex build --force --codex %s %s` restores the file)", file, command, ShellQuoteArg(codex), ShellQuoteArg(file))
+	}
 	return fmt.Errorf("%s: line endings changed to CRLF, but the fragments use LF; convert the file back to LF and run `%s` again", file, command)
 }
 
