@@ -427,13 +427,15 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 	var units [][]byte
 	var sourceData []byte
 	var assessment refreshAssessment
+	var catalog *manifestCatalog
 	old, err := readManifest(manifestPath)
 	if err == nil {
 		if old.out != abs {
 			return fmt.Errorf("%s: manifest key already points to %s", manifestPath, old.out)
 		}
 		if refresh {
-			catalog, catalogErr := listManifestCatalog(codex)
+			var catalogErr error
+			catalog, catalogErr = listManifestCatalog(codex)
 			if catalogErr != nil {
 				return catalogErr
 			}
@@ -471,7 +473,11 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 		} else {
 			units = split(assessment.cleanData)
 		}
-		if err := removeOldFragments(codex, old.parts, os.Remove); err != nil {
+		units, err = protectRefreshShared(codex, topic, old, units, preservedHeaders, catalog)
+		if err != nil {
+			return err
+		}
+		if err := removeRefreshPrivateFragments(codex, old, catalog); err != nil {
 			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -494,6 +500,70 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 	allLinks := uniqueLinks(append(old.links, links...))
 	m.links = allLinks
 	return finishImport(codex, manifestPath, m, allLinks, topic, units, preservedHeaders)
+}
+
+func removeRefreshPrivateFragments(codex string, m manifest, catalog *manifestCatalog) error {
+	var privateParts []string
+	for _, id := range m.parts {
+		others, err := otherOutputsForPart(id, m.out, catalog)
+		if err != nil {
+			return err
+		}
+		if len(others) == 0 {
+			privateParts = append(privateParts, id)
+		}
+	}
+	return removeOldFragments(codex, privateParts, os.Remove)
+}
+
+// protectRefreshShared keeps separators attached to their existing shared body
+// out of the newly split unit, and verifies the actual bytes to be written.
+func protectRefreshShared(codex, topic string, m manifest, units [][]byte, headers []preservedFragmentHeader, catalog *manifestCatalog) ([][]byte, error) {
+	ids, _, _ := matchImportedHeaders(topic, units, headers)
+	for i, id := range ids {
+		others, err := otherOutputsForPart(id, m.out, catalog)
+		if err != nil {
+			return nil, err
+		}
+		if len(others) == 0 {
+			continue
+		}
+		path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("%s: read shared fragment: %w", path, err)
+		}
+		body, err := fragmentBody(raw)
+		if err != nil {
+			return nil, err
+		}
+		if i+1 < len(units) && bytes.HasPrefix(units[i], body) {
+			extra := units[i][len(body):]
+			if len(extra) > 0 && len(bytes.TrimSpace(extra)) == 0 {
+				units[i+1] = append(append([]byte(nil), extra...), units[i+1]...)
+				units[i] = units[i][:len(body)]
+			}
+		}
+	}
+	ids, matched, _ := matchImportedHeaders(topic, units, headers)
+	for i, id := range ids {
+		others, err := otherOutputsForPart(id, m.out, catalog)
+		if err != nil {
+			return nil, err
+		}
+		if len(others) == 0 {
+			continue
+		}
+		path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("%s: read shared fragment: %w", path, err)
+		}
+		if matched[i] < 0 || !bytes.Equal(raw, append(append([]byte(nil), replaceHeaderID(headers[matched[i]].header, id)...), units[i]...)) {
+			return nil, fmt.Errorf("%s: refresh would change a fragment shared with %s; run `lex absorb --codex %s %s`", m.out, strings.Join(others, ", "), ShellQuoteArg(codex), ShellQuoteArg(m.out))
+		}
+	}
+	return units, nil
 }
 
 func finishImport(codex, manifestPath string, m manifest, links []outputLink, topic string, units [][]byte, preservedHeaders []preservedFragmentHeader) error {
@@ -525,8 +595,11 @@ func writeImportedFragments(codex, topic string, units [][]byte, preservedHeader
 			header = replaceHeaderID(preservedHeaders[oldIndex].header, id)
 		}
 		body := append(header, u...)
-		if err := os.WriteFile(path, body, fileMode); err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", path, err)
+		existing, readErr := os.ReadFile(path)
+		if readErr != nil || !bytes.Equal(existing, body) {
+			if err := os.WriteFile(path, body, fileMode); err != nil {
+				return nil, nil, fmt.Errorf("%s: %w", path, err)
+			}
 		}
 		hashes[id] = sha(body)
 	}
