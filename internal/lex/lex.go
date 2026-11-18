@@ -179,13 +179,7 @@ func removedSharedOutputs(removed []removedSharedFragment) []string {
 	return slices.Compact(outputs)
 }
 
-func sharedDropTwoPassAdvice(ids, outputs []string) string {
-	ids = slices.Clone(ids)
-	sort.Strings(ids)
-	ids = slices.Compact(ids)
-	outputs = slices.Clone(outputs)
-	sort.Strings(outputs)
-	outputs = slices.Compact(outputs)
+func sharedDropTwoPassAdvice(ids, outputs []string, absorbCommand string) string {
 	paragraph := "paragraph"
 	if len(ids) != 1 {
 		paragraph = "paragraphs"
@@ -194,7 +188,11 @@ func sharedDropTwoPassAdvice(ids, outputs []string) string {
 	for i, id := range ids {
 		quotedIDs[i] = "`" + id + "`"
 	}
-	return "; first delete only the shared " + paragraph + " " + strings.Join(quotedIDs, ", ") + " (still used by " + strings.Join(outputs, ", ") + ") and run `lex absorb`, then make the other edit and run `lex absorb` again"
+	advice := "; first delete only the shared " + paragraph + " " + strings.Join(quotedIDs, ", ") + " (still used by " + strings.Join(outputs, ", ") + ")"
+	if absorbCommand == "lex absorb" {
+		return advice + " and run `lex absorb`, then make the other edit and run `lex absorb` again"
+	}
+	return advice + " and run `lex absorb` (CLI form: `" + absorbCommand + "`) for the first pass, then make the other edit and run `lex absorb` again"
 }
 
 // otherOutputsForPart returns the sorted outputs that use part except selected.
@@ -228,7 +226,7 @@ func firstSharedOtherOutputs(parts []string, owners []int, selected string, cata
 		if err != nil {
 			return nil, err
 		}
-		if len(others) > 0 {
+		if len(others) > 0 && (selected != "" || len(others) > 1) {
 			return others, nil
 		}
 	}
@@ -338,8 +336,10 @@ func refreshSharedRemovalRefusal(output, codex string, removed []removedSharedFr
 		for _, fragment := range removed {
 			ids = append(ids, fragment.id)
 		}
-		command := fmt.Sprintf("; run `lex absorb --codex %s %s`", ShellQuoteArg(codex), ShellQuoteArg(output))
-		return errors.New(refusal + command + sharedDropTwoPassAdvice(ids, removedSharedOutputs(removed)))
+		sort.Strings(ids)
+		ids = slices.Compact(ids)
+		command := fmt.Sprintf("lex absorb --codex %s %s", ShellQuoteArg(codex), ShellQuoteArg(output))
+		return errors.New(refusal + sharedDropTwoPassAdvice(ids, removedSharedOutputs(removed), command))
 	}
 	return fmt.Errorf("%s; run `lex absorb --codex %s %s`", refusal, ShellQuoteArg(codex), ShellQuoteArg(output))
 }
@@ -2313,8 +2313,10 @@ func sharedDropAdvice(selected string, parts []string, bounds [][2]int, oldLines
 		return "", false, nil
 	}
 	sort.Strings(ids)
+	ids = slices.Compact(ids)
 	sort.Strings(outputs)
-	return sharedDropTwoPassAdvice(ids, slices.Compact(outputs)), true, nil
+	outputs = slices.Compact(outputs)
+	return sharedDropTwoPassAdvice(ids, outputs, "lex absorb"), true, nil
 }
 
 func fragmentLinesPresent(fragment, output [][]byte) bool {
@@ -3237,22 +3239,11 @@ func validateSharedEdits(parts []string, owners []int, shared bool, catalog *man
 
 // firstSharedEdit returns the manifests using the first edited part that more than one manifest builds, or nil.
 func firstSharedEdit(parts []string, owners []int, catalog *manifestCatalog) ([]string, error) {
-	checked := make(map[string]bool)
-	for _, owner := range owners {
-		part := parts[owner]
-		if checked[part] {
-			continue
-		}
-		checked[part] = true
-		affected, err := catalog.manifestsUsing(part)
-		if err != nil {
-			return nil, err
-		}
-		if len(affected) > 1 {
-			return affected, nil
-		}
+	affected, err := firstSharedOtherOutputs(parts, owners, "", catalog)
+	if err != nil || len(affected) <= 1 {
+		return nil, err
 	}
-	return nil, nil
+	return affected, nil
 }
 
 func prepareFragmentEdits(codex string, parts []string, bounds [][2]int, owners, deltas []int, newLines [][]byte, additions map[int][]lineHunk, printedPurpose bool) ([]preparedFragmentEdit, error) {
