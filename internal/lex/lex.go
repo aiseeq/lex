@@ -326,14 +326,7 @@ func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byt
 				return assessment, removalErr
 			}
 			if len(removed) > 0 {
-				fragmentsChanged, changedErr := manifestFragmentsChanged(codex, m)
-				if changedErr != nil {
-					return assessment, changedErr
-				}
-				if fragmentsChanged {
-					return assessment, forceRefusal(codex, m.out, manifestPath, layout.rendered, sourceData, m, catalog)
-				}
-				return assessment, refreshSharedRemovalRefusal(m.out, codex, removed, true)
+				return assessment, refreshSharedRemovalConflict(codex, manifestPath, m, sourceData, removed, catalog)
 			}
 		}
 		if sharedFlag != "" {
@@ -353,18 +346,22 @@ func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byt
 	return assessment, nil
 }
 
-func manifestFragmentsChanged(codex string, m manifest) (bool, error) {
-	for _, id := range m.parts {
-		path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return false, fmt.Errorf("%s: read fragment: %w", path, err)
-		}
-		if expected, ok := m.fragmentHashes[id]; !ok || sha(data) != expected {
-			return true, nil
-		}
+func refreshSharedRemovalConflict(codex, manifestPath string, m manifest, actual []byte, removed []removedSharedFragment, catalog *manifestCatalog) error {
+	want, err := manifestBody(codex, m)
+	if err != nil {
+		return err
 	}
-	return false, nil
+	if m.header {
+		want = generatedHeader(manifestPath, want)
+	}
+	if fragmentsChangedSinceBuild(codex, manifestPath, m, want) {
+		refusal := forceRefusal(codex, m.out, manifestPath, want, actual, m, catalog)
+		if refusal == nil {
+			return nil
+		}
+		return fmt.Errorf("%w; the earlier two-pass suggestion (`lex absorb`, CLI form: `lex absorb --codex %s %s`) is superseded because both the file and fragments changed", refusal, ShellQuoteArg(codex), ShellQuoteArg(m.out))
+	}
+	return refreshSharedRemovalRefusal(m.out, codex, removed, true)
 }
 
 func refreshSharedRemovalRefusal(output, codex string, removed []removedSharedFragment, adviseTwoPasses bool) error {
