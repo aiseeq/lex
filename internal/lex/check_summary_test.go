@@ -40,7 +40,7 @@ func TestRuleWarningSummaryCountsEachWarningKind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "правил без основания: 1, без условия снятия: 2; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 3; пунктов без полей: 0"
+	want := "правил без основания: 1, без условия снятия: 2; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 3; пунктов без полей: 0; цель пересказывает пункт: 0"
 	if got := RuleWarningSummary(warnings); got != want {
 		t.Fatalf("summary = %q, want %q (warnings: %v)", got, want, warnings)
 	}
@@ -52,7 +52,7 @@ func TestRuleWarningSummaryBothFieldsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "правил без основания: 1, без условия снятия: 1; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 1; пунктов без полей: 0"
+	want := "правил без основания: 1, без условия снятия: 1; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 1; пунктов без полей: 0; цель пересказывает пункт: 0"
 	if got := RuleWarningSummary(warnings); got != want {
 		t.Fatalf("summary = %q, want %q (warnings: %v)", got, want, warnings)
 	}
@@ -64,14 +64,14 @@ func TestRuleWarningSummaryQuoteOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "правил без основания: 0, без условия снятия: 0; фрагментов с цитатой пользователя в тексте: 1; правил без цели: 1; пунктов без полей: 0"
+	want := "правил без основания: 0, без условия снятия: 0; фрагментов с цитатой пользователя в тексте: 1; правил без цели: 1; пунктов без полей: 0; цель пересказывает пункт: 0"
 	if got := RuleWarningSummary(warnings); got != want {
 		t.Fatalf("summary = %q, want %q (warnings: %v)", got, want, warnings)
 	}
 }
 
 func TestRuleWarningSummaryEmpty(t *testing.T) {
-	want := "правил без основания: 0, без условия снятия: 0; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 0; пунктов без полей: 0"
+	want := "правил без основания: 0, без условия снятия: 0; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 0; пунктов без полей: 0; цель пересказывает пункт: 0"
 	if got := RuleWarningSummary(nil); got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}
@@ -80,7 +80,7 @@ func TestRuleWarningSummaryEmpty(t *testing.T) {
 func TestRuleWarningSummaryCountsSharedUnmarkedPathOnce(t *testing.T) {
 	pathWarning := "/codex/frag/item.md" + itemHasNoFieldsWarning
 	warnings := []string{pathWarning, pathWarning}
-	want := "правил без основания: 0, без условия снятия: 0; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 0; пунктов без полей: 1"
+	want := "правил без основания: 0, без условия снятия: 0; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 0; пунктов без полей: 1; цель пересказывает пункт: 0"
 	if got := RuleWarningSummary(warnings); got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}

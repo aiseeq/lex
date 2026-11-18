@@ -726,7 +726,7 @@ func TestCheckPrintsRuleSummaryOnceAfterWarnings(t *testing.T) {
 	if filled != len(fields) {
 		t.Fatalf("filled %d fragments of %d, want %d", filled, len(frags), len(fields))
 	}
-	summary := "правил без основания: 1, без условия снятия: 2; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 3; пунктов без полей: 0"
+	summary := "правил без основания: 1, без условия снятия: 2; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 3; пунктов без полей: 0; цель пересказывает пункт: 0"
 	assertStreams := func(t *testing.T, stdout, stderr string) {
 		t.Helper()
 		if stdout != "" {

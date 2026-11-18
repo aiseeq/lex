@@ -5650,6 +5650,8 @@ func ruleFieldWarnings(path string, raw []byte) []string {
 	if isRule {
 		if len(values["цель"]) == 0 || values["цель"][len(values["цель"])-1] == "" {
 			warnings = append(warnings, fmt.Sprintf("%s: rule has empty цель", path))
+		} else if goalRestatesBody(values["цель"][len(values["цель"])-1], raw[len(header):]) {
+			warnings = append(warnings, path+goalRestatesWarning)
 		}
 		for _, field := range []string{"основание", "снять_когда"} {
 			if len(values[field]) == 0 || values[field][len(values[field])-1] == "" {
@@ -5748,6 +5750,7 @@ func resolvedPath(path string) (string, error) {
 // Rule field and text warnings of lex check, as they follow the fragment path.
 const (
 	emptyGoalWarning       = ": rule has empty цель"
+	goalRestatesWarning    = ": цель пересказывает пункт"
 	itemHasNoFieldsWarning = ": item has no fields"
 	emptyBasisWarning      = ": rule has empty основание"
 	emptyRemovalWarning    = ": rule has empty снять_когда"
@@ -5756,6 +5759,7 @@ const (
 
 func isRuleBasisWarning(warning string) bool {
 	return strings.Contains(warning, emptyGoalWarning) ||
+		strings.Contains(warning, goalRestatesWarning) ||
 		strings.Contains(warning, emptyBasisWarning) ||
 		strings.Contains(warning, emptyRemovalWarning) ||
 		strings.Contains(warning, textQuoteWarning)
@@ -5763,7 +5767,7 @@ func isRuleBasisWarning(warning string) bool {
 
 // RuleWarningSummary returns the closing line of lex check: how many warnings of each rule kind there are.
 func RuleWarningSummary(warnings []string) string {
-	basis, removal, quote, goal := 0, 0, 0, 0
+	basis, removal, quote, goal, restates := 0, 0, 0, 0, 0
 	items := make(map[string]bool)
 	for _, warning := range warnings {
 		switch {
@@ -5771,6 +5775,8 @@ func RuleWarningSummary(warnings []string) string {
 			items[strings.TrimSuffix(warning, itemHasNoFieldsWarning)] = true
 		case strings.Contains(warning, emptyGoalWarning):
 			goal++
+		case strings.Contains(warning, goalRestatesWarning):
+			restates++
 		case strings.Contains(warning, emptyBasisWarning):
 			basis++
 		case strings.Contains(warning, emptyRemovalWarning):
@@ -5779,7 +5785,64 @@ func RuleWarningSummary(warnings []string) string {
 			quote++
 		}
 	}
-	return fmt.Sprintf("правил без основания: %d, без условия снятия: %d; фрагментов с цитатой пользователя в тексте: %d; правил без цели: %d; пунктов без полей: %d", basis, removal, quote, goal, len(items))
+	return fmt.Sprintf("правил без основания: %d, без условия снятия: %d; фрагментов с цитатой пользователя в тексте: %d; правил без цели: %d; пунктов без полей: %d; цель пересказывает пункт: %d", basis, removal, quote, goal, len(items), restates)
+}
+
+// goalRestatesBody reports a restatement when at least two meaningful word stems
+// overlap and overlap covers at least 60% of the union of the goal and body stems.
+func goalRestatesBody(goal string, body []byte) bool {
+	goalStems := meaningfulStems(goal)
+	if len(goalStems) < 2 {
+		return false
+	}
+	bodyStems := meaningfulStems(string(body))
+	common := 0
+	for stem := range goalStems {
+		if bodyStems[stem] {
+			common++
+		}
+	}
+	union := len(goalStems)
+	for stem := range bodyStems {
+		if !goalStems[stem] {
+			union++
+		}
+	}
+	return common >= 2 && union > 0 && float64(common)/float64(union) >= 0.6
+}
+
+func meaningfulStems(text string) map[string]bool {
+	stems := make(map[string]bool)
+	for _, token := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool { return !unicode.IsLetter(r) }) {
+		stem := ruleWordStem(token)
+		if len([]rune(stem)) < 3 || ruleStemStopWords[stem] {
+			continue
+		}
+		stems[stem] = true
+	}
+	return stems
+}
+
+var ruleStemStopWords = map[string]bool{
+	"этот": true, "который": true, "чтобы": true, "сам": true, "свой": true,
+	"быть": true, "если": true, "когда": true, "также": true, "можно": true,
+}
+
+func ruleWordStem(word string) string {
+	// Strip common Russian inflections so forms such as «пишется» and «пиши»
+	// share «пиш», and «самим пользователем» matches «сам пользователь».
+	suffixes := []string{"ившись", "ывшись", "ующими", "енными", "аться", "яться", "ется", "ится", "ались", "ились", "ывать", "ивать", "овать", "евать", "енный", "анная", "енное", "ого", "ему", "ыми", "ими", "ами", "ями", "ать", "ять", "ить", "еть", "ешь", "ишь", "ете", "ите", "ала", "яли", "или", "али", "ами", "ями", "ом", "ем", "ым", "им", "ой", "ый", "ий", "ое", "ая", "яя", "ые", "ие", "а", "я", "ы", "и", "ь", "ю", "у", "е", "о"}
+	for _, suffix := range suffixes {
+		if strings.HasSuffix(word, suffix) && len([]rune(word))-len([]rune(suffix)) >= 3 {
+			word = strings.TrimSuffix(word, suffix)
+			break
+		}
+	}
+	runes := []rune(word)
+	if len(runes) > 4 {
+		return string(runes[:4])
+	}
+	return word
 }
 
 func fragmentHasNoFields(raw, body []byte) bool {

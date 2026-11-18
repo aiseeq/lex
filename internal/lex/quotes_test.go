@@ -453,7 +453,7 @@ func TestRuleBasisEmptyRemove(t *testing.T) {
 func TestRuleBasisEmptyPurposeOk(t *testing.T) {
 	codex, _, _ := ruleBasisFixture(t, "Правило.\n", "цель: ", "основание: источник", "снять_когда: условие")
 	warnings, err := CheckWithWarnings(codex, CheckOptions{})
-	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 0, без условия снятия: 0; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 1; пунктов без полей: 0" {
+	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 0, без условия снятия: 0; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 1; пунктов без полей: 0; цель пересказывает пункт: 0" {
 		t.Fatalf("warnings = %v, err = %v", warnings, err)
 	}
 }
@@ -466,7 +466,7 @@ func TestRuleBasisPurposeOnly(t *testing.T) {
 	}
 	mustWrite(t, frag, bytes.Replace(raw, []byte("тип: правило\n"), nil, 1))
 	warnings, err := CheckWithWarnings(codex, CheckOptions{})
-	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 1, без условия снятия: 1; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 0; пунктов без полей: 0" || len(warnings) != 2 {
+	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 1, без условия снятия: 1; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 0; пунктов без полей: 0; цель пересказывает пункт: 0" || len(warnings) != 2 {
 		t.Fatalf("warnings = %v, err = %v", warnings, err)
 	}
 	if !strings.Contains(strings.Join(warnings, "\n"), "основание") || !strings.Contains(strings.Join(warnings, "\n"), "снять_когда") {
@@ -477,7 +477,7 @@ func TestRuleBasisPurposeOnly(t *testing.T) {
 func TestRuleBasisPlainFragment(t *testing.T) {
 	codex, _, _ := ruleBasisFixture(t, "Обычный текст.\n")
 	warnings, err := CheckWithWarnings(codex, CheckOptions{})
-	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 0, без условия снятия: 0; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 0; пунктов без полей: 0" {
+	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 0, без условия снятия: 0; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 0; пунктов без полей: 0; цель пересказывает пункт: 0" {
 		t.Fatalf("warnings = %v, err = %v", warnings, err)
 	}
 }
@@ -590,7 +590,7 @@ func TestRuleBasisSharedFragment(t *testing.T) {
 func TestRuleBasisBothEmpty(t *testing.T) {
 	codex, _, frag := ruleBasisFixture(t, "Правило.\n", "основание: ", "снять_когда: ")
 	warnings, err := CheckWithWarnings(codex, CheckOptions{})
-	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 1, без условия снятия: 1; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 1; пунктов без полей: 0" || len(warnings) != 3 {
+	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 1, без условия снятия: 1; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 1; пунктов без полей: 0; цель пересказывает пункт: 0" || len(warnings) != 3 {
 		t.Fatalf("warnings = %v, summary = %q, err = %v", warnings, RuleWarningSummary(warnings), err)
 	}
 	if countWarningsContaining(warnings, frag+": rule has empty основание") != 1 ||
@@ -642,7 +642,7 @@ func assertRuleBasis(t *testing.T, warnings []string, err error, count int, path
 		basis = count
 	}
 	goal := countWarningsContaining(warnings, path+": rule has empty цель")
-	want := fmt.Sprintf("правил без основания: %d, без условия снятия: %d; фрагментов с цитатой пользователя в тексте: %d; правил без цели: %d; пунктов без полей: 0", basis, removal, quote, goal)
+	want := fmt.Sprintf("правил без основания: %d, без условия снятия: %d; фрагментов с цитатой пользователя в тексте: %d; правил без цели: %d; пунктов без полей: 0; цель пересказывает пункт: 0", basis, removal, quote, goal)
 	if err != nil || RuleWarningSummary(warnings) != want {
 		t.Fatalf("warnings = %v, summary = %q, want %q, err = %v", warnings, RuleWarningSummary(warnings), want, err)
 	}

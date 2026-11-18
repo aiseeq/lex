@@ -125,7 +125,7 @@ func TestDecisionManifestItemsAreExcludedFromUnmarkedCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.HasSuffix(RuleWarningSummary(warnings), "пунктов без полей: 1") == false {
+	if strings.HasSuffix(RuleWarningSummary(warnings), "пунктов без полей: 1; цель пересказывает пункт: 0") == false {
 		t.Fatalf("summary = %q, warnings = %v", RuleWarningSummary(warnings), warnings)
 	}
 	if countWarningsContaining(warnings, itemHasNoFieldsWarning) != 1 {
@@ -169,7 +169,7 @@ func TestUnmarkedListItemsAndKinds(t *testing.T) {
 	if countWarningsContaining(warnings, itemHasNoFieldsWarning) != 2 {
 		t.Fatalf("item warnings = %v, parts = %v", warnings, m.parts)
 	}
-	if got := RuleWarningSummary(warnings); !strings.HasSuffix(got, "пунктов без полей: 2") {
+	if got := RuleWarningSummary(warnings); !strings.HasSuffix(got, "пунктов без полей: 2; цель пересказывает пункт: 0") {
 		t.Fatalf("summary = %q", got)
 	}
 	baseRaw := make(map[string][]byte, len(m.parts))
@@ -320,7 +320,7 @@ func TestBrokenToolsJSONKeepsDiskCheckAndItemCount(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "built output differs") {
 		t.Fatalf("check error = %v, want the disk drift of other.md", err)
 	}
-	if got := RuleWarningSummary(warnings); !strings.HasSuffix(got, "пунктов без полей: 1") {
+	if got := RuleWarningSummary(warnings); !strings.HasSuffix(got, "пунктов без полей: 1; цель пересказывает пункт: 0") {
 		t.Fatalf("summary = %q, want the instruction item counted and the journal (default path) left out", got)
 	}
 }
@@ -340,7 +340,7 @@ func TestDecisionJournalNamedThroughSymlinkIsExcluded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := RuleWarningSummary(warnings); !strings.HasSuffix(got, "пунктов без полей: 1") {
+	if got := RuleWarningSummary(warnings); !strings.HasSuffix(got, "пунктов без полей: 1; цель пересказывает пункт: 0") {
 		t.Fatalf("summary = %q, warnings = %v", got, warnings)
 	}
 }
