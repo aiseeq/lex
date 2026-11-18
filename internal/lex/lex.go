@@ -574,6 +574,13 @@ func topicFragmentIDs(codex, topic string) ([]string, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 			return nil
 		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("%s: read topic fragment: %w", path, err)
+		}
+		if fragmentIsRecord(raw) {
+			return nil
+		}
 		rel, err := filepath.Rel(fragmentRoot, path)
 		if err != nil {
 			return err
