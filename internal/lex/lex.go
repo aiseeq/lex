@@ -212,10 +212,10 @@ func otherOutputsForPart(part, selected string, catalog *manifestCatalog) ([]str
 }
 
 func firstSharedOtherOutputs(parts []string, owners []int, selected string, catalog *manifestCatalog) ([]string, error) {
-	return firstSharedOutputs(parts, owners, selected, catalog, true)
+	return firstSharedOutputs(parts, owners, selected, catalog)
 }
 
-func firstSharedOutputs(parts []string, owners []int, selected string, catalog *manifestCatalog, sortOutputs bool) ([]string, error) {
+func firstSharedOutputs(parts []string, owners []int, selected string, catalog *manifestCatalog) ([]string, error) {
 	checked := make(map[string]bool)
 	for _, owner := range owners {
 		if owner < 0 || owner >= len(parts) {
@@ -236,14 +236,15 @@ func firstSharedOutputs(parts []string, owners []int, selected string, catalog *
 				others = append(others, output)
 			}
 		}
-		if len(others) > 0 && (selected != "" || len(others) > 1) {
-			if selected == "" {
+		if selected == "" {
+			if len(outputs) > 1 {
 				return outputs, nil
 			}
-			if sortOutputs {
-				sort.Strings(others)
-			}
-			return others, nil
+			continue
+		}
+		if len(others) > 0 {
+			sort.Strings(others)
+			return slices.Compact(others), nil
 		}
 	}
 	return nil, nil
@@ -3253,7 +3254,7 @@ func validateSharedEdits(parts []string, owners []int, shared bool, catalog *man
 
 // firstSharedEdit returns the manifests using the first edited part that more than one manifest builds, or nil.
 func firstSharedEdit(parts []string, owners []int, catalog *manifestCatalog) ([]string, error) {
-	return firstSharedOutputs(parts, owners, "", catalog, false)
+	return firstSharedOutputs(parts, owners, "", catalog)
 }
 
 func prepareFragmentEdits(codex string, parts []string, bounds [][2]int, owners, deltas []int, newLines [][]byte, additions map[int][]lineHunk, printedPurpose bool) ([]preparedFragmentEdit, error) {

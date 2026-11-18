@@ -94,6 +94,124 @@ func TestFirstSharedEditPreservesManifestOrder(t *testing.T) {
 	}
 }
 
+func TestSharedForceHintSortsOutputs(t *testing.T) {
+	root := t.TempDir()
+	codex := filepath.Join(root, "codex")
+	outputs := make(map[string]string)
+	if err := os.MkdirAll(filepath.Join(root, "docs"), directoryMode); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"c", "a+b", "a-b"} {
+		path := filepath.Join(root, "docs", name+".md")
+		outputs[name] = path
+		mustWrite(t, path, []byte("# "+name+"\n\nshared para\n"))
+		if err := ImportWithOptions(codex, path, ImportOptions{Home: root}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	manifestPath := func(name string) string {
+		return filepath.Join(codex, "manifest", codexKey("docs/"+name+".md")+".yaml")
+	}
+	selected, err := readManifest(manifestPath("c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedID := ""
+	for _, id := range selected.parts {
+		raw, err := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(id)+".md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := fragmentBody(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(body, []byte("shared para")) {
+			sharedID = id
+			break
+		}
+	}
+	if sharedID == "" {
+		t.Fatal("selected output has no shared paragraph fragment")
+	}
+	for _, name := range []string{"a+b", "a-b"} {
+		path := manifestPath(name)
+		m, err := readManifest(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, id := range m.parts {
+			raw, err := os.ReadFile(filepath.Join(codex, "frag", filepath.FromSlash(id)+".md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := fragmentBody(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(body, []byte("shared para")) {
+				continue
+			}
+			delete(m.fragmentHashes, id)
+			m.parts[i] = sharedID
+			m.fragmentHashes[sharedID] = selected.fragmentHashes[sharedID]
+			if id != sharedID {
+				if err := os.Remove(filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := writeManifest(path, m, m.links); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := listManifestCatalog(codex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err = readManifest(manifestPath("c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	layout, err := readPlainPartLayout(codex, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := bytes.Replace(layout.rendered, []byte("shared para"), []byte("shared para EDIT"), 1)
+	flag, hint, err := codexSharedForceHintDetailed(codex, selected, layout.rendered, actual, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flag != " --shared" {
+		t.Fatalf("shared flag = %q, want --shared", flag)
+	}
+	want := "; --shared lets this file replace the fragments shared with " + outputs["a+b"] + ", " + outputs["a-b"] + ":"
+	if !strings.Contains(hint, want) {
+		t.Fatalf("shared hint = %q, want sorted path order %q", hint, want)
+	}
+}
+
+func TestFirstSharedOtherOutputsDeduplicatesSameOutput(t *testing.T) {
+	paths := []string{"manifest-selected", "manifest-one", "manifest-two"}
+	catalog := newManifestCatalog(paths)
+	for i, output := range []string{"selected.md", "shared.md", "shared.md"} {
+		catalog.items[paths[i]] = manifest{out: output, parts: []string{"shared"}}
+	}
+
+	others, err := firstSharedOtherOutputs([]string{"shared"}, []int{0}, "selected.md", catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(others) != 1 || others[0] != "shared.md" {
+		t.Fatalf("other outputs = %#v, want one shared.md", others)
+	}
+}
+
 func TestStatusAdviceSharedEdit(t *testing.T) {
 	root, codex, a, b := sharedEditFixture(t)
 	data, _ := os.ReadFile(a)
