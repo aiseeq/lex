@@ -5045,7 +5045,7 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 	}
 	if refusal := textAboveHeaderRefusal(manifestPath, m, actual); refusal != "" {
 		// lex absorb refuses such a file the same way; no command settles it before the text moves.
-		entry.Refusal = pathDetail(m.out, refusal)
+		entry.Refusal = refusal
 		return nil
 	}
 	entry.Command = "lex import --refresh --codex " + target
