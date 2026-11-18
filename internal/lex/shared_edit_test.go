@@ -78,6 +78,22 @@ func TestCheckAdviceSharedEdit(t *testing.T) {
 	}
 }
 
+func TestFirstSharedEditPreservesManifestOrder(t *testing.T) {
+	paths := []string{"manifest-0", "manifest-1", "manifest-2"}
+	catalog := newManifestCatalog(paths)
+	for i, output := range []string{"a-b.md", "a+b.md", "c.md"} {
+		catalog.items[paths[i]] = manifest{out: output, parts: []string{"shared"}}
+	}
+
+	affected, err := firstSharedEdit([]string{"shared"}, []int{0}, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(affected, ", "), "a-b.md, a+b.md, c.md"; got != want {
+		t.Fatalf("shared edit order = %q, want %q", got, want)
+	}
+}
+
 func TestStatusAdviceSharedEdit(t *testing.T) {
 	root, codex, a, b := sharedEditFixture(t)
 	data, _ := os.ReadFile(a)

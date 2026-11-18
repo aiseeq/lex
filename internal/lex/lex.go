@@ -212,6 +212,10 @@ func otherOutputsForPart(part, selected string, catalog *manifestCatalog) ([]str
 }
 
 func firstSharedOtherOutputs(parts []string, owners []int, selected string, catalog *manifestCatalog) ([]string, error) {
+	return firstSharedOutputs(parts, owners, selected, catalog, true)
+}
+
+func firstSharedOutputs(parts []string, owners []int, selected string, catalog *manifestCatalog, sortOutputs bool) ([]string, error) {
 	checked := make(map[string]bool)
 	for _, owner := range owners {
 		if owner < 0 || owner >= len(parts) {
@@ -222,11 +226,23 @@ func firstSharedOtherOutputs(parts []string, owners []int, selected string, cata
 			continue
 		}
 		checked[part] = true
-		others, err := otherOutputsForPart(part, selected, catalog)
+		outputs, err := catalog.manifestsUsing(part)
 		if err != nil {
 			return nil, err
 		}
+		others := make([]string, 0, len(outputs))
+		for _, output := range outputs {
+			if output != selected {
+				others = append(others, output)
+			}
+		}
 		if len(others) > 0 && (selected != "" || len(others) > 1) {
+			if selected == "" {
+				return outputs, nil
+			}
+			if sortOutputs {
+				sort.Strings(others)
+			}
 			return others, nil
 		}
 	}
@@ -2293,12 +2309,10 @@ func planAbsorbEdits(codex, selected string, m manifest, bounds [][2]int, oldLin
 
 func sharedDropAdvice(selected string, parts []string, bounds [][2]int, oldLines, newLines [][]byte, catalog *manifestCatalog) (string, bool, error) {
 	var ids, outputs []string
-	seenParts := make(map[string]bool)
 	for i, id := range parts {
-		if i >= len(bounds) || seenParts[id] || fragmentLinesPresent(oldLines[bounds[i][0]:bounds[i][1]], newLines) {
+		if i >= len(bounds) || fragmentLinesPresent(oldLines[bounds[i][0]:bounds[i][1]], newLines) {
 			continue
 		}
-		seenParts[id] = true
 		others, err := otherOutputsForPart(id, selected, catalog)
 		if err != nil {
 			return "", false, err
@@ -3239,11 +3253,7 @@ func validateSharedEdits(parts []string, owners []int, shared bool, catalog *man
 
 // firstSharedEdit returns the manifests using the first edited part that more than one manifest builds, or nil.
 func firstSharedEdit(parts []string, owners []int, catalog *manifestCatalog) ([]string, error) {
-	affected, err := firstSharedOtherOutputs(parts, owners, "", catalog)
-	if err != nil || len(affected) <= 1 {
-		return nil, err
-	}
-	return affected, nil
+	return firstSharedOutputs(parts, owners, "", catalog, false)
 }
 
 func prepareFragmentEdits(codex string, parts []string, bounds [][2]int, owners, deltas []int, newLines [][]byte, additions map[int][]lineHunk, printedPurpose bool) ([]preparedFragmentEdit, error) {

@@ -116,7 +116,14 @@ func assertTwoPassAdvice(t *testing.T, err error, ids []string) {
 			t.Errorf("refusal %q does not name shared fragment %q", message, id)
 		}
 	}
-	for _, want := range []string{"first delete only", "still used by", "b.md", "c.md"} {
+	for _, want := range []string{
+		"first delete only",
+		"still used by",
+		"b.md",
+		"c.md",
+		"run `lex absorb`",
+		"then make the other edit and run `lex absorb` again",
+	} {
 		if !strings.Contains(message, want) {
 			t.Errorf("refusal %q does not contain %q", message, want)
 		}
@@ -148,11 +155,14 @@ func TestSharedDropAdvisesTwoPasses(t *testing.T) {
 				refusal = Absorb(codex, outputs["a.md"], AbsorbOptions{DraftDir: codex})
 			}
 			assertTwoPassAdvice(t, refusal, ids)
-			if tc.refresh && (!strings.Contains(refusal.Error(), "CLI form: `lex absorb --codex ") || !strings.Contains(refusal.Error(), "for the first pass") || !strings.Contains(refusal.Error(), "again")) {
+			if tc.refresh && (!strings.Contains(refusal.Error(), "and run `lex absorb` (CLI form: `lex absorb --codex ") || !strings.Contains(refusal.Error(), "for the first pass") || !strings.Contains(refusal.Error(), "then make the other edit and run `lex absorb` again")) {
 				t.Fatalf("refresh refusal lacks executable two-pass guidance: %v", refusal)
 			}
 			if !tc.refresh && (!strings.Contains(refusal.Error(), "run `lex absorb`") || !strings.Contains(refusal.Error(), "then make the other edit and run `lex absorb` again")) {
 				t.Fatalf("absorb refusal lost its two-pass guidance: %v", refusal)
+			}
+			if !tc.refresh && strings.Contains(refusal.Error(), "CLI form:") {
+				t.Fatalf("absorb advice unexpectedly has a CLI form annotation: %v", refusal)
 			}
 			if tc.refresh && !strings.Contains(refusal.Error(), "refresh would remove a fragment still used by") {
 				t.Fatalf("refresh refusal = %v; want refresh's shared-removal advice", refusal)
