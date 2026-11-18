@@ -505,19 +505,32 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 	return finishImport(codex, manifestPath, m, allLinks, topic, units, preservedHeaders)
 }
 
-func primaryImportOccupiedFragmentIDs(codex string) (map[string]bool, error) {
+func primaryImportOccupiedFragmentIDs(codex, topic string) (map[string]bool, error) {
 	catalog, err := listManifestCatalog(codex)
 	if err != nil {
 		return nil, err
 	}
-	return occupiedFragmentIDs(codex, catalog)
+	occupied := make(map[string]bool)
+	for _, path := range catalog.paths {
+		if manifestKey(path) == topic {
+			continue
+		}
+		m, err := catalog.read(path)
+		if err != nil {
+			return nil, err
+		}
+		for _, part := range m.parts {
+			occupied[part] = true
+		}
+	}
+	return occupied, nil
 }
 
 func writeFragmentsForImport(codex, topic string, units [][]byte, preservedHeaders []preservedFragmentHeader, primaryImport bool) ([]string, map[string]string, error) {
 	var occupied map[string]bool
 	if primaryImport {
 		var err error
-		occupied, err = primaryImportOccupiedFragmentIDs(codex)
+		occupied, err = primaryImportOccupiedFragmentIDs(codex, topic)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -603,9 +616,10 @@ func writeImportedFragments(codex, topic string, units [][]byte, preservedHeader
 	parts := make([]string, 0, len(units))
 	hashes := make(map[string]string, len(units))
 	ids, matched, usedHeaders := matchImportedHeadersWithOccupied(topic, units, preservedHeaders, occupied)
+	reused := make(map[string]bool)
 	if occupied != nil {
 		var err error
-		ids, err = reuseMatchingOccupiedFragments(codex, topic, units, ids, occupied)
+		ids, reused, err = reuseMatchingOccupiedFragments(codex, topic, units, ids, occupied)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -626,7 +640,7 @@ func writeImportedFragments(codex, topic string, units [][]byte, preservedHeader
 		}
 		body := append(header, u...)
 		existing, readErr := os.ReadFile(path)
-		if readErr == nil && occupied != nil && occupied[id] && !fragmentIsRecord(existing) && bytes.Equal(existing, body) {
+		if readErr == nil && reused[id] {
 			hashes[id] = sha(existing)
 			continue
 		}
@@ -648,7 +662,7 @@ func writeImportedFragments(codex, topic string, units [][]byte, preservedHeader
 	return parts, hashes, nil
 }
 
-func reuseMatchingOccupiedFragments(codex, topic string, units [][]byte, ids []string, occupied map[string]bool) ([]string, error) {
+func reuseMatchingOccupiedFragments(codex, topic string, units [][]byte, ids []string, occupied map[string]bool) ([]string, map[string]bool, error) {
 	var candidates []string
 	for id := range occupied {
 		if strings.HasPrefix(id, topic+"/") {
@@ -657,6 +671,7 @@ func reuseMatchingOccupiedFragments(codex, topic string, units [][]byte, ids []s
 	}
 	sort.Strings(candidates)
 	used := make(map[string]bool)
+	reused := make(map[string]bool)
 	for i, unit := range units {
 		label := slug(unit)
 		if label == "" {
@@ -673,23 +688,24 @@ func reuseMatchingOccupiedFragments(codex, topic string, units [][]byte, ids []s
 				if errors.Is(err, os.ErrNotExist) {
 					continue
 				}
-				return nil, fmt.Errorf("%s: read occupied fragment: %w", path, err)
+				return nil, nil, fmt.Errorf("%s: read occupied fragment: %w", path, err)
 			}
 			if fragmentIsRecord(raw) {
 				continue
 			}
 			body, err := fragmentBody(raw)
 			if err != nil {
-				return nil, fmt.Errorf("%s: %w", path, err)
+				return nil, nil, fmt.Errorf("%s: %w", path, err)
 			}
 			if bytes.Equal(body, unit) {
 				ids[i] = id
 				used[id] = true
+				reused[id] = true
 				break
 			}
 		}
 	}
-	return ids, nil
+	return ids, reused, nil
 }
 
 func matchImportedHeaders(topic string, units [][]byte, preservedHeaders []preservedFragmentHeader) ([]string, []int, []bool) {
@@ -2894,7 +2910,7 @@ func occupiedFragmentIDs(codex string, catalog *manifestCatalog) (map[string]boo
 		return nil
 	})
 	if err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("%s: list fragments for absorb: %w", fragRoot, err)
+		return nil, fmt.Errorf("%s: list fragments: %w", fragRoot, err)
 	}
 	return occupied, nil
 }
