@@ -326,6 +326,13 @@ func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byt
 				return assessment, removalErr
 			}
 			if len(removed) > 0 {
+				fragmentsChanged, changedErr := manifestFragmentsChanged(codex, m)
+				if changedErr != nil {
+					return assessment, changedErr
+				}
+				if fragmentsChanged {
+					return assessment, forceRefusal(codex, m.out, manifestPath, layout.rendered, sourceData, m, catalog)
+				}
 				return assessment, refreshSharedRemovalRefusal(m.out, codex, removed, true)
 			}
 		}
@@ -344,6 +351,20 @@ func assessRefresh(codex, topic, manifestPath string, m manifest, diskData []byt
 		return assessment, validationErr
 	}
 	return assessment, nil
+}
+
+func manifestFragmentsChanged(codex string, m manifest) (bool, error) {
+	for _, id := range m.parts {
+		path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return false, fmt.Errorf("%s: read fragment: %w", path, err)
+		}
+		if expected, ok := m.fragmentHashes[id]; !ok || sha(data) != expected {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func refreshSharedRemovalRefusal(output, codex string, removed []removedSharedFragment, adviseTwoPasses bool) error {
