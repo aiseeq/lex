@@ -355,11 +355,7 @@ func refreshSharedRemovalConflict(codex, manifestPath string, m manifest, actual
 		want = generatedHeader(manifestPath, want)
 	}
 	if fragmentsChangedSinceBuild(codex, manifestPath, m, want) {
-		refusal := forceRefusal(codex, m.out, manifestPath, want, actual, m, catalog)
-		if refusal == nil {
-			return nil
-		}
-		return fmt.Errorf("%w; the earlier two-pass suggestion (`lex absorb`, CLI form: `lex absorb --codex %s %s`) is superseded because both the file and fragments changed", refusal, ShellQuoteArg(codex), ShellQuoteArg(m.out))
+		return forceRefusal(codex, m.out, manifestPath, want, actual, m, catalog)
 	}
 	return refreshSharedRemovalRefusal(m.out, codex, removed, true)
 }
