@@ -489,7 +489,7 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 	if units == nil {
 		units = split(data)
 	}
-	parts, hashes, err := writeFragmentsForImport(codex, topic, units, preservedHeaders, primaryImport)
+	parts, hashes, orphanCandidates, err := writeFragmentsForImport(codex, topic, units, preservedHeaders, primaryImport)
 	if err != nil {
 		return err
 	}
@@ -502,7 +502,7 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 	m := manifest{out: abs, hash: sha(sourceData), builtHash: diskHash, parts: parts, fragmentHashes: hashes, header: old.header}
 	allLinks := uniqueLinks(append(old.links, links...))
 	m.links = allLinks
-	return finishImportWithOrphanCleanup(codex, manifestPath, m, allLinks, topic, units, preservedHeaders, primaryImport)
+	return finishImportWithOrphanCleanup(codex, manifestPath, m, allLinks, topic, units, preservedHeaders, primaryImport, orphanCandidates)
 }
 
 func primaryImportOccupiedFragmentIDs(codex string) (map[string]bool, error) {
@@ -523,16 +523,20 @@ func primaryImportOccupiedFragmentIDs(codex string) (map[string]bool, error) {
 	return occupied, nil
 }
 
-func writeFragmentsForImport(codex, topic string, units [][]byte, preservedHeaders []preservedFragmentHeader, primaryImport bool) ([]string, map[string]string, error) {
+func writeFragmentsForImport(codex, topic string, units [][]byte, preservedHeaders []preservedFragmentHeader, primaryImport bool) ([]string, map[string]string, []string, error) {
+	orphanCandidates, err := primaryImportOrphanCandidates(codex, topic, primaryImport)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	var occupied map[string]bool
 	if primaryImport {
-		var err error
 		occupied, err = primaryImportOccupiedFragmentIDs(codex)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
-	return writeImportedFragments(codex, topic, units, preservedHeaders, occupied)
+	parts, hashes, err := writeImportedFragments(codex, topic, units, preservedHeaders, occupied)
+	return parts, hashes, orphanCandidates, err
 }
 
 func removeRefreshPrivateFragments(codex string, m manifest, catalog *manifestCatalog) error {
@@ -595,6 +599,13 @@ func topicFragmentIDs(codex, topic string) ([]string, error) {
 	return ids, nil
 }
 
+func primaryImportOrphanCandidates(codex, topic string, primaryImport bool) ([]string, error) {
+	if !primaryImport {
+		return nil, nil
+	}
+	return topicFragmentIDs(codex, topic)
+}
+
 // protectRefreshShared keeps separators attached to their existing shared body
 // out of the newly split unit, and verifies the actual bytes to be written.
 func protectRefreshShared(codex, topic string, m manifest, units [][]byte, headers []preservedFragmentHeader, catalog *manifestCatalog) ([][]byte, error) {
@@ -655,7 +666,7 @@ func finishImport(codex, manifestPath string, m manifest, links []outputLink, to
 	return nil
 }
 
-func finishImportWithOrphanCleanup(codex, manifestPath string, m manifest, links []outputLink, topic string, units [][]byte, preservedHeaders []preservedFragmentHeader, primaryImport bool) error {
+func finishImportWithOrphanCleanup(codex, manifestPath string, m manifest, links []outputLink, topic string, units [][]byte, preservedHeaders []preservedFragmentHeader, primaryImport bool, candidates []string) error {
 	if err := finishImport(codex, manifestPath, m, links, topic, units, preservedHeaders); err != nil {
 		return err
 	}
@@ -663,10 +674,6 @@ func finishImportWithOrphanCleanup(codex, manifestPath string, m manifest, links
 		return nil
 	}
 	catalog, err := listManifestCatalog(codex)
-	if err != nil {
-		return err
-	}
-	candidates, err := topicFragmentIDs(codex, topic)
 	if err != nil {
 		return err
 	}
