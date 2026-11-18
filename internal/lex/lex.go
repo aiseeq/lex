@@ -502,19 +502,16 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 	m := manifest{out: abs, hash: sha(sourceData), builtHash: diskHash, parts: parts, fragmentHashes: hashes, header: old.header}
 	allLinks := uniqueLinks(append(old.links, links...))
 	m.links = allLinks
-	return finishImport(codex, manifestPath, m, allLinks, topic, units, preservedHeaders)
+	return finishImportWithOrphanCleanup(codex, manifestPath, m, allLinks, topic, units, preservedHeaders, primaryImport)
 }
 
-func primaryImportOccupiedFragmentIDs(codex, topic string) (map[string]bool, error) {
+func primaryImportOccupiedFragmentIDs(codex string) (map[string]bool, error) {
 	catalog, err := listManifestCatalog(codex)
 	if err != nil {
 		return nil, err
 	}
 	occupied := make(map[string]bool)
 	for _, path := range catalog.paths {
-		if manifestKey(path) == topic {
-			continue
-		}
 		m, err := catalog.read(path)
 		if err != nil {
 			return nil, err
@@ -530,7 +527,7 @@ func writeFragmentsForImport(codex, topic string, units [][]byte, preservedHeade
 	var occupied map[string]bool
 	if primaryImport {
 		var err error
-		occupied, err = primaryImportOccupiedFragmentIDs(codex, topic)
+		occupied, err = primaryImportOccupiedFragmentIDs(codex)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -539,9 +536,20 @@ func writeFragmentsForImport(codex, topic string, units [][]byte, preservedHeade
 }
 
 func removeRefreshPrivateFragments(codex string, m manifest, catalog *manifestCatalog) error {
+	return removePrivateFragments(codex, m.parts, nil, m.out, catalog)
+}
+
+func removePrivateFragments(codex string, candidates, keep []string, selected string, catalog *manifestCatalog) error {
+	kept := make(map[string]bool, len(keep))
+	for _, id := range keep {
+		kept[id] = true
+	}
 	var privateParts []string
-	for _, id := range m.parts {
-		others, err := otherOutputsForPart(id, m.out, catalog)
+	for _, id := range candidates {
+		if kept[id] {
+			continue
+		}
+		others, err := otherOutputsForPart(id, selected, catalog)
 		if err != nil {
 			return err
 		}
@@ -550,6 +558,34 @@ func removeRefreshPrivateFragments(codex string, m manifest, catalog *manifestCa
 		}
 	}
 	return removeOldFragments(codex, privateParts, os.Remove)
+}
+
+func topicFragmentIDs(codex, topic string) ([]string, error) {
+	root := filepath.Join(codex, "frag", filepath.FromSlash(topic))
+	fragmentRoot := filepath.Join(codex, "frag")
+	var ids []string
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if errors.Is(err, os.ErrNotExist) && path == root {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("%s: list topic fragments: %w", path, err)
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			return nil
+		}
+		rel, err := filepath.Rel(fragmentRoot, path)
+		if err != nil {
+			return err
+		}
+		ids = append(ids, strings.TrimSuffix(filepath.ToSlash(rel), ".md"))
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
 // protectRefreshShared keeps separators attached to their existing shared body
@@ -610,6 +646,24 @@ func finishImport(codex, manifestPath string, m manifest, links []outputLink, to
 		return rewriteOverridesAfterRefresh(codex, topic, units, preservedHeaders)
 	}
 	return nil
+}
+
+func finishImportWithOrphanCleanup(codex, manifestPath string, m manifest, links []outputLink, topic string, units [][]byte, preservedHeaders []preservedFragmentHeader, primaryImport bool) error {
+	if err := finishImport(codex, manifestPath, m, links, topic, units, preservedHeaders); err != nil {
+		return err
+	}
+	if !primaryImport {
+		return nil
+	}
+	catalog, err := listManifestCatalog(codex)
+	if err != nil {
+		return err
+	}
+	candidates, err := topicFragmentIDs(codex, topic)
+	if err != nil {
+		return err
+	}
+	return removePrivateFragments(codex, candidates, m.parts, m.out, catalog)
 }
 
 func writeImportedFragments(codex, topic string, units [][]byte, preservedHeaders []preservedFragmentHeader, occupied map[string]bool) ([]string, map[string]string, error) {
