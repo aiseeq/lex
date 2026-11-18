@@ -5788,27 +5788,28 @@ func RuleWarningSummary(warnings []string) string {
 	return fmt.Sprintf("правил без основания: %d, без условия снятия: %d; фрагментов с цитатой пользователя в тексте: %d; правил без цели: %d; пунктов без полей: %d; цель пересказывает пункт: %d", basis, removal, quote, goal, len(items), restates)
 }
 
-// goalRestatesBody reports a restatement when at least two meaningful word stems
-// overlap and overlap covers at least 60% of the union of the goal and body stems.
+// goalRestatesBody reports a restatement when at least two meaningful goal stems
+// occur in one body sentence and cover at least half of the goal stems.
 func goalRestatesBody(goal string, body []byte) bool {
 	goalStems := meaningfulStems(goal)
 	if len(goalStems) < 2 {
 		return false
 	}
-	bodyStems := meaningfulStems(string(body))
-	common := 0
-	for stem := range goalStems {
-		if bodyStems[stem] {
-			common++
+	for _, sentence := range strings.FieldsFunc(string(body), func(r rune) bool {
+		return r == '.' || r == ';' || r == '!' || r == '?' || r == '\n' || r == '\r'
+	}) {
+		bodyStems := meaningfulStems(sentence)
+		common := 0
+		for stem := range goalStems {
+			if bodyStems[stem] {
+				common++
+			}
+		}
+		if common >= 2 && float64(common)/float64(len(goalStems)) >= 0.5 {
+			return true
 		}
 	}
-	union := len(goalStems)
-	for stem := range bodyStems {
-		if !goalStems[stem] {
-			union++
-		}
-	}
-	return common >= 2 && union > 0 && float64(common)/float64(union) >= 0.6
+	return false
 }
 
 func meaningfulStems(text string) map[string]bool {
@@ -5831,7 +5832,7 @@ var ruleStemStopWords = map[string]bool{
 func ruleWordStem(word string) string {
 	// Strip common Russian inflections so forms such as «пишется» and «пиши»
 	// share «пиш», and «самим пользователем» matches «сам пользователь».
-	suffixes := []string{"ившись", "ывшись", "ующими", "енными", "аться", "яться", "ется", "ится", "ались", "ились", "ывать", "ивать", "овать", "евать", "енный", "анная", "енное", "ого", "ему", "ыми", "ими", "ами", "ями", "ать", "ять", "ить", "еть", "ешь", "ишь", "ете", "ите", "ала", "яли", "или", "али", "ами", "ями", "ом", "ем", "ым", "им", "ой", "ый", "ий", "ое", "ая", "яя", "ые", "ие", "а", "я", "ы", "и", "ь", "ю", "у", "е", "о"}
+	suffixes := []string{"ившись", "ывшись", "ующими", "енными", "аться", "яться", "ётся", "ется", "ится", "ались", "ились", "ывать", "ивать", "овать", "евать", "енный", "анная", "енное", "ого", "ему", "ыми", "ими", "ами", "ями", "ать", "ять", "ить", "еть", "ешь", "ишь", "ете", "ите", "ала", "яли", "или", "али", "ом", "ем", "ым", "им", "ой", "ый", "ий", "ое", "ая", "яя", "ые", "ие", "а", "я", "ы", "и", "ь", "ю", "у", "е", "о"}
 	for _, suffix := range suffixes {
 		if strings.HasSuffix(word, suffix) && len([]rune(word))-len([]rune(suffix)) >= 3 {
 			word = strings.TrimSuffix(word, suffix)
@@ -5839,8 +5840,8 @@ func ruleWordStem(word string) string {
 		}
 	}
 	runes := []rune(word)
-	if len(runes) > 4 {
-		return string(runes[:4])
+	if len(runes) > 5 {
+		return string(runes[:5])
 	}
 	return word
 }
