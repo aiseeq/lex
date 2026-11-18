@@ -4210,13 +4210,13 @@ func builtDiffers(codex string, m manifest, manifestPath string, want, actual []
 	if fragmentsChanged && fileChanged {
 		sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual, catalog)
 		if err != nil {
-			return fmt.Sprintf("%s: %v", out, err), false
+			return fmt.Sprintf("%s: %s", out, pathDetail(out, err.Error())), false
 		}
 		return fmt.Sprintf("%s: built output differs from its fragments — run `lex absorb --force%s --codex %s %s` to keep the file, or `lex build --force --codex %s %s` to keep the fragments%s", out, sharedFlag, codexArg, fileArg, codexArg, fileArg, sharedHint), true
 	}
 	sharedFlag, sharedHint, err := codexSharedForceHint(codex, m, want, actual, catalog)
 	if err != nil {
-		return fmt.Sprintf("%s: %v", out, err), false
+		return fmt.Sprintf("%s: %s", out, pathDetail(out, err.Error())), false
 	}
 	return fmt.Sprintf("%s: built output differs from its fragments — edit the fragment and run `lex build --codex %s`, or keep this edit with `lex absorb%s --codex %s %s`%s", out, codexArg, sharedFlag, codexArg, fileArg, sharedHint), true
 }
@@ -4928,6 +4928,12 @@ func statusFileProblem(err error) string {
 	return err.Error()
 }
 
+// pathDetail removes a leading path when the surrounding diagnostic already names it.
+func pathDetail(path, message string) string {
+	prefix := path + ": "
+	return strings.TrimPrefix(message, prefix)
+}
+
 func Status(codex string) ([]StatusEntry, error) { return StatusWithHome(codex, "") }
 
 // statusMissingFragments gives the restore advice for every fragment of m missing on disk; other stat errors are left to the build comparison.
@@ -5039,7 +5045,7 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 	}
 	if refusal := textAboveHeaderRefusal(manifestPath, m, actual); refusal != "" {
 		// lex absorb refuses such a file the same way; no command settles it before the text moves.
-		entry.Refusal = refusal
+		entry.Refusal = pathDetail(m.out, refusal)
 		return nil
 	}
 	entry.Command = "lex import --refresh --codex " + target
@@ -5049,7 +5055,7 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 		if err != nil {
 			if isPurposeAdviceRefusal(err) {
 				entry.Command = ""
-				entry.Refusal = err.Error()
+				entry.Refusal = pathDetail(m.out, err.Error())
 				return nil
 			}
 			return err
@@ -5070,7 +5076,7 @@ func recommendStatusCommands(entry *StatusEntry, codex, home, manifestPath strin
 	if err != nil {
 		if isPurposeAdviceRefusal(err) {
 			entry.Command = ""
-			entry.Refusal = err.Error()
+			entry.Refusal = pathDetail(m.out, err.Error())
 			return nil
 		}
 		return err
