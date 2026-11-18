@@ -428,6 +428,7 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 	var sourceData []byte
 	var assessment refreshAssessment
 	var catalog *manifestCatalog
+	primaryImport := false
 	old, err := readManifest(manifestPath)
 	if err == nil {
 		if old.out != abs {
@@ -482,11 +483,13 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("%s: %w", manifestPath, err)
+	} else {
+		primaryImport = true
 	}
 	if units == nil {
 		units = split(data)
 	}
-	parts, hashes, err := writeImportedFragments(codex, topic, units, preservedHeaders)
+	parts, hashes, err := writeFragmentsForImport(codex, topic, units, preservedHeaders, primaryImport)
 	if err != nil {
 		return err
 	}
@@ -500,6 +503,26 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 	allLinks := uniqueLinks(append(old.links, links...))
 	m.links = allLinks
 	return finishImport(codex, manifestPath, m, allLinks, topic, units, preservedHeaders)
+}
+
+func primaryImportOccupiedFragmentIDs(codex string) (map[string]bool, error) {
+	catalog, err := listManifestCatalog(codex)
+	if err != nil {
+		return nil, err
+	}
+	return occupiedFragmentIDs(codex, catalog)
+}
+
+func writeFragmentsForImport(codex, topic string, units [][]byte, preservedHeaders []preservedFragmentHeader, primaryImport bool) ([]string, map[string]string, error) {
+	var occupied map[string]bool
+	if primaryImport {
+		var err error
+		occupied, err = primaryImportOccupiedFragmentIDs(codex)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return writeImportedFragments(codex, topic, units, preservedHeaders, occupied)
 }
 
 func removeRefreshPrivateFragments(codex string, m manifest, catalog *manifestCatalog) error {
@@ -576,10 +599,17 @@ func finishImport(codex, manifestPath string, m manifest, links []outputLink, to
 	return nil
 }
 
-func writeImportedFragments(codex, topic string, units [][]byte, preservedHeaders []preservedFragmentHeader) ([]string, map[string]string, error) {
+func writeImportedFragments(codex, topic string, units [][]byte, preservedHeaders []preservedFragmentHeader, occupied map[string]bool) ([]string, map[string]string, error) {
 	parts := make([]string, 0, len(units))
 	hashes := make(map[string]string, len(units))
-	ids, matched, usedHeaders := matchImportedHeaders(topic, units, preservedHeaders)
+	ids, matched, usedHeaders := matchImportedHeadersWithOccupied(topic, units, preservedHeaders, occupied)
+	if occupied != nil {
+		var err error
+		ids, err = reuseMatchingOccupiedFragments(codex, topic, units, ids, occupied)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	for i, u := range units {
 		id := ids[i]
 		parts = append(parts, id)
@@ -596,6 +626,10 @@ func writeImportedFragments(codex, topic string, units [][]byte, preservedHeader
 		}
 		body := append(header, u...)
 		existing, readErr := os.ReadFile(path)
+		if readErr == nil && occupied != nil && occupied[id] && !fragmentIsRecord(existing) && bytes.Equal(existing, body) {
+			hashes[id] = sha(existing)
+			continue
+		}
 		if readErr != nil || !bytes.Equal(existing, body) {
 			if err := os.WriteFile(path, body, fileMode); err != nil {
 				return nil, nil, fmt.Errorf("%s: %w", path, err)
@@ -614,7 +648,55 @@ func writeImportedFragments(codex, topic string, units [][]byte, preservedHeader
 	return parts, hashes, nil
 }
 
+func reuseMatchingOccupiedFragments(codex, topic string, units [][]byte, ids []string, occupied map[string]bool) ([]string, error) {
+	var candidates []string
+	for id := range occupied {
+		if strings.HasPrefix(id, topic+"/") {
+			candidates = append(candidates, id)
+		}
+	}
+	sort.Strings(candidates)
+	used := make(map[string]bool)
+	for i, unit := range units {
+		label := slug(unit)
+		if label == "" {
+			label = "fragment"
+		}
+		prefix := topic + "/" + label + "-"
+		for _, id := range candidates {
+			if used[id] || !strings.HasPrefix(id, prefix) {
+				continue
+			}
+			path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return nil, fmt.Errorf("%s: read occupied fragment: %w", path, err)
+			}
+			if fragmentIsRecord(raw) {
+				continue
+			}
+			body, err := fragmentBody(raw)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", path, err)
+			}
+			if bytes.Equal(body, unit) {
+				ids[i] = id
+				used[id] = true
+				break
+			}
+		}
+	}
+	return ids, nil
+}
+
 func matchImportedHeaders(topic string, units [][]byte, preservedHeaders []preservedFragmentHeader) ([]string, []int, []bool) {
+	return matchImportedHeadersWithOccupied(topic, units, preservedHeaders, nil)
+}
+
+func matchImportedHeadersWithOccupied(topic string, units [][]byte, preservedHeaders []preservedFragmentHeader, occupied map[string]bool) ([]string, []int, []bool) {
 	counts := map[string]int{}
 	usedHeaders := make([]bool, len(preservedHeaders))
 	ids := make([]string, len(units))
@@ -631,9 +713,13 @@ func matchImportedHeaders(topic string, units [][]byte, preservedHeaders []prese
 		if label == "" {
 			label = "fragment"
 		}
-		counts[label]++
+		if occupied != nil {
+			ids[i] = nextFragmentID(topic, label, counts, occupied)
+		} else {
+			counts[label]++
+			ids[i] = fmt.Sprintf("%s/%s-%d", topic, label, counts[label])
+		}
 		labels[i] = label
-		ids[i] = fmt.Sprintf("%s/%s-%d", topic, label, counts[label])
 	}
 	matched := make([]int, len(units))
 	for i, unit := range units {
@@ -2814,8 +2900,12 @@ func occupiedFragmentIDs(codex string, catalog *manifestCatalog) (map[string]boo
 }
 
 func nextInsertedFragmentID(selected, label string, counts map[string]int, occupied map[string]bool) string {
+	return nextFragmentID(manifestKey(selected), label, counts, occupied)
+}
+
+func nextFragmentID(topic, label string, counts map[string]int, occupied map[string]bool) string {
 	for counts[label]++; ; counts[label]++ {
-		id := fmt.Sprintf("%s/%s-%d", manifestKey(selected), label, counts[label])
+		id := fmt.Sprintf("%s/%s-%d", topic, label, counts[label])
 		if !occupied[id] {
 			occupied[id] = true
 			return id
