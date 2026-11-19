@@ -726,7 +726,7 @@ func TestCheckPrintsRuleSummaryOnceAfterWarnings(t *testing.T) {
 	if filled != len(fields) {
 		t.Fatalf("filled %d fragments of %d, want %d", filled, len(frags), len(fields))
 	}
-	summary := "правил без основания: 1, без условия снятия: 2; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 3; пунктов без полей: 0; цель пересказывает пункт: 0"
+	summary := "правил без основания: 1, без условия снятия: 2; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 3; пунктов без полей: 0; цель пересказывает пункт: 0; ссылок по положению: 0"
 	assertStreams := func(t *testing.T, stdout, stderr string) {
 		t.Helper()
 		if stdout != "" {
@@ -1108,5 +1108,14 @@ func TestReadCommandsRejectInvalidCodex(t *testing.T) {
 func TestGuideSaysRefsOnlyPrintsNoRuleSummary(t *testing.T) {
 	if want := "с --refs-only правила не проверяются и этой строки нет."; !strings.Contains(guideText, want) {
 		t.Fatalf("guide lacks %q", want)
+	}
+	for _, want := range []string{"ссылках по положению", "ссылок по положению: L"} {
+		if !strings.Contains(guideText, want) {
+			t.Fatalf("guide lacks positional reference guidance %q", want)
+		}
+	}
+	checkHelp, ok := findCommand("check")
+	if !ok || !strings.Contains(checkHelp.description, "ссылках по положению") {
+		t.Fatalf("check help = %q, want positional reference warning", checkHelp.description)
 	}
 }

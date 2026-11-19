@@ -5647,6 +5647,9 @@ func ruleFieldWarnings(path string, raw []byte) []string {
 		}
 	}
 	var warnings []string
+	if reference := positionalReferenceInFragment(raw, values, header); reference != "" {
+		warnings = append(warnings, fmt.Sprintf("%s: ссылка по положению «%s» — назови цель по смыслу", path, reference))
+	}
 	if isRule {
 		if len(values["цель"]) == 0 || values["цель"][len(values["цель"])-1] == "" {
 			warnings = append(warnings, fmt.Sprintf("%s: rule has empty цель", path))
@@ -5749,17 +5752,19 @@ func resolvedPath(path string) (string, error) {
 
 // Rule field and text warnings of lex check, as they follow the fragment path.
 const (
-	emptyGoalWarning       = ": rule has empty цель"
-	goalRestatesWarning    = ": цель пересказывает пункт"
-	itemHasNoFieldsWarning = ": item has no fields"
-	emptyBasisWarning      = ": rule has empty основание"
-	emptyRemovalWarning    = ": rule has empty снять_когда"
-	textQuoteWarning       = ": цитата пользователя в тексте, место ей — основание"
+	emptyGoalWarning           = ": rule has empty цель"
+	goalRestatesWarning        = ": цель пересказывает пункт"
+	positionalReferenceWarning = ": ссылка по положению"
+	itemHasNoFieldsWarning     = ": item has no fields"
+	emptyBasisWarning          = ": rule has empty основание"
+	emptyRemovalWarning        = ": rule has empty снять_когда"
+	textQuoteWarning           = ": цитата пользователя в тексте, место ей — основание"
 )
 
 func isRuleBasisWarning(warning string) bool {
 	return strings.Contains(warning, emptyGoalWarning) ||
 		strings.Contains(warning, goalRestatesWarning) ||
+		strings.Contains(warning, positionalReferenceWarning) ||
 		strings.Contains(warning, emptyBasisWarning) ||
 		strings.Contains(warning, emptyRemovalWarning) ||
 		strings.Contains(warning, textQuoteWarning)
@@ -5767,7 +5772,7 @@ func isRuleBasisWarning(warning string) bool {
 
 // RuleWarningSummary returns the closing line of lex check: how many warnings of each rule kind there are.
 func RuleWarningSummary(warnings []string) string {
-	basis, removal, quote, goal, restates := 0, 0, 0, 0, 0
+	basis, removal, quote, goal, restates, positional := 0, 0, 0, 0, 0, 0
 	items := make(map[string]bool)
 	for _, warning := range warnings {
 		switch {
@@ -5777,6 +5782,8 @@ func RuleWarningSummary(warnings []string) string {
 			goal++
 		case strings.Contains(warning, goalRestatesWarning):
 			restates++
+		case strings.Contains(warning, positionalReferenceWarning):
+			positional++
 		case strings.Contains(warning, emptyBasisWarning):
 			basis++
 		case strings.Contains(warning, emptyRemovalWarning):
@@ -5785,7 +5792,147 @@ func RuleWarningSummary(warnings []string) string {
 			quote++
 		}
 	}
-	return fmt.Sprintf("правил без основания: %d, без условия снятия: %d; фрагментов с цитатой пользователя в тексте: %d; правил без цели: %d; пунктов без полей: %d; цель пересказывает пункт: %d", basis, removal, quote, goal, len(items), restates)
+	return fmt.Sprintf("правил без основания: %d, без условия снятия: %d; фрагментов с цитатой пользователя в тексте: %d; правил без цели: %d; пунктов без полей: %d; цель пересказывает пункт: %d; ссылок по положению: %d", basis, removal, quote, goal, len(items), restates, positional)
+}
+
+var positionalReferenceTokenRE = regexp.MustCompile(`[\p{L}\p{N}_]+|[«»“”„\x60]`)
+
+func positionalReferenceInFragment(raw []byte, values map[string][]string, header []byte) string {
+	texts := []string{string(raw[len(header):])}
+	for _, field := range []string{"цель", "снять_когда"} {
+		if fieldValues := values[field]; len(fieldValues) > 0 {
+			texts = append(texts, fieldValues[len(fieldValues)-1])
+		}
+	}
+	for _, text := range texts {
+		if reference := positionalReference(text); reference != "" {
+			return reference
+		}
+	}
+	return ""
+}
+
+// positionalReference returns one reference to a neighboring text unit: units are scanned from the last to the first, so with several references the last one is reported.
+func positionalReference(text string) string {
+	visible := positionalReferenceVisibleText(text)
+	tokens := positionalReferenceTokenRE.FindAllStringIndex(visible, -1)
+	word := make([]string, len(tokens))
+	for i, bounds := range tokens {
+		word[i] = strings.ToLower(visible[bounds[0]:bounds[1]])
+	}
+	for unitIndex := len(word) - 1; unitIndex >= 0; unitIndex-- {
+		unit := word[unitIndex]
+		if !isPositionalTextUnit(unit) {
+			continue
+		}
+		if reference := positionalReferenceAfterUnit(text, visible, tokens, word, unitIndex); reference != "" {
+			return reference
+		}
+		if reference := positionalAdjectiveBeforeUnit(text, visible, tokens, word, unitIndex); reference != "" {
+			return reference
+		}
+	}
+	return ""
+}
+
+func positionalReferenceAfterUnit(text, visible string, tokens [][]int, words []string, unitIndex int) string {
+	end := min(unitIndex+4, len(words)-1)
+	for directionIndex := unitIndex + 1; directionIndex <= end; directionIndex++ {
+		if !isPositionalAdverb(words[directionIndex]) {
+			continue
+		}
+		if !positionalReferenceGap(visible, tokens[unitIndex][1], tokens[directionIndex][0]) {
+			continue
+		}
+		start := tokens[unitIndex][0]
+		if unitIndex > 0 && isPositionalPreposition(words[unitIndex-1]) && positionalReferenceGap(visible, tokens[unitIndex-1][1], start) {
+			start = tokens[unitIndex-1][0]
+		}
+		return positionalReferenceText(text[start:tokens[directionIndex][1]])
+	}
+	return ""
+}
+
+func positionalAdjectiveBeforeUnit(text, visible string, tokens [][]int, words []string, unitIndex int) string {
+	if unitIndex == 0 || strings.HasPrefix(words[unitIndex], "шаг") || !isPositionalAdjective(words[unitIndex-1]) || !positionalReferenceGap(visible, tokens[unitIndex-1][1], tokens[unitIndex][0]) {
+		return ""
+	}
+	start := tokens[unitIndex-1][0]
+	if unitIndex > 1 && isPositionalPreposition(words[unitIndex-2]) && positionalReferenceGap(visible, tokens[unitIndex-2][1], start) {
+		start = tokens[unitIndex-2][0]
+	}
+	return positionalReferenceText(text[start:tokens[unitIndex][1]])
+}
+
+func positionalReferenceGap(text string, start, end int) bool {
+	for _, r := range text[start:end] {
+		if r == '\n' || r == '\r' {
+			return false
+		}
+		if !unicode.IsSpace(r) && !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func positionalReferenceText(text string) string {
+	return strings.Join(strings.Fields(text), " ")
+}
+
+func positionalReferenceVisibleText(text string) string {
+	visible := []byte(text)
+	for i := 0; i < len(text); {
+		open, close := "", ""
+		switch {
+		case strings.HasPrefix(text[i:], "«"):
+			open, close = "«", "»"
+		case strings.HasPrefix(text[i:], "„"):
+			open, close = "„", "“"
+		case strings.HasPrefix(text[i:], "“"):
+			open, close = "“", "”"
+		case text[i] == '`':
+			open, close = "`", "`"
+		}
+		if open == "" {
+			i++
+			continue
+		}
+		end := strings.Index(text[i+len(open):], close)
+		if end < 0 {
+			i += len(open)
+			continue
+		}
+		end += len(open) + len(close)
+		for j := i; j < i+end; j++ {
+			if visible[j] != '\n' && visible[j] != '\r' {
+				visible[j] = '.'
+			}
+		}
+		i += end
+	}
+	return string(visible)
+}
+
+func isPositionalTextUnit(word string) bool {
+	for _, prefix := range []string{"строк", "пункт", "абзац", "раздел", "правил", "шаг"} {
+		if strings.HasPrefix(word, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPositionalAdverb(word string) bool {
+	return word == "выше" || word == "ниже"
+}
+
+func isPositionalAdjective(word string) bool {
+	return strings.HasPrefix(word, "предыдущ") || strings.HasPrefix(word, "следующ")
+}
+
+func isPositionalPreposition(word string) bool {
+	return word == "по" || word == "в" || word == "на" || word == "из" || word == "к" || word == "с"
 }
 
 // goalRestatesBody reports a restatement when at least two meaningful goal stems
