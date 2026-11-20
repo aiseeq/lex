@@ -453,7 +453,7 @@ func TestRuleBasisEmptyRemove(t *testing.T) {
 func TestRuleBasisEmptyPurposeOk(t *testing.T) {
 	codex, _, _ := ruleBasisFixture(t, "Правило.\n", "цель: ", "основание: источник", "снять_когда: условие")
 	warnings, err := CheckWithWarnings(codex, CheckOptions{})
-	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 0, без условия снятия: 0; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 1; пунктов без полей: 0; цель пересказывает пункт: 0; ссылок по положению: 0" {
+	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 0, без условия снятия: 0; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 1; пунктов без полей: 0; цель пересказывает пункт: 0; ссылок по положению: 0; постоянных правил: 0, из них без причины: 0, с общей причиной: 0; «не снимается, пока»: 0; пустых фрагментов: 0; пустых разделителей: 0" {
 		t.Fatalf("warnings = %v, err = %v", warnings, err)
 	}
 }
@@ -466,7 +466,7 @@ func TestRuleBasisPurposeOnly(t *testing.T) {
 	}
 	mustWrite(t, frag, bytes.Replace(raw, []byte("тип: правило\n"), nil, 1))
 	warnings, err := CheckWithWarnings(codex, CheckOptions{})
-	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 1, без условия снятия: 1; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 0; пунктов без полей: 0; цель пересказывает пункт: 0; ссылок по положению: 0" || len(warnings) != 2 {
+	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 1, без условия снятия: 1; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 0; пунктов без полей: 0; цель пересказывает пункт: 0; ссылок по положению: 0; постоянных правил: 0, из них без причины: 0, с общей причиной: 0; «не снимается, пока»: 0; пустых фрагментов: 0; пустых разделителей: 0" || len(warnings) != 2 {
 		t.Fatalf("warnings = %v, err = %v", warnings, err)
 	}
 	if !strings.Contains(strings.Join(warnings, "\n"), "основание") || !strings.Contains(strings.Join(warnings, "\n"), "снять_когда") {
@@ -477,7 +477,7 @@ func TestRuleBasisPurposeOnly(t *testing.T) {
 func TestRuleBasisPlainFragment(t *testing.T) {
 	codex, _, _ := ruleBasisFixture(t, "Обычный текст.\n")
 	warnings, err := CheckWithWarnings(codex, CheckOptions{})
-	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 0, без условия снятия: 0; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 0; пунктов без полей: 0; цель пересказывает пункт: 0; ссылок по положению: 0" {
+	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 0, без условия снятия: 0; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 0; пунктов без полей: 0; цель пересказывает пункт: 0; ссылок по положению: 0; постоянных правил: 0, из них без причины: 0, с общей причиной: 0; «не снимается, пока»: 0; пустых фрагментов: 0; пустых разделителей: 0" {
 		t.Fatalf("warnings = %v, err = %v", warnings, err)
 	}
 }
@@ -558,28 +558,7 @@ func TestRuleBasisKnownLiveQuoteForms(t *testing.T) {
 
 func TestRuleBasisSharedFragment(t *testing.T) {
 	codex, output, frag := ruleBasisFixture(t, "Правило.\n", "основание: ", "снять_когда: условие")
-	secondOut := filepath.Join(filepath.Dir(output), "second.md")
-	mustWrite(t, secondOut, []byte("Правило.\n"))
-	first, err := readManifest(manifestOf(t, codex, "rules.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := importData(codex, secondOut, "second.md", []byte("Правило.\n"), false); err != nil {
-		t.Fatal(err)
-	}
-	second, err := readManifest(manifestOf(t, codex, "second.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondFragment := filepath.Join(codex, "frag", filepath.FromSlash(second.parts[0])+".md")
-	if err := os.Remove(secondFragment); err != nil {
-		t.Fatal(err)
-	}
-	second.parts = []string{first.parts[0]}
-	second.fragmentHashes = map[string]string{}
-	if err := writeManifest(manifestOf(t, codex, "second.md"), second, nil); err != nil {
-		t.Fatal(err)
-	}
+	shareFixtureFragment(t, codex, output, "Правило.\n")
 	warnings, err := CheckWithWarnings(codex, CheckOptions{})
 	assertRuleBasis(t, warnings, err, 1, frag, "основание")
 	if count := countWarningsContaining(warnings, frag+": rule has empty основание"); count != 1 {
@@ -590,7 +569,7 @@ func TestRuleBasisSharedFragment(t *testing.T) {
 func TestRuleBasisBothEmpty(t *testing.T) {
 	codex, _, frag := ruleBasisFixture(t, "Правило.\n", "основание: ", "снять_когда: ")
 	warnings, err := CheckWithWarnings(codex, CheckOptions{})
-	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 1, без условия снятия: 1; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 1; пунктов без полей: 0; цель пересказывает пункт: 0; ссылок по положению: 0" || len(warnings) != 3 {
+	if err != nil || RuleWarningSummary(warnings) != "правил без основания: 1, без условия снятия: 1; фрагментов с цитатой пользователя в тексте: 0; правил без цели: 1; пунктов без полей: 0; цель пересказывает пункт: 0; ссылок по положению: 0; постоянных правил: 0, из них без причины: 0, с общей причиной: 0; «не снимается, пока»: 0; пустых фрагментов: 0; пустых разделителей: 0" || len(warnings) != 3 {
 		t.Fatalf("warnings = %v, summary = %q, err = %v", warnings, RuleWarningSummary(warnings), err)
 	}
 	if countWarningsContaining(warnings, frag+": rule has empty основание") != 1 ||
@@ -642,7 +621,7 @@ func assertRuleBasis(t *testing.T, warnings []string, err error, count int, path
 		basis = count
 	}
 	goal := countWarningsContaining(warnings, path+": rule has empty цель")
-	want := fmt.Sprintf("правил без основания: %d, без условия снятия: %d; фрагментов с цитатой пользователя в тексте: %d; правил без цели: %d; пунктов без полей: 0; цель пересказывает пункт: 0; ссылок по положению: 0", basis, removal, quote, goal)
+	want := fmt.Sprintf("правил без основания: %d, без условия снятия: %d; фрагментов с цитатой пользователя в тексте: %d; правил без цели: %d; пунктов без полей: 0; цель пересказывает пункт: 0; ссылок по положению: 0; постоянных правил: 0, из них без причины: 0, с общей причиной: 0; «не снимается, пока»: 0; пустых фрагментов: 0; пустых разделителей: 0", basis, removal, quote, goal)
 	if err != nil || RuleWarningSummary(warnings) != want {
 		t.Fatalf("warnings = %v, summary = %q, want %q, err = %v", warnings, RuleWarningSummary(warnings), want, err)
 	}
@@ -662,4 +641,30 @@ func countWarningsContaining(warnings []string, text string) int {
 		}
 	}
 	return count
+}
+
+// shareFixtureFragment makes a second manifest second.md, next to output, whose only part is the fragment of rules.md.
+func shareFixtureFragment(t *testing.T, codex, output, body string) {
+	t.Helper()
+	secondOut := filepath.Join(filepath.Dir(output), "second.md")
+	mustWrite(t, secondOut, []byte(body))
+	first, err := readManifest(manifestOf(t, codex, "rules.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := importData(codex, secondOut, "second.md", []byte(body), false); err != nil {
+		t.Fatal(err)
+	}
+	second, err := readManifest(manifestOf(t, codex, "second.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(codex, "frag", filepath.FromSlash(second.parts[0])+".md")); err != nil {
+		t.Fatal(err)
+	}
+	second.parts = []string{first.parts[0]}
+	second.fragmentHashes = map[string]string{}
+	if err := writeManifest(manifestOf(t, codex, "second.md"), second, nil); err != nil {
+		t.Fatal(err)
+	}
 }

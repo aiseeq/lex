@@ -87,7 +87,7 @@ func TestPositionalReferenceInHeaderAndSummary(t *testing.T) {
 	if countWarningsContaining(warnings, want) != 1 {
 		t.Fatalf("warnings = %v, want header warning %q", warnings, want)
 	}
-	if !strings.HasSuffix(RuleWarningSummary(warnings), "; ссылок по положению: 1") {
+	if !strings.HasSuffix(RuleWarningSummary(warnings), "; ссылок по положению: 1; постоянных правил: 0, из них без причины: 0, с общей причиной: 0; «не снимается, пока»: 0; пустых фрагментов: 0; пустых разделителей: 0") {
 		t.Fatalf("summary = %q, want positional count", RuleWarningSummary(warnings))
 	}
 }

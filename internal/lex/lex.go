@@ -5639,34 +5639,141 @@ func fragmentKindField(line string) (string, bool) {
 func ruleFieldWarnings(path string, raw []byte) []string {
 	values := fragmentHeaderValues(raw)
 	header := fragmentHeader(raw)
-	isNotRule := fragmentIsNotRule(raw, raw[len(header):])
-	isRule := !isNotRule && len(values["тип"]) > 0 && values["тип"][len(values["тип"])-1] == "правило"
-	for _, field := range []string{"цель", "основание", "снять_когда"} {
-		if !isNotRule && len(values[field]) > 0 && values[field][len(values[field])-1] != "" {
-			isRule = true
-		}
-	}
+	body := raw[len(header):]
 	var warnings []string
 	if reference := positionalReferenceInFragment(raw, values, header); reference != "" {
 		warnings = append(warnings, fmt.Sprintf("%s: ссылка по положению «%s» — назови цель по смыслу", path, reference))
 	}
-	if isRule {
-		if len(values["цель"]) == 0 || values["цель"][len(values["цель"])-1] == "" {
-			warnings = append(warnings, fmt.Sprintf("%s: rule has empty цель", path))
-		} else if goalRestatesBody(values["цель"][len(values["цель"])-1], raw[len(header):]) {
-			warnings = append(warnings, path+goalRestatesWarning)
-		}
-		for _, field := range []string{"основание", "снять_когда"} {
-			if len(values[field]) == 0 || values[field][len(values[field])-1] == "" {
-				warnings = append(warnings, fmt.Sprintf("%s: rule has empty %s", path, field))
-			}
-		}
+	if fragmentIsRuleByFields(raw, body, values) {
+		warnings = append(warnings, ruleOnlyWarnings(path, body, values)...)
 	}
-	if len(header) > 0 && hasUserQuoteInText(raw[len(header):]) {
+	if len(header) > 0 && hasUserQuoteInText(body) {
 		warnings = append(warnings, path+textQuoteWarning)
+	}
+	if len(header) > 0 {
+		warnings = append(warnings, emptyBodyWarnings(path, body, values)...)
 	}
 	return warnings
 }
+
+// fragmentIsRuleByFields: not a heading, skill header or вид item, and marked тип: правило or with any nonempty rule field.
+func fragmentIsRuleByFields(raw, body []byte, values map[string][]string) bool {
+	if fragmentIsNotRule(raw, body) {
+		return false
+	}
+	if len(values["тип"]) > 0 && values["тип"][len(values["тип"])-1] == "правило" {
+		return true
+	}
+	for _, field := range []string{"цель", "основание", "снять_когда"} {
+		if nonemptyHeaderValue(values, field) {
+			return true
+		}
+	}
+	return false
+}
+
+// ruleOnlyWarnings are the field warnings of a rule: empty or restating цель, empty основание or снять_когда, and the permanent-rule form of снять_когда.
+func ruleOnlyWarnings(path string, body []byte, values map[string][]string) []string {
+	var warnings []string
+	if !nonemptyHeaderValue(values, "цель") {
+		warnings = append(warnings, fmt.Sprintf("%s: rule has empty цель", path))
+	} else if goalRestatesBody(values["цель"][len(values["цель"])-1], body) {
+		warnings = append(warnings, path+goalRestatesWarning)
+	}
+	for _, field := range []string{"основание", "снять_когда"} {
+		if !nonemptyHeaderValue(values, field) {
+			warnings = append(warnings, fmt.Sprintf("%s: rule has empty %s", path, field))
+		}
+	}
+	if nonemptyHeaderValue(values, "снять_когда") {
+		warnings = append(warnings, permanentRuleWarnings(path, values["снять_когда"][len(values["снять_когда"])-1])...)
+	}
+	return warnings
+}
+
+// emptyBodyWarnings reports a fragment whose header is followed by no text; one without fields and with only blank lines is a separator.
+func emptyBodyWarnings(path string, body []byte, values map[string][]string) []string {
+	if len(bytes.TrimSpace(body)) > 0 {
+		return nil
+	}
+	if len(body) > 0 && !fragmentHasHeaderFields(values) {
+		return []string{path + blankSeparatorWarning}
+	}
+	return []string{path + emptyFragmentWarning}
+}
+
+// permanentRuleWarnings checks a снять_когда that declares the rule permanent.
+// The accepted form is «не снимается — <почему одной фразой>»; such a rule gets
+// the hidden permanentRuleNote that only feeds the summary count. A bare «не снимается»
+// and one followed only by generic words («суждение», «страховка», «кодом», «принцип»)
+// name no reason; «не снимается, пока X» and «пока X — не снимается» are removal
+// conditions written as a permanent rule. Inside a longer value («<часть> не снимается: это страховка.»)
+// only a generic reason is reported, and the rule is then counted as permanent too.
+func permanentRuleWarnings(path, removal string) []string {
+	lower := strings.ToLower(strings.TrimSpace(removal))
+	at := permanentRulePhraseIndex(lower)
+	if at < 0 {
+		return nil
+	}
+	words := removalWords(lower[at+len(permanentRulePrefix):])
+	if at > 0 {
+		if before := removalWords(lower[:at]); len(before) > 0 && before[0] == "пока" {
+			return []string{path + untilRemovalWarning}
+		}
+		if len(words) > 0 && genericRemovalReason(words) {
+			return []string{path + permanentRuleNote, path + genericRemovalWarning}
+		}
+		return nil
+	}
+	if len(words) > 0 && words[0] == "пока" {
+		return []string{path + untilRemovalWarning}
+	}
+	warnings := []string{path + permanentRuleNote}
+	if len(words) == 0 {
+		return append(warnings, path+bareRemovalWarning)
+	}
+	if genericRemovalReason(words) {
+		return append(warnings, path+genericRemovalWarning)
+	}
+	return warnings
+}
+
+// permanentRulePhraseIndex is the byte index of the first «не снимается» standing as whole words in lower, or -1.
+func permanentRulePhraseIndex(lower string) int {
+	for offset := 0; ; {
+		i := strings.Index(lower[offset:], permanentRulePrefix)
+		if i < 0 {
+			return -1
+		}
+		at := offset + i
+		before, _ := utf8.DecodeLastRuneInString(lower[:at])
+		after, _ := utf8.DecodeRuneInString(lower[at+len(permanentRulePrefix):])
+		if (at == 0 || !isRemovalWordRune(before)) && !isRemovalWordRune(after) {
+			return at
+		}
+		offset = at + len(permanentRulePrefix)
+	}
+}
+
+func isRemovalWordRune(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
+
+func removalWords(text string) []string {
+	return strings.FieldsFunc(text, func(r rune) bool { return !isRemovalWordRune(r) })
+}
+
+func genericRemovalReason(words []string) bool {
+	for _, word := range words {
+		if !genericRemovalWords[word] {
+			return false
+		}
+	}
+	return true
+}
+
+const permanentRulePrefix = "не снимается"
+
+// genericRemovalWords make up a reason that fits any permanent rule and so explains none.
+var genericRemovalWords = map[string]bool{"суждение": true, "страховка": true, "кодом": true, "принцип": true, "или": true, "и": true, "это": true}
 
 func fragmentIsNotRule(raw, body []byte) bool {
 	values := fragmentHeaderValues(raw)
@@ -5759,6 +5866,13 @@ const (
 	emptyBasisWarning          = ": rule has empty основание"
 	emptyRemovalWarning        = ": rule has empty снять_когда"
 	textQuoteWarning           = ": цитата пользователя в тексте, место ей — основание"
+	bareRemovalWarning         = ": снять_когда «не снимается» без причины — пиши «не снимается — <почему одной фразой>»"
+	genericRemovalWarning      = ": снять_когда «не снимается» с общей причиной без пояснения — пиши «не снимается — <почему одной фразой>»"
+	untilRemovalWarning        = ": снять_когда «не снимается, пока X» — это условие снятия, пиши голым условием X"
+	emptyFragmentWarning       = ": фрагмент с шапкой и пустым текстом — допиши текст или убери фрагмент из манифеста"
+	blankSeparatorWarning      = ": фрагмент без полей из одних пустых строк — перенеси пустую строку в соседний фрагмент, потом убери этот"
+	// permanentRuleNote is not printed by lex check: it only counts permanent rules in the summary.
+	permanentRuleNote = ": постоянное правило"
 )
 
 func isRuleBasisWarning(warning string) bool {
@@ -5767,12 +5881,24 @@ func isRuleBasisWarning(warning string) bool {
 		strings.Contains(warning, positionalReferenceWarning) ||
 		strings.Contains(warning, emptyBasisWarning) ||
 		strings.Contains(warning, emptyRemovalWarning) ||
-		strings.Contains(warning, textQuoteWarning)
+		strings.Contains(warning, textQuoteWarning) ||
+		strings.Contains(warning, bareRemovalWarning) ||
+		strings.Contains(warning, genericRemovalWarning) ||
+		strings.Contains(warning, untilRemovalWarning) ||
+		strings.Contains(warning, emptyFragmentWarning) ||
+		strings.Contains(warning, blankSeparatorWarning) ||
+		strings.HasSuffix(warning, permanentRuleNote)
+}
+
+// IsPermanentRuleNote reports the summary-only entry that lex check does not print.
+func IsPermanentRuleNote(warning string) bool {
+	return strings.HasSuffix(warning, permanentRuleNote)
 }
 
 // RuleWarningSummary returns the closing line of lex check: how many warnings of each rule kind there are.
 func RuleWarningSummary(warnings []string) string {
 	basis, removal, quote, goal, restates, positional := 0, 0, 0, 0, 0, 0
+	bare, generic, until, empty, separators, permanent := 0, 0, 0, 0, 0, 0
 	items := make(map[string]bool)
 	for _, warning := range warnings {
 		switch {
@@ -5790,9 +5916,21 @@ func RuleWarningSummary(warnings []string) string {
 			removal++
 		case strings.Contains(warning, textQuoteWarning):
 			quote++
+		case strings.HasSuffix(warning, permanentRuleNote):
+			permanent++
+		case strings.Contains(warning, bareRemovalWarning):
+			bare++
+		case strings.Contains(warning, genericRemovalWarning):
+			generic++
+		case strings.Contains(warning, untilRemovalWarning):
+			until++
+		case strings.Contains(warning, emptyFragmentWarning):
+			empty++
+		case strings.Contains(warning, blankSeparatorWarning):
+			separators++
 		}
 	}
-	return fmt.Sprintf("правил без основания: %d, без условия снятия: %d; фрагментов с цитатой пользователя в тексте: %d; правил без цели: %d; пунктов без полей: %d; цель пересказывает пункт: %d; ссылок по положению: %d", basis, removal, quote, goal, len(items), restates, positional)
+	return fmt.Sprintf("правил без основания: %d, без условия снятия: %d; фрагментов с цитатой пользователя в тексте: %d; правил без цели: %d; пунктов без полей: %d; цель пересказывает пункт: %d; ссылок по положению: %d; постоянных правил: %d, из них без причины: %d, с общей причиной: %d; «не снимается, пока»: %d; пустых фрагментов: %d; пустых разделителей: %d", basis, removal, quote, goal, len(items), restates, positional, permanent, bare, generic, until, empty, separators)
 }
 
 var positionalReferenceTokenRE = regexp.MustCompile(`[\p{L}\p{N}_]+|[«»“”„\x60]`)
@@ -6004,6 +6142,16 @@ func fragmentHasNoFields(raw, body []byte) bool {
 		}
 	}
 	return startsWithListItem(body)
+}
+
+// fragmentHasHeaderFields reports a nonempty цель, основание, снять_когда, тип or вид.
+func fragmentHasHeaderFields(values map[string][]string) bool {
+	for _, field := range []string{"цель", "основание", "снять_когда", "тип", "вид"} {
+		if nonemptyHeaderValue(values, field) {
+			return true
+		}
+	}
+	return false
 }
 
 func nonemptyHeaderValue(values map[string][]string, field string) bool {

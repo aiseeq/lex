@@ -48,7 +48,7 @@ func TestGoalRestatesBody(t *testing.T) {
 			if tc.name == "empty goal" && countWarningsContaining(warnings, frag+": rule has empty цель") != 1 {
 				t.Fatalf("empty goal warning missing: %v", warnings)
 			}
-			wantTail := "; цель пересказывает пункт: " + map[bool]string{true: "1", false: "0"}[tc.want] + "; ссылок по положению: 0"
+			wantTail := "; цель пересказывает пункт: " + map[bool]string{true: "1", false: "0"}[tc.want] + "; ссылок по положению: 0; постоянных правил: 0, из них без причины: 0, с общей причиной: 0; «не снимается, пока»: 0; пустых фрагментов: 0; пустых разделителей: 0"
 			if !strings.HasSuffix(RuleWarningSummary(warnings), wantTail) {
 				t.Fatalf("summary = %q, want suffix %q", RuleWarningSummary(warnings), wantTail)
 			}
