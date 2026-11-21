@@ -4061,6 +4061,7 @@ func checkSelectedOutputs(codex, tree string, codexInMain bool, selected []*sele
 	}
 	checker.purpose = purposeEnabled
 	referenced := map[string]bool{}
+	codeCache := codeTargetCache{}
 	for _, entry := range selected {
 		if !entry.output {
 			continue
@@ -4074,7 +4075,7 @@ func checkSelectedOutputs(codex, tree string, codexInMain bool, selected []*sele
 			}
 			return b, err
 		}
-		body, missing, draftWarnings := checkedManifestBody(codex, entry.path, entry.m, referenced, read, purposeEnabled, decisionPath)
+		body, missing, draftWarnings := checkedManifestBody(codex, entry.path, entry.m, referenced, read, purposeEnabled, decisionPath, codeCache)
 		warnings = append(warnings, draftWarnings...)
 		problems = append(problems, missing...)
 		if len(missing) > 0 {
@@ -4123,6 +4124,7 @@ func checkDisk(codex, decisionPath string) ([]string, error) {
 		return nil, err
 	}
 	referenced := map[string]bool{}
+	codeCache := codeTargetCache{}
 	var warnings, problems []string
 	for _, path := range catalog.paths {
 		m, err := catalog.read(path)
@@ -4131,7 +4133,7 @@ func checkDisk(codex, decisionPath string) ([]string, error) {
 			continue
 		}
 		problems = append(problems, diskLinkProblems(m.links, false)...)
-		body, missing, draftWarnings := checkedManifestBody(codex, path, m, referenced, os.ReadFile, purposeEnabled, decisionPath)
+		body, missing, draftWarnings := checkedManifestBody(codex, path, m, referenced, os.ReadFile, purposeEnabled, decisionPath, codeCache)
 		warnings = append(warnings, draftWarnings...)
 		problems = append(problems, missing...)
 		if len(missing) > 0 {
@@ -4158,7 +4160,7 @@ func checkDisk(codex, decisionPath string) ([]string, error) {
 	if err := appendOrphanProblem(codex, referenced); err != nil {
 		problems = append(problems, err.Error())
 	}
-	recordWarnings, err := diskRecordWarnings(codex, referenced)
+	recordWarnings, err := diskRecordWarnings(codex, referenced, codeCache)
 	if err != nil {
 		problems = append(problems, err.Error())
 	}
@@ -4218,16 +4220,17 @@ func checkStaged(codex, decisionPath string) ([]string, error) {
 		return nil, err
 	}
 	referenced := map[string]bool{}
+	codeCache := codeTargetCache{}
 	var warnings, problems []string
 	for _, path := range paths {
-		w, p, err := checkStagedManifest(commit, codex, path, referenced, checker, catalog, decisionPath)
+		w, p, err := checkStagedManifest(commit, codex, path, referenced, checker, catalog, decisionPath, codeCache)
 		if err != nil {
 			return nil, err
 		}
 		warnings = append(warnings, w...)
 		problems = append(problems, p...)
 	}
-	orphans, recordWarnings, err := stagedOrphans(commit, codex, referenced)
+	orphans, recordWarnings, err := stagedOrphans(commit, codex, referenced, codeCache)
 	if err != nil {
 		return nil, err
 	}
@@ -4245,7 +4248,7 @@ func stagedManifestTouched(commit *stagedPaths, codex, path string, m manifest, 
 
 // checkStagedManifest - проверка одного манифеста коммита; части каждого читаемого манифеста индекса
 // помечаются в referenced: манифест, удалённый в коммите, сюда не попадает, и его фрагменты станут сиротами.
-func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map[string]bool, checker *toolChecker, catalog *manifestCatalog, decisionPath string) (warnings, problems []string, err error) {
+func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map[string]bool, checker *toolChecker, catalog *manifestCatalog, decisionPath string, codeCache codeTargetCache) (warnings, problems []string, err error) {
 	raw, rerr := commit.read(path)
 	if rerr != nil {
 		if commit.has(path) {
@@ -4294,7 +4297,7 @@ func checkStagedManifest(commit *stagedPaths, codex, path string, referenced map
 		}
 		return b, err
 	}
-	body, missing, draftWarnings := checkedManifestBody(codex, path, m, referenced, read, checker.purpose, decisionPath)
+	body, missing, draftWarnings := checkedManifestBody(codex, path, m, referenced, read, checker.purpose, decisionPath, codeCache)
 	warnings = append(warnings, draftWarnings...)
 	problems = append(problems, missing...)
 	if len(missing) == 0 {
@@ -4390,7 +4393,7 @@ func unstagedFragmentHints(commit *stagedPaths, fragPaths []string, indexed map[
 
 // stagedOrphans - фрагменты индекса без манифеста; ошибка коммита, только если её сделал этот коммит: фрагмент
 // в коммите или его часть убрал манифест, изменённый или удалённый в коммите (сирота в HEAD чужие коммиты не блокирует).
-func stagedOrphans(commit *stagedPaths, codex string, referenced map[string]bool) ([]string, []string, error) {
+func stagedOrphans(commit *stagedPaths, codex string, referenced map[string]bool, codeCache codeTargetCache) ([]string, []string, error) {
 	headParts, err := commit.headParts(filepath.Join(codex, "manifest"))
 	if err != nil {
 		return nil, nil, err
@@ -4406,7 +4409,7 @@ func stagedOrphans(commit *stagedPaths, codex string, referenced map[string]bool
 				return nil, nil, readErr
 			}
 			if fragmentIsRecord(b) {
-				warnings = append(warnings, codeLinkWarnings(frag.abs, b)...)
+				warnings = append(warnings, codeLinkWarnings(frag.abs, b, codeCache)...)
 				warnings = append(warnings, overrideWarnings(codex, frag.id, b, commit.read)...)
 				continue
 			}
@@ -4581,7 +4584,7 @@ func stagedDiskMissingFragments(commit *stagedPaths, paths, ids []string, manife
 	return missing
 }
 
-func checkedManifestBody(codex, manifestPath string, m manifest, referenced map[string]bool, read func(string) ([]byte, error), purposeEnabled bool, decisionPath string) ([]byte, []string, []string) {
+func checkedManifestBody(codex, manifestPath string, m manifest, referenced map[string]bool, read func(string) ([]byte, error), purposeEnabled bool, decisionPath string, codeCache codeTargetCache) ([]byte, []string, []string) {
 	var body []byte
 	var problems, warnings []string
 	for _, id := range m.parts {
@@ -4599,7 +4602,7 @@ func checkedManifestBody(codex, manifestPath string, m manifest, referenced map[
 			problems = append(problems, problem)
 		}
 		warnings = append(warnings, ruleFieldWarnings(path, raw)...)
-		warnings = append(warnings, codeLinkWarnings(path, raw)...)
+		warnings = append(warnings, codeLinkWarnings(path, raw, codeCache)...)
 		warnings = append(warnings, overrideWarnings(codex, id, raw, read)...)
 		if fragmentIsRecord(raw) {
 			problems = append(problems, path+": record must not be in a manifest")
@@ -4628,12 +4631,14 @@ func checkedManifestBody(codex, manifestPath string, m manifest, referenced map[
 
 // stagedPaths - пути, входящие в коммит текущего репозитория (git diff --cached), от его корня.
 type stagedPaths struct {
-	root     string
-	mainRoot string
-	paths    map[string]bool
-	index    map[string]string // путь от корня -> sha блоба в индексе
-	modes    map[string]string
-	blobs    map[string][]byte
+	root        string
+	mainRoot    string
+	paths       map[string]bool
+	index       map[string]string // путь от корня -> sha блоба в индексе
+	modes       map[string]string
+	blobs       map[string][]byte
+	headBlobs   map[string][]byte
+	headMissing map[string]bool
 }
 
 type stagedFragment struct{ abs, id string }
@@ -4699,7 +4704,68 @@ func readStagedPaths() (*stagedPaths, error) {
 			modes[name] = f[0]
 		}
 	}
-	return &stagedPaths{root: root, mainRoot: mainRoot, paths: set, index: index, modes: modes, blobs: map[string][]byte{}}, nil
+	return &stagedPaths{root: root, mainRoot: mainRoot, paths: set, index: index, modes: modes, blobs: map[string][]byte{}, headBlobs: map[string][]byte{}, headMissing: map[string]bool{}}, nil
+}
+
+// prefetchHead reads HEAD versions for paths in one cat-file batch. Missing paths are omitted.
+func (s *stagedPaths) prefetchHead(paths []string) error {
+	var specs []string
+	seen := map[string]bool{}
+	for _, path := range paths {
+		rel := s.rel(path)
+		if rel == "" || seen[rel] {
+			continue
+		}
+		if _, ok := s.headBlobs[rel]; ok || s.headMissing[rel] {
+			continue
+		}
+		seen[rel] = true
+		specs = append(specs, "HEAD:"+rel)
+	}
+	if len(specs) == 0 {
+		return nil
+	}
+	sort.Strings(specs)
+	cmd := exec.Command("git", "-C", s.root, "cat-file", "--batch")
+	cmd.Stdin = strings.NewReader(strings.Join(specs, "\n") + "\n")
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("git cat-file --batch HEAD in %s: %w", s.root, err)
+	}
+	for _, spec := range specs {
+		header, rest, ok := bytes.Cut(out, []byte("\n"))
+		if !ok {
+			return fmt.Errorf("git cat-file --batch: truncated output at %s", spec)
+		}
+		if string(header) == spec+" missing" {
+			s.headMissing[strings.TrimPrefix(spec, "HEAD:")] = true
+			out = rest
+			continue
+		}
+		fields := strings.Fields(string(header))
+		if len(fields) != 3 || fields[1] != "blob" {
+			return fmt.Errorf("git cat-file --batch: unexpected header %q for %s", header, spec)
+		}
+		size, err := strconv.Atoi(fields[2])
+		if err != nil || size+1 > len(rest) {
+			return fmt.Errorf("git cat-file --batch: bad size in %q", header)
+		}
+		s.headBlobs[strings.TrimPrefix(spec, "HEAD:")] = rest[:size]
+		out = rest[size+1:]
+	}
+	return nil
+}
+
+func (s *stagedPaths) readHead(path string) ([]byte, bool, error) {
+	rel := s.rel(path)
+	if rel == "" {
+		return nil, false, nil
+	}
+	if err := s.prefetchHead([]string{path}); err != nil {
+		return nil, false, err
+	}
+	b, ok := s.headBlobs[rel]
+	return b, ok, nil
 }
 
 // prefetch - блобы индекса для путей одним вызовом git cat-file --batch.

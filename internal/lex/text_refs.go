@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -132,7 +131,7 @@ func checkTextRefs(codex string, options CheckOptions) ([]string, error) {
 		combined[path], combinedOld[path] = data, data
 	}
 	if len(externalCorpus) > 0 {
-		findings = append(findings, distinctExternalFindings(findTextRefsWithExcluded(combined, journal, skills, externalPaths), externalPaths)...)
+		findings = append(findings, distinctExternalFindings(findTextRefsForPaths(combined, journal, skills, externalPaths, externalPaths), externalPaths)...)
 	}
 	baseline := map[textRefKey]bool{}
 	if old != nil {
@@ -141,10 +140,8 @@ func checkTextRefs(codex string, options CheckOptions) ([]string, error) {
 			baseline[refKey(f)] = true
 		}
 		if len(externalCorpus) > 0 {
-			for _, f := range findTextRefsWithExcluded(combinedOld, journal, skills, externalPaths) {
-				if externalPaths[f.path] {
-					baseline[refKey(f)] = true
-				}
+			for _, f := range findTextRefsForPaths(combinedOld, journal, skills, externalPaths, externalPaths) {
+				baseline[refKey(f)] = true
 			}
 		}
 	}
@@ -374,17 +371,15 @@ func (r *corpusReader) add(path string) error {
 		}
 		return nil
 	}
-	cmd := exec.Command("git", "-C", r.staged.root, "show", "HEAD:"+rel)
-	data, err = cmd.Output()
-	if err == nil {
+	data, ok, err := r.staged.readHead(path)
+	if err != nil {
+		return fmt.Errorf("read HEAD %s: %w", path, err)
+	}
+	if ok {
 		r.old[path] = data
 		return nil
 	}
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		return nil
-	}
-	return fmt.Errorf("read HEAD %s: %w", path, err)
+	return nil
 }
 
 func outputForRefs(m manifest, o CheckOptions) (string, error) {
@@ -487,6 +482,9 @@ func loadTextCorpus(codex string, o CheckOptions) (textCorpus, textCorpus, strin
 		}
 		r.old = textCorpus{}
 		paths = mergePaths(paths, r.staged.indexedUnder(filepath.Join(codex, "manifest"), ".yaml"))
+		if err := r.prefetchStagedText(codex, o, paths); err != nil {
+			return nil, nil, "", nil, nil, err
+		}
 	}
 	for _, path := range paths {
 		if err := r.addManifest(path, o); err != nil {
@@ -526,6 +524,71 @@ func loadTextCorpus(codex string, o CheckOptions) (textCorpus, textCorpus, strin
 		}
 	}
 	return r.current, r.old, journal, settings.TextRefs.Exceptions, r.skills, nil
+}
+
+func (r *corpusReader) prefetchStagedText(codex string, o CheckOptions, manifests []string) error {
+	if r.staged == nil {
+		return nil
+	}
+	initial := append(append([]string{}, manifests...), filepath.Join(codex, "tools.json"))
+	if err := r.staged.prefetch(initial); err != nil {
+		return err
+	}
+	if err := r.staged.prefetchHead(initial); err != nil {
+		return err
+	}
+	targets, err := r.stagedManifestTargets(manifests, o)
+	if err != nil {
+		return err
+	}
+	settings, err := r.textRefSettings(codex)
+	if err != nil {
+		return err
+	}
+	journal, err := r.decisionPath(codex, o.Decisions, settings)
+	if err != nil {
+		return err
+	}
+	if o.Tree != "" {
+		mapped, err := outputForRefs(manifest{out: journal}, o)
+		if err != nil {
+			return err
+		}
+		if mapped != "" {
+			journal = mapped
+		}
+	}
+	targets = append(targets, journal)
+	if err := r.staged.prefetch(targets); err != nil {
+		return err
+	}
+	return r.staged.prefetchHead(targets)
+}
+
+func (r *corpusReader) stagedManifestTargets(manifests []string, o CheckOptions) ([]string, error) {
+	var targets []string
+	for _, path := range manifests {
+		raw, err := r.read(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read manifest %s: %w", path, err)
+		}
+		m, parseErr := parseManifest(path, raw)
+		out, err := outputForRefs(m, o)
+		if err != nil {
+			return nil, err
+		}
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse manifest %s: %w", path, parseErr)
+		}
+		r.noteSkill(m.out)
+		if out != "" {
+			targets = append(targets, out)
+		}
+	}
+	return targets, nil
 }
 
 type refScanner struct {
@@ -678,6 +741,10 @@ func (s *refScanner) sections() {
 }
 
 func (s *refScanner) relativeSection() {
+	lowerLine := strings.ToLower(s.line)
+	if !strings.Contains(lowerLine, "ниже") && !strings.Contains(lowerLine, "выше") {
+		return
+	}
 	if named := relativeNamedBelowRef.FindStringSubmatch(s.line); named != nil {
 		words := strings.Fields(strings.TrimSpace(named[1]))
 		if len(words) > 0 {
@@ -731,6 +798,9 @@ func bulletBelowContains(body []byte, lineNumber int, word string) bool {
 }
 
 func (s *refScanner) skillSections() {
+	if !strings.Contains(s.line, "«") {
+		return
+	}
 	for _, match := range skillSection.FindAllStringSubmatch(s.line, -1) {
 		name := strings.TrimSuffix(match[1], "/")
 		target := filepath.Join(filepath.Dir(filepath.Dir(s.path)), name, "SKILL.md")
@@ -741,6 +811,9 @@ func (s *refScanner) skillSections() {
 }
 
 func (s *refScanner) quotedSections() {
+	if !strings.Contains(s.line, "«") {
+		return
+	}
 	for _, indexes := range quotedSection.FindAllStringSubmatchIndex(s.line, -1) {
 		match := s.line[indexes[0]:indexes[1]]
 		prefix := strings.TrimSpace(s.line[:indexes[0]])
@@ -791,6 +864,9 @@ func sectionExistsInSiblingFiles(corpus textCorpus, dir, except, title string, e
 }
 
 func (s *refScanner) registerSections() {
+	if !strings.Contains(s.line, "«") {
+		return
+	}
 	for _, match := range registerSection.FindAllStringSubmatch(s.line, -1) {
 		refs := fileRef.FindAllStringSubmatch(s.line, -1)
 		target := s.path
@@ -1299,6 +1375,10 @@ func findTextRefsWithSkills(corpus textCorpus, journal string, skills map[string
 }
 
 func findTextRefsWithExcluded(corpus textCorpus, journal string, skills map[string]bool, external map[string]bool) []textRefFinding {
+	return findTextRefsForPaths(corpus, journal, skills, external, nil)
+}
+
+func findTextRefsForPaths(corpus textCorpus, journal string, skills map[string]bool, external, paths map[string]bool) []textRefFinding {
 	s := refScanner{corpus: corpus, external: external, slugs: map[string]bool{}, skills: skills}
 	journalData, hasJournal := corpus[journal]
 	s.hasJournal = hasJournal
@@ -1306,9 +1386,16 @@ func findTextRefsWithExcluded(corpus textCorpus, journal string, skills map[stri
 		s.slugs[m[1]] = true
 	}
 	for _, path := range slices.Sorted(maps.Keys(corpus)) {
+		if paths != nil && !paths[path] {
+			continue
+		}
 		s.scan(path)
 	}
-	s.found = append(s.found, findOrphanSkillFiles(corpus)...)
+	for _, finding := range findOrphanSkillFiles(corpus) {
+		if paths == nil || paths[finding.path] {
+			s.found = append(s.found, finding)
+		}
+	}
 	return s.found
 }
 

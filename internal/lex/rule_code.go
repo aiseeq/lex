@@ -20,6 +20,73 @@ type codeLink struct {
 	Hash   string `json:"hash"`
 }
 
+type codeTestFile struct {
+	functions map[string]string
+	err       error
+}
+
+type codePackageIndex struct {
+	files []codeTestFile
+	err   error
+}
+
+type codeTargetCache map[string]codePackageIndex
+
+func (c codeTargetCache) hash(target string) (string, error) {
+	parts := strings.Split(target, ":")
+	if len(parts) != 3 || !filepath.IsAbs(parts[0]) || parts[1] == "" || !strings.HasPrefix(parts[2], "Test") {
+		return codeTargetHash(target)
+	}
+	packagePath := filepath.Join(parts[0], parts[1])
+	index, ok := c[packagePath]
+	if !ok {
+		index = buildCodePackageIndex(packagePath)
+		c[packagePath] = index
+	}
+	for _, file := range index.files {
+		if file.err != nil {
+			return "", file.err
+		}
+		if hash, found := file.functions[parts[2]]; found {
+			return hash, nil
+		}
+	}
+	if index.err != nil {
+		return "", index.err
+	}
+	return "", fmt.Errorf("test %s in %s: %w", parts[2], packagePath, os.ErrNotExist)
+}
+
+func buildCodePackageIndex(dir string) codePackageIndex {
+	files, err := filepath.Glob(filepath.Join(dir, "*_test.go"))
+	if err != nil {
+		return codePackageIndex{err: fmt.Errorf("list tests in %s: %w", dir, err)}
+	}
+	index := codePackageIndex{}
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			index.files = append(index.files, codeTestFile{err: fmt.Errorf("read test %s: %w", file, err)})
+			break
+		}
+		fset := token.NewFileSet()
+		parsed, err := parser.ParseFile(fset, file, data, parser.SkipObjectResolution)
+		if err != nil {
+			index.files = append(index.files, codeTestFile{err: fmt.Errorf("parse test %s: %w", file, err)})
+			break
+		}
+		functions := map[string]string{}
+		for _, decl := range parsed.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil {
+				start, end := fset.Position(fn.Pos()).Offset, fset.Position(fn.End()).Offset
+				functions[fn.Name.Name] = sha(data[start:end])
+			}
+		}
+		index.files = append(index.files, codeTestFile{functions: functions})
+	}
+	return index
+}
+
 type lostCodeLink struct {
 	Fragment string `json:"fragment"`
 	Target   string `json:"target"`
@@ -84,7 +151,7 @@ func codeTargetHash(target string) (string, error) {
 			return "", fmt.Errorf("read test %s: %w", file, err)
 		}
 		fset := token.NewFileSet()
-		parsed, err := parser.ParseFile(fset, file, b, 0)
+		parsed, err := parser.ParseFile(fset, file, b, parser.SkipObjectResolution)
 		if err != nil {
 			return "", fmt.Errorf("parse test %s: %w", file, err)
 		}
@@ -109,7 +176,7 @@ func cardWithoutStamps(b []byte) []byte {
 	return result
 }
 
-func codeLinkWarnings(path string, raw []byte) []string {
+func codeLinkWarnings(path string, raw []byte, cache codeTargetCache) []string {
 	body, err := fragmentBody(raw)
 	if err != nil {
 		return []string{fmt.Sprintf("%s: %v", path, err)}
@@ -118,7 +185,7 @@ func codeLinkWarnings(path string, raw []byte) []string {
 	var warnings []string
 	for _, link := range links {
 		prefix := fmt.Sprintf("%s: code link %s: ", path, link.Target)
-		hash, err := codeTargetHash(link.Target)
+		hash, err := cache.hash(link.Target)
 		switch {
 		case errors.Is(err, os.ErrNotExist):
 			warnings = append(warnings, prefix+"target not found")
@@ -136,7 +203,7 @@ func codeLinkWarnings(path string, raw []byte) []string {
 	return warnings
 }
 
-func diskRecordWarnings(codex string, referenced map[string]bool) ([]string, error) {
+func diskRecordWarnings(codex string, referenced map[string]bool, cache codeTargetCache) ([]string, error) {
 	root := filepath.Join(codex, "frag")
 	var warnings []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
@@ -158,7 +225,7 @@ func diskRecordWarnings(codex string, referenced map[string]bool) ([]string, err
 			return err
 		}
 		if fragmentIsRecord(b) {
-			warnings = append(warnings, codeLinkWarnings(path, b)...)
+			warnings = append(warnings, codeLinkWarnings(path, b, cache)...)
 			warnings = append(warnings, overrideWarnings(codex, strings.TrimSuffix(filepath.ToSlash(rel), ".md"), b, os.ReadFile)...)
 		}
 		return nil
@@ -234,7 +301,7 @@ func CodeDebt(codex string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		result = append(result, codeLinkWarnings(path, b)...)
+		result = append(result, codeLinkWarnings(path, b, codeTargetCache{})...)
 		return nil
 	})
 	sort.Strings(result)
