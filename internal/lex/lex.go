@@ -3808,6 +3808,7 @@ type CheckOptions struct {
 	Tree         string
 	RefsOnly     bool
 	Decisions    string
+	stagedPaths  *stagedPaths
 }
 
 func CheckWithWarnings(codex string, options CheckOptions) ([]string, error) {
@@ -3821,13 +3822,19 @@ func CheckWithWarnings(codex string, options CheckOptions) ([]string, error) {
 	if options.Staged && options.OutputsUnder != "" {
 		return nil, errors.New("--staged cannot be combined with --outputs-under")
 	}
+	if options.Staged {
+		options.stagedPaths, err = readStagedPaths()
+		if err != nil {
+			return nil, err
+		}
+	}
 	var warnings []string
 	var checkErr error
 	if !options.RefsOnly {
-		journal, journalErr := (&corpusReader{}).decisionPathForCheck(codex, options.Decisions)
+		journal, journalErr := (&corpusReader{}).decisionPathForCheck(codex, options.Decisions, options.stagedPaths)
 		switch {
 		case options.Staged:
-			warnings, checkErr = checkStaged(codex, journal)
+			warnings, checkErr = checkStaged(codex, journal, options.stagedPaths)
 		case options.OutputsUnder != "":
 			// An empty scope must stay silent about tools.json; checkTextRefs names a broken one when the scope has outputs.
 			journalErr = nil
@@ -4179,12 +4186,8 @@ func checkDisk(codex, decisionPath string) ([]string, error) {
 // Собранный файл проверяется, если в коммите он сам, его манифест или любой его фрагмент; фрагменты и манифест
 // читаются из индекса, так что незакоммиченная работа другой сессии (диск) чужой коммит не останавливает,
 // а закоммиченный собранный файл совпадает с закоммиченными фрагментами.
-func checkStaged(codex, decisionPath string) ([]string, error) {
+func checkStaged(codex, decisionPath string, commit *stagedPaths) ([]string, error) {
 	checker, err := loadToolChecker(codex)
-	if err != nil {
-		return nil, err
-	}
-	commit, err := readStagedPaths()
 	if err != nil {
 		return nil, err
 	}
@@ -5851,23 +5854,8 @@ func fragmentIsNotRule(raw, body []byte) bool {
 		return true
 	}
 	lines := bytes.Split(body, []byte("\n"))
-	allHeadings := len(lines) > 0
-	for _, rawLine := range lines {
-		line := strings.TrimSpace(string(rawLine))
-		if line == "" {
-			continue
-		}
-		if !heading(line) {
-			allHeadings = false
-			break
-		}
-	}
-	if allHeadings {
-		for _, line := range lines {
-			if strings.TrimSpace(string(line)) != "" {
-				return true
-			}
-		}
+	if bodyIsHeadingsOnly(body) {
+		return true
 	}
 	first, firstIndex := "", -1
 	for i, rawLine := range lines {
@@ -5894,13 +5882,75 @@ func fragmentIsNotRule(raw, body []byte) bool {
 			description = true
 		}
 	}
-	return closed && name && description
+	if !closed || !name || !description {
+		return false
+	}
+	for _, rawLine := range lines[firstIndex+1:] {
+		line := strings.TrimSpace(string(rawLine))
+		if line == "---" {
+			closed = false
+			continue
+		}
+		if !closed && line != "" && !heading(line) {
+			return false
+		}
+	}
+	return true
+}
+
+func bodyIsHeadingsOnly(body []byte) bool {
+	seen := false
+	for rawLine := range bytes.SplitSeq(body, []byte("\n")) {
+		line := strings.TrimSpace(string(rawLine))
+		if line == "" {
+			continue
+		}
+		seen = true
+		if !heading(line) {
+			return false
+		}
+	}
+	return seen
+}
+
+func skillBodyAfterFrontMatter(body []byte) ([]byte, bool) {
+	lines := bytes.Split(body, []byte("\n"))
+	first, firstIndex := "", -1
+	for i, rawLine := range lines {
+		if line := strings.TrimSpace(string(rawLine)); line != "" {
+			first, firstIndex = line, i
+			break
+		}
+	}
+	if first != "---" {
+		return nil, false
+	}
+	name, description := false, false
+	for i := firstIndex + 1; i < len(lines); i++ {
+		line := strings.TrimSpace(string(lines[i]))
+		if line == "---" {
+			if !name || !description {
+				return nil, false
+			}
+			return bytes.Join(lines[i+1:], []byte("\n")), true
+		}
+		name = name || strings.HasPrefix(line, "name:")
+		description = description || strings.HasPrefix(line, "description:")
+	}
+	return nil, false
 }
 
 func conflictingRuleKindProblem(path string, raw []byte) string {
 	values := fragmentHeaderValues(raw)
-	if len(values["тип"]) > 0 && values["тип"][len(values["тип"])-1] == "правило" && nonemptyHeaderValue(values, "вид") {
+	body, err := fragmentBody(raw)
+	if len(values["тип"]) == 0 || values["тип"][len(values["тип"])-1] != "правило" {
+		return ""
+	}
+	if nonemptyHeaderValue(values, "вид") {
 		return fmt.Sprintf("%s: fragment header cannot combine тип: правило and non-empty вид", path)
+	}
+	if err == nil && bodyIsHeadingsOnly(body) {
+		return fmt.Sprintf("%s: fragment header cannot combine тип: правило and a headings-only body", path)
 	}
 	return ""
 }
@@ -6210,6 +6260,9 @@ func fragmentHasNoFields(raw, body []byte) bool {
 		if nonemptyHeaderValue(values, field) {
 			return false
 		}
+	}
+	if skillBody, ok := skillBodyAfterFrontMatter(body); ok {
+		body = skillBody
 	}
 	return startsWithListItem(body)
 }

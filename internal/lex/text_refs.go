@@ -113,13 +113,7 @@ func checkTextRefs(codex string, options CheckOptions) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var staged *stagedPaths
-	if options.Staged {
-		staged, err = readStagedPaths()
-		if err != nil {
-			return nil, err
-		}
-	}
+	staged := options.stagedPaths
 	findings, unused := applyTextRefExceptions(corpus, findTextRefsWithSkills(corpus, journal, skills), exceptions, filepath.Dir(codex))
 	externalCorpus, externalPaths, missingExternal, err := loadExternalTextCorpus(codex, options.OutputsUnder, corpus)
 	if err != nil {
@@ -463,7 +457,8 @@ func (r *corpusReader) decisionPath(codex, override string, settings textRefSett
 
 // decisionPathForCheck names the decision journal for the item count. With a broken tools.json it still names the journal
 // from --decisions or the default path, so the caller runs the other checks and reports the error with them.
-func (r *corpusReader) decisionPathForCheck(codex, override string) (string, error) {
+func (r *corpusReader) decisionPathForCheck(codex, override string, staged *stagedPaths) (string, error) {
+	r.staged = staged
 	settings, settingsErr := r.textRefSettings(codex)
 	journal, pathErr := r.decisionPath(codex, override, settings)
 	return journal, errors.Join(settingsErr, pathErr)
@@ -476,10 +471,7 @@ func loadTextCorpus(codex string, o CheckOptions) (textCorpus, textCorpus, strin
 	}
 	r := corpusReader{current: textCorpus{}}
 	if o.Staged {
-		r.staged, err = readStagedPaths()
-		if err != nil {
-			return nil, nil, "", nil, nil, err
-		}
+		r.staged = o.stagedPaths
 		r.old = textCorpus{}
 		paths = mergePaths(paths, r.staged.indexedUnder(filepath.Join(codex, "manifest"), ".yaml"))
 		if err := r.prefetchStagedText(codex, o, paths); err != nil {

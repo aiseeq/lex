@@ -63,7 +63,7 @@ func TestRuleFieldWarningsExcludeKindsHeadingsAndSkillHeaders(t *testing.T) {
 				t.Fatal(err)
 			}
 			closeAt := bytes.LastIndex(raw, []byte("---\n"))
-			if tc.header != "" {
+			if tc.header != "" || tc.name == "heading" {
 				raw = bytes.Replace(raw, []byte("тип: правило\n"), nil, 1)
 				closeAt = bytes.LastIndex(raw, []byte("---\n"))
 			}
@@ -104,6 +104,72 @@ func TestRuleAndKindConflictIsProblem(t *testing.T) {
 	}
 	if countWarningsContaining(warnings, frag+": rule has empty") != 0 {
 		t.Fatalf("conflicting header emitted rule warnings: %v", warnings)
+	}
+}
+
+func TestRuleTypeWithHeadingsIsHeaderProblem(t *testing.T) {
+	codex, _, frag := ruleBasisFixture(t, "## Раздел\n", "цель: ", "основание: источник", "снять_когда: условие")
+	warnings, err := CheckWithWarnings(codex, CheckOptions{})
+	if err == nil || !strings.Contains(err.Error(), "fragment header cannot combine тип: правило and a headings-only body") {
+		t.Fatalf("check error = %v, want the existing rule/kind header problem", err)
+	}
+	if countWarningsContaining(warnings, frag+": rule has empty") != 0 {
+		t.Fatalf("invalid header emitted rule warnings: %v", warnings)
+	}
+}
+
+func TestSkillHeaderWithRuleTextGetsRuleFieldWarnings(t *testing.T) {
+	codex, _, frag := ruleBasisFixture(t, "Текст.\n", "цель: ", "основание: ", "снять_когда: ")
+	raw, err := os.ReadFile(frag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeAt := bytes.Index(raw[4:], []byte("---\n"))
+	if closeAt < 0 {
+		t.Fatal("fixture header has no closing delimiter")
+	}
+	headerEnd := 4 + closeAt + len("---\n")
+	raw = append(bytes.Clone(raw[:headerEnd]), []byte("---\nname: demo\ndescription: synthetic skill\n---\n- Правило: сохранять копию.\n")...)
+	mustWrite(t, frag, raw)
+	mustWrite(t, filepath.Join(filepath.Dir(codex), "rules.md"), []byte("---\nname: demo\ndescription: synthetic skill\n---\n- Правило: сохранять копию.\n"))
+	if err := Build(codex, true); err != nil {
+		t.Fatal(err)
+	}
+	warnings, err := CheckWithWarnings(codex, CheckOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"цель", "основание", "снять_когда"} {
+		if countWarningsContaining(warnings, frag+": rule has empty "+field) != 1 {
+			t.Fatalf("missing empty %s warning: %v", field, warnings)
+		}
+	}
+}
+
+func TestSkillHeaderWithListItemGetsNoFieldsWarning(t *testing.T) {
+	codex, _, frag := ruleBasisFixture(t, "- Правило: сохранять копию.\n")
+	raw, err := os.ReadFile(frag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeAt := bytes.Index(raw[4:], []byte("---\n"))
+	if closeAt < 0 {
+		t.Fatal("fixture header has no closing delimiter")
+	}
+	headerEnd := 4 + closeAt + len("---\n")
+	body := []byte("---\nname: demo\ndescription: synthetic skill\n---\n- Правило: сохранять копию.\n")
+	raw = append(bytes.Clone(raw[:headerEnd]), body...)
+	mustWrite(t, frag, raw)
+	mustWrite(t, filepath.Join(filepath.Dir(codex), "rules.md"), body)
+	if err := Build(codex, true); err != nil {
+		t.Fatal(err)
+	}
+	warnings, err := CheckWithWarnings(codex, CheckOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countWarningsContaining(warnings, frag+itemHasNoFieldsWarning) != 1 {
+		t.Fatalf("skill list item without fields warning = %v", warnings)
 	}
 }
 
@@ -342,5 +408,106 @@ func TestDecisionJournalNamedThroughSymlinkIsExcluded(t *testing.T) {
 	}
 	if got := RuleWarningSummary(warnings); !strings.HasSuffix(got, "пунктов без полей: 1; цель пересказывает пункт: 0; ссылок по положению: 0; постоянных правил: 0, из них без причины: 0, с общей причиной: 0; «не снимается, пока»: 0; пустых фрагментов: 0; пустых разделителей: 0") {
 		t.Fatalf("summary = %q, warnings = %v", got, warnings)
+	}
+}
+
+func TestDecisionJournalSettingsDefaultAndOutputsUnder(t *testing.T) {
+	t.Run("configured path", func(t *testing.T) {
+		codex, _, _ := decisionAndOtherCodex(t, t.TempDir())
+		journal := filepath.Join(codex, "journal.md")
+		if err := importData(codex, journal, "journal.md", []byte("- configured decision\n"), false); err != nil {
+			t.Fatal(err)
+		}
+		if err := Build(codex, false); err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, filepath.Join(codex, "tools.json"), []byte(`{"text_refs":{"decisions":"journal.md"}}`))
+		warnings, err := CheckWithWarnings(codex, CheckOptions{})
+		if err != nil || strings.Contains(strings.Join(warnings, "\n"), filepath.Join(codex, "frag", "journal.md")) {
+			t.Fatalf("configured journal check: summary=%q warnings=%v err=%v", RuleWarningSummary(warnings), warnings, err)
+		}
+	})
+	t.Run("default path and outputs-under", func(t *testing.T) {
+		codex, _, _ := decisionAndOtherCodex(t, t.TempDir())
+		warnings, err := CheckWithWarnings(codex, CheckOptions{})
+		if err != nil || !strings.HasSuffix(RuleWarningSummary(warnings), "пунктов без полей: 1; цель пересказывает пункт: 0; ссылок по положению: 0; постоянных правил: 0, из них без причины: 0, с общей причиной: 0; «не снимается, пока»: 0; пустых фрагментов: 0; пустых разделителей: 0") {
+			t.Fatalf("default journal check: warnings=%v err=%v", warnings, err)
+		}
+		warnings, err = CheckWithWarnings(codex, CheckOptions{OutputsUnder: filepath.Dir(codex)})
+		if err != nil || !strings.HasSuffix(RuleWarningSummary(warnings), "пунктов без полей: 1; цель пересказывает пункт: 0; ссылок по положению: 0; постоянных правил: 0, из них без причины: 0, с общей причиной: 0; «не снимается, пока»: 0; пустых фрагментов: 0; пустых разделителей: 0") {
+			t.Fatalf("outputs-under default journal check: warnings=%v err=%v", warnings, err)
+		}
+	})
+}
+
+func TestStagedDecisionJournalUsesIndexedToolsJSON(t *testing.T) {
+	repo, codex, git := stagedRepo(t)
+	for _, item := range []struct{ name, body string }{
+		{"decisions.md", "- indexed journal item\n"},
+		{"journal.md", "- disk journal item\n"},
+	} {
+		if err := importData(codex, filepath.Join(codex, item.name), item.name, []byte(item.body), false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(codex, "tools.json"), []byte(`{"text_refs":{"decisions":"journal.md"}}`))
+	if err := git("add", "-A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := git("commit", "-q", "-m", "add synthetic journals"); err != nil {
+		t.Fatal(err)
+	}
+	if err := importData(codex, filepath.Join(codex, "decisions.md"), "decisions.md", []byte("- indexed journal revised\n"), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := importData(codex, filepath.Join(codex, "journal.md"), "journal.md", []byte("- disk journal item one revised\n- disk journal item two\n"), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := BuildWithOptions(codex, BuildOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := git("add", "-A"); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(codex, "tools.json"), []byte(`{"text_refs":{"decisions":"decisions.md"}}`))
+	if err := git("add", filepath.Join("cx", "tools.json")); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(codex, "tools.json"), []byte(`{"text_refs":{"decisions":"journal.md"}}`))
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldwd)
+	var warnings []string
+	warnings, err = CheckWithWarnings(codex, CheckOptions{Staged: true})
+	if err != nil {
+		t.Fatalf("staged check in %s: warnings=%v err=%v", repo, warnings, err)
+	}
+	if summary := RuleWarningSummary(warnings); !strings.Contains(summary, "пунктов без полей: 2") {
+		t.Fatalf("staged summary = %q, want two items from the journal named in indexed tools.json", summary)
+	}
+}
+
+func TestStagedCheckOutsideGitReportsOneError(t *testing.T) {
+	codex, _, _ := decisionAndOtherCodex(t, t.TempDir())
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Chdir(outside); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldwd)
+	_, err = CheckWithWarnings(codex, CheckOptions{Staged: true})
+	if err == nil || strings.Contains(err.Error(), "\n") {
+		t.Fatalf("staged check outside git returned %q, want one error line", err)
 	}
 }
