@@ -3,6 +3,8 @@ schema: 1
 graft: '>=2.37.0'
 go_fix:
   enabled: true
+# staticcheck SA валит гейт только на строках, изменённых относительно HEAD (graft v2.136.0, тикет staticcheck-enable).
+staticcheck: {enabled: true}
 
 tasks:
   test:
