@@ -896,6 +896,13 @@ func fragmentHeaderHasValues(header []byte) bool {
 }
 
 func writeManifest(manifestPath string, m manifest, links []outputLink) error {
+	if err := os.WriteFile(manifestPath, manifestContent(m, links), fileMode); err != nil {
+		return fmt.Errorf("%s: %w", manifestPath, err)
+	}
+	return nil
+}
+
+func manifestContent(m manifest, links []outputLink) []byte {
 	var content strings.Builder
 	content.WriteString("out: " + strconv.Quote(m.out) + "\nsource_sha256: " + m.hash + "\nbuilt_sha256: " + m.builtHash + "\nheader: " + strconv.FormatBool(m.header) + "\n")
 	if len(links) > 0 {
@@ -914,10 +921,7 @@ func writeManifest(manifestPath string, m manifest, links []outputLink) error {
 			content.WriteString("  " + strconv.Quote(id) + ": " + hash + "\n")
 		}
 	}
-	if err := os.WriteFile(manifestPath, []byte(content.String()), fileMode); err != nil {
-		return fmt.Errorf("%s: %w", manifestPath, err)
-	}
-	return nil
+	return []byte(content.String())
 }
 
 func equalLinks(a, b []outputLink) bool {

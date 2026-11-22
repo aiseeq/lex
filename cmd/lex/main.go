@@ -47,6 +47,7 @@ var commandHelpTable = []commandHelp{
 	{"import", "--codex DIR [--refresh] FILE", "импортировать файл во фрагменты и манифест."},
 	{"build", "--codex DIR [--check] [--force] [--no-header] [FILE]", "собрать файлы из манифестов."},
 	{"absorb", "--codex DIR [--shared] [--force] FILE", "перенести правку собранного файла во фрагменты."},
+	{"sub", "--codex DIR [-n N] OLD NEW FILE | --codex DIR -F SPEC FILE", "заменить точный текст в собранном файле правкой его фрагментов и пересобрать файл; вход как у sub: ровно N совпадений, всё или ничего."},
 	{"check", "--codex DIR [--staged] [--outputs-under PATH] [--tree TREE] [--refs-only] [--decisions PATH] [--unmarked]", "проверить кодекс и собранные файлы; предупреждать о ссылках по положению на строку, пункт, абзац или раздел и называть цель по смыслу; пересказ: максимум доли значимых основ цели, найденных в одном предложении тела; порог 0.5 и минимум 2 общие основы. Это список кандидатов на просмотр, не точный вердикт. Постоянное правило пишут «не снимается — <почему одной фразой>»: голое «не снимается», общая причина («суждение», «страховка», «кодом», «принцип») без пояснения, «не снимается, пока X» и «пока X — не снимается» дают предупреждение, как и фрагмент с шапкой и пустым текстом; фрагмент без полей из одних пустых строк — разделитель: его пустую строку переносят в соседний фрагмент."},
 	{"status", "--codex DIR", "показать изменившиеся файлы и команды для них."},
 	{"code-debt", "--codex DIR [--drop TARGET]", "показать или удалить запись о долге ссылок на код."},
@@ -122,6 +123,7 @@ type cliOptions struct {
 	command, codex, source, outputsUnder, tree, decisions, report, drop string
 	refresh, check, force, shared, staged, noHeader, refsOnly, unmarked bool
 	applyQuotes                                                         bool
+	rawArgs                                                             []string // sub: its arguments, read by parseSubArguments
 }
 
 func run(args []string) error {
@@ -139,6 +141,10 @@ func run(args []string) error {
 	command, known := findCommand(args[0])
 	if !known {
 		return usageError{message: helpText(), help: true}
+	}
+	if command.name == "sub" {
+		// sub reads its own arguments: OLD and NEW may look like flags of the shared parser.
+		return dispatch(cliOptions{command: "sub", rawArgs: args[1:]})
 	}
 	for _, arg := range args[1:] {
 		if arg == "-h" || arg == "--help" {
@@ -253,6 +259,8 @@ func dispatch(opts cliOptions) error {
 		return buildCommand(opts)
 	case "absorb":
 		return absorbCommand(opts)
+	case "sub":
+		return subCommand(opts.rawArgs)
 	case "check":
 		return checkCommand(opts)
 	case "status":
