@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -617,6 +618,60 @@ func TestBuildSkipsManualEditAndBuildsOtherOutputs(t *testing.T) {
 	}
 	if got, readErr := os.ReadFile(manual); readErr != nil || string(got) != "hand edit\n" {
 		t.Fatalf("manual output was overwritten: %q, %v", got, readErr)
+	}
+}
+
+func TestBuildNamesChangedProjectRepositoryOutput(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project repo")
+	output := filepath.Join(project, "nested dir", "instructions.md")
+	codex := filepath.Join(root, "codex")
+	if err := os.MkdirAll(filepath.Dir(output), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(output, []byte("Original rule.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", project}, args...)...)
+		if data, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, data)
+		}
+	}
+	if err := os.MkdirAll(project, 0755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun("init", "-q")
+	gitRun("config", "user.email", "test@example.invalid")
+	gitRun("config", "user.name", "Test")
+	if err := lex.ImportWithOptions(codex, output, lex.ImportOptions{Home: root}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lex.Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	gitRun("add", "--", "nested dir/instructions.md")
+	gitRun("commit", "-qm", "initial")
+	fragments, err := filepath.Glob(filepath.Join(codex, "frag", "*", "*.md"))
+	if err != nil || len(fragments) == 0 {
+		t.Fatalf("find fragments: %v, %v", fragments, err)
+	}
+	content, err := os.ReadFile(fragments[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	content = bytes.Replace(content, []byte("Original rule."), []byte("Updated rule."), 1)
+	if err := os.WriteFile(fragments[0], content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := captureRun(t, "build", "--codex", codex)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	want := "project repository " + project + ": not committed: " + shellWord("nested dir/instructions.md") + "\n"
+	if !strings.Contains(stdout, want) {
+		t.Fatalf("build stdout = %q, want line %q", stdout, want)
 	}
 }
 

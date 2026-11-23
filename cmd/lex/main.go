@@ -2,12 +2,16 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -95,6 +99,8 @@ lex status --codex <кодекс> показывает файл, который 
 Когда lex build --force <файл> затирает, а lex absorb <файл> переносит во фрагменты правку, которой во фрагментах нет, они печатают строку warning со временем правки и состоянием файла и фрагментов в git. Если правку делал не ты, другая сессия могла ещё работать с файлом — дождись её завершения, прежде чем коммитить. Если lex build или lex check называет файл с незавершённой правкой, не трогай файл и не ставь --force.
 
 ## Коммит
+Собранные файлы в репозитории проекта lex build называет строкой project repository …: их коммитит тот, кто ведёт этот репозиторий, — поставь ему задачу; у репозитория нет ведущего — закоммить их в нём сам.
+
 lex absorb и lex build печатают изменённые файлы; если кодекс лежит внутри ~/.claude и найден ~/.claude-config.git, они также печатают git add для этого репозитория. Закоммить эти изменения в репозитории конфигурации Claude. Кодекс, лежащий в репозитории проекта, коммить в этом репозитории вместе с изменёнными собранными файлами.
 `
 
@@ -332,12 +338,95 @@ func buildCommand(o cliOptions) error {
 	if o.noHeader {
 		return lex.BuildCheckOptions(o.codex, lex.BuildCheckOptionsValue{NoHeader: true, Output: o.source})
 	}
-	paths, err := lex.BuildWithOptionsAndPaths(o.codex, lex.BuildOptions{Check: o.check, Force: o.force, Output: o.source})
+	var outputs []string
+	paths, err := lex.BuildWithOptionsAndPaths(o.codex, lex.BuildOptions{Check: o.check, Force: o.force, Output: o.source, WrittenOutputs: &outputs})
 	if len(paths) > 0 {
 		printCodexChangeHint(o.codex, paths)
 	}
+	if !o.check {
+		printProjectRepositoryChanges(outputs)
+	}
 	return err
 }
+
+func printProjectRepositoryChanges(outputs []string) {
+	byRepo := make(map[string][]string)
+	rootByDir := make(map[string]string)
+	for _, output := range outputs {
+		dir := filepath.Dir(output)
+		root, found := rootByDir[dir]
+		if !found {
+			cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel")
+			cmd.Env = lex.GitStatusEnv()
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			data, err := cmd.Output()
+			if err != nil {
+				rootByDir[dir] = ""
+				if !strings.Contains(stderr.String(), "not a git repository") {
+					fmt.Fprintf(os.Stderr, "warning: cannot find git repository for output %s: %v\n", output, err)
+				}
+				continue
+			}
+			root = strings.TrimSpace(string(data))
+			rootByDir[dir] = root
+		}
+		if root == "" {
+			continue
+		}
+		byRepo[root] = append(byRepo[root], output)
+	}
+	roots := slices.Sorted(maps.Keys(byRepo))
+	for _, root := range roots {
+		outputs := byRepo[root]
+		relatives := make([]string, 0, len(outputs))
+		seen := make(map[string]bool)
+		for _, output := range outputs {
+			rel, err := filepath.Rel(root, output)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: cannot make output path relative to %s: %v\n", root, err)
+				continue
+			}
+			if !seen[rel] {
+				seen[rel] = true
+				relatives = append(relatives, rel)
+			}
+		}
+		slices.Sort(relatives)
+		if len(relatives) == 0 {
+			continue
+		}
+		words := make([]string, len(relatives))
+		for i, path := range relatives {
+			words[i] = shellWord(path)
+		}
+		args := append([]string{"--literal-pathspecs", "-C", root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--"}, relatives...)
+		cmd := exec.Command("git", args...)
+		cmd.Env = lex.GitStatusEnv()
+		data, err := cmd.Output()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: cannot read git status in %s: %v\n", root, err)
+			continue
+		}
+		changed := make(map[string]bool)
+		for record := range bytes.SplitSeq(data, []byte{0}) {
+			if len(record) < 4 {
+				continue
+			}
+			changed[string(record[3:])] = true
+		}
+		var wordsChanged []string
+		for i, path := range relatives {
+			if changed[path] {
+				wordsChanged = append(wordsChanged, words[i])
+			}
+		}
+		if len(wordsChanged) > 0 {
+			fmt.Printf("project repository %s: not committed: %s\n", root, strings.Join(wordsChanged, " "))
+		}
+	}
+}
+
 func absorbCommand(o cliOptions) error {
 	if o.source == "" || o.check {
 		return usage("usage: lex absorb --codex DIR [--shared] [--force] FILE")

@@ -968,8 +968,9 @@ func Build(codex string, check bool) error {
 }
 
 type BuildOptions struct {
-	Check, Force bool
-	Output       string
+	Check, Force   bool
+	Output         string
+	WrittenOutputs *[]string
 }
 type BuildCheckOptionsValue struct {
 	NoHeader bool
@@ -1179,6 +1180,8 @@ func gitStatusEnv() []string {
 	return env
 }
 
+func GitStatusEnv() []string { return gitStatusEnv() }
+
 func gitStatus(cwd string, paths ...string) (string, string, error) {
 	git, err := exec.LookPath("git")
 	if errors.Is(err, exec.ErrNotFound) {
@@ -1327,6 +1330,7 @@ func buildManifest(codex, path string, options BuildOptions) (string, error) {
 	if e = os.WriteFile(m.out, out, fileMode); e != nil {
 		return "", fmt.Errorf("%s: %w", m.out, e)
 	}
+	recordWrittenOutput(options, m.out)
 	if e = updateManifestField(path, "built_sha256", sha(out)); e != nil {
 		return "", fmt.Errorf("%s: update manifest: %w", path, e)
 	}
@@ -1334,6 +1338,12 @@ func buildManifest(codex, path string, options BuildOptions) (string, error) {
 		printEditWarning("build", m.out, warnSnapshot)
 	}
 	return "", nil
+}
+
+func recordWrittenOutput(options BuildOptions, output string) {
+	if options.WrittenOutputs != nil {
+		*options.WrittenOutputs = append(*options.WrittenOutputs, output)
+	}
 }
 
 func manifestScope(m manifest, under, tree string) (bool, []outputLink, error) {
