@@ -317,6 +317,7 @@ func subCommonEnds(a, b []byte) (int, int) {
 
 // subBuildLayout builds the manifest output as the build does and records where each piece of it comes from.
 func subBuildLayout(codex, manifestPath string, m manifest, enabled bool, read func(string) ([]byte, error)) (subLayout, error) {
+	enabled = enabled && !m.purposeOff
 	var l subLayout
 	add := func(text []byte, kind int, label, path string, raw int) {
 		if len(text) == 0 {

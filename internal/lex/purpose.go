@@ -94,6 +94,7 @@ func prepareRefreshPurpose(codex string, m manifest, data []byte) (bool, []byte,
 	if err != nil {
 		return false, nil, err
 	}
+	enabled = enabled && !m.purposeOff
 	if !enabled && !bytes.Contains(data, []byte(purposeMarker)) {
 		return false, data, nil
 	}
@@ -112,7 +113,7 @@ func stagedHasPurpose(commit *stagedPaths, codex string, m manifest) (bool, erro
 		if err != nil {
 			return false, fmt.Errorf("%s: %w", path, err)
 		}
-		rendered, _, err := renderPurpose(path, raw, part, true)
+		rendered, _, err := renderPurpose(path, raw, part, !m.purposeOff)
 		if err != nil {
 			return false, err
 		}
@@ -126,6 +127,7 @@ func stagedHasPurpose(commit *stagedPaths, codex string, m manifest) (bool, erro
 // stripPurposeForAbsorb removes derived lines only after proving that each
 // retained one still has its original value. A removed rule may lose its line.
 func stripPurposeForAbsorb(codex string, m manifest, actual []byte, enabled bool) ([]byte, []byte, error) {
+	enabled = enabled && !m.purposeOff
 	if !enabled {
 		if err := rejectStalePurposes(codex, m, actual); err != nil {
 			return nil, nil, err
@@ -180,6 +182,11 @@ func readPurposeLayout(codex string, m manifest) (purposeLayout, error) {
 
 func readPurposeLayoutWithRead(codex string, m manifest, read func(string) ([]byte, error)) (purposeLayout, error) {
 	layout := purposeLayout{owners: map[int]string{}}
+	enabled, err := readPurposeSetting(codex, read)
+	if err != nil {
+		return layout, err
+	}
+	enabled = enabled && !m.purposeOff
 	line := 0
 	for _, id := range m.parts {
 		path := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
@@ -191,7 +198,7 @@ func readPurposeLayoutWithRead(codex string, m manifest, read func(string) ([]by
 		if err != nil {
 			return layout, fmt.Errorf("%s: %w", path, err)
 		}
-		part, _, err := renderPurpose(path, raw, body, true)
+		part, _, err := renderPurpose(path, raw, body, enabled)
 		if err != nil {
 			return layout, err
 		}

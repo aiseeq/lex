@@ -41,6 +41,7 @@ type manifest struct {
 	fragmentHashes map[string]string
 	builtHash      string
 	header         bool
+	purposeOff     bool
 }
 
 const (
@@ -530,7 +531,7 @@ func importDataWithLinks(codex, abs, rel string, data []byte, refresh bool, link
 	if sourceData == nil {
 		sourceData = data
 	}
-	m := manifest{out: abs, hash: sha(sourceData), builtHash: diskHash, parts: parts, fragmentHashes: hashes, header: old.header}
+	m := manifest{out: abs, hash: sha(sourceData), builtHash: diskHash, parts: parts, fragmentHashes: hashes, header: old.header, purposeOff: old.purposeOff}
 	allLinks := uniqueLinks(append(old.links, links...))
 	m.links = allLinks
 	return finishImportWithOrphanCleanup(codex, manifestPath, m, allLinks, topic, units, preservedHeaders, primaryImport, orphanCandidates)
@@ -905,6 +906,9 @@ func writeManifest(manifestPath string, m manifest, links []outputLink) error {
 func manifestContent(m manifest, links []outputLink) []byte {
 	var content strings.Builder
 	content.WriteString("out: " + strconv.Quote(m.out) + "\nsource_sha256: " + m.hash + "\nbuilt_sha256: " + m.builtHash + "\nheader: " + strconv.FormatBool(m.header) + "\n")
+	if m.purposeOff {
+		content.WriteString("purpose: false\n")
+	}
 	if len(links) > 0 {
 		content.WriteString("links:\n")
 		for _, link := range uniqueLinks(links) {
@@ -1477,6 +1481,7 @@ func manifestBodyWithRead(codex string, m manifest, read func(string) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
+	enabled = enabled && !m.purposeOff
 	var out []byte
 	for i, id := range m.parts {
 		p := filepath.Join(codex, "frag", filepath.FromSlash(id)+".md")
@@ -1831,6 +1836,7 @@ func absorbWithCanonicalCodex(codex, file string, options AbsorbOptions) error {
 	if err != nil {
 		return err
 	}
+	purposeEnabled = purposeEnabled && !m.purposeOff
 	if moved, err := tryAbsorbPurePartMove(codex, selected, m, purposeEnabled, actual, fileBytes, options, catalog); moved || err != nil {
 		return warnAfterAbsorb(err, target, warnSnapshot)
 	}
@@ -4602,6 +4608,7 @@ func stagedDiskMissingFragments(commit *stagedPaths, paths, ids []string, manife
 }
 
 func checkedManifestBody(codex, manifestPath string, m manifest, referenced map[string]bool, read func(string) ([]byte, error), purposeEnabled bool, decisionPath string, codeCache codeTargetCache) ([]byte, []string, []string) {
+	purposeEnabled = purposeEnabled && !m.purposeOff
 	var body []byte
 	var problems, warnings []string
 	for _, id := range m.parts {
@@ -6438,6 +6445,9 @@ func parseManifestFields(line string, m *manifest) error {
 	}
 	if after, ok := strings.CutPrefix(line, "header: "); ok {
 		m.header = after == "true"
+	}
+	if after, ok := strings.CutPrefix(line, "purpose: "); ok {
+		m.purposeOff = after == "false"
 	}
 	return nil
 }

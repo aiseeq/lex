@@ -141,6 +141,75 @@ func TestPurposeChecks(t *testing.T) {
 	}
 }
 
+func TestPurposeManifestDisablesOneOutput(t *testing.T) {
+	codex, disabledOut, disabledMP, disabled := purposeFixture(t, "- disabled rule\n")
+	enabledOut := filepath.Join(t.TempDir(), "enabled.md")
+	if err := importData(codex, enabledOut, "enabled.md", []byte("- enabled rule\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	enabledMP := filepath.Join(codex, "manifest", "enabled.md.yaml")
+	enabled, err := readManifest(enabledMP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	purposeSet(t, codex, true)
+	purposeFragment(t, codex, disabledMP, disabled, 0, "disabled goal")
+	purposeFragment(t, codex, enabledMP, enabled, 0, "enabled goal")
+	manifestData, err := os.ReadFile(disabledMP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestData = []byte(strings.Replace(string(manifestData), "header: false\n", "header: false\npurpose: false\n", 1))
+	if err := os.WriteFile(disabledMP, manifestData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := purposeRead(t, disabledOut); strings.Contains(got, purposeMarker) {
+		t.Fatalf("disabled output contains purpose line: %q", got)
+	}
+	if got := purposeRead(t, enabledOut); !strings.Contains(got, purposeMarker+"enabled goal\n") {
+		t.Fatalf("default output is missing purpose line: %q", got)
+	}
+	if err := Build(codex, true); err != nil {
+		t.Fatalf("build --check: %v", err)
+	}
+	if _, err := CheckWithWarnings(codex, CheckOptions{}); err != nil {
+		t.Fatalf("check: %v", err)
+	}
+
+	edited := strings.Replace(purposeRead(t, disabledOut), "disabled rule", "edited disabled rule", 1)
+	if err := os.WriteFile(disabledOut, []byte(edited), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Absorb(codex, disabledOut, AbsorbOptions{}); err != nil {
+		t.Fatalf("absorb without a purpose line: %v", err)
+	}
+	if err := Build(codex, true); err != nil {
+		t.Fatalf("build --check after absorb: %v", err)
+	}
+
+	manifestData, err = os.ReadFile(disabledMP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(manifestData), "purpose: false\n") {
+		t.Fatalf("build did not preserve purpose setting in manifest: %s", manifestData)
+	}
+	if err := importData(codex, disabledOut, "out.md", []byte(edited+"\n"), true); err != nil {
+		t.Fatalf("refresh without a purpose line: %v", err)
+	}
+	manifestData, err = os.ReadFile(disabledMP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(manifestData), "purpose: false\n") {
+		t.Fatalf("refresh did not preserve purpose setting in manifest: %s", manifestData)
+	}
+}
+
 func TestPurposeAbsorb(t *testing.T) {
 	c, out, mp, m := purposeFixture(t, "- one\n- two\n")
 	purposeFragment(t, c, mp, m, 0, "reason")
