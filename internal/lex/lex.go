@@ -6299,6 +6299,13 @@ func nonemptyHeaderValue(values map[string][]string, field string) bool {
 }
 
 func startsWithListItem(body []byte) bool {
+	for line := range bytes.SplitSeq(body, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		body = line
+		break
+	}
 	if bytes.HasPrefix(body, []byte("- ")) {
 		return true
 	}

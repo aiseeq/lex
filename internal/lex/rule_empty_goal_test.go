@@ -511,3 +511,37 @@ func TestStagedCheckOutsideGitReportsOneError(t *testing.T) {
 		t.Fatalf("staged check outside git returned %q, want one error line", err)
 	}
 }
+
+func TestSkillHeaderBlankLineListItemWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		blankLines string
+	}{{"one blank line", "\n"}, {"two blank lines", "\n\n"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			codex, _, frag := ruleBasisFixture(t, "- Правило: сохранять копию.\n")
+			raw, err := os.ReadFile(frag)
+			if err != nil {
+				t.Fatal(err)
+			}
+			closeAt := bytes.Index(raw[4:], []byte("---\n"))
+			if closeAt < 0 {
+				t.Fatal("fixture header has no closing delimiter")
+			}
+			headerEnd := 4 + closeAt + len("---\n")
+			body := []byte("---\nname: demo\ndescription: synthetic skill\n---\n" + tc.blankLines + "- Правило: сохранять копию.\n")
+			raw = append(bytes.Clone(raw[:headerEnd]), body...)
+			mustWrite(t, frag, raw)
+			mustWrite(t, filepath.Join(filepath.Dir(codex), "rules.md"), body)
+			if err := Build(codex, true); err != nil {
+				t.Fatal(err)
+			}
+			warnings, err := CheckWithWarnings(codex, CheckOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if countWarningsContaining(warnings, frag+itemHasNoFieldsWarning) != 1 {
+				t.Fatalf("skill list item without fields warning = %v", warnings)
+			}
+		})
+	}
+}
