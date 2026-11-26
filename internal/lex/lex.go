@@ -5930,33 +5930,6 @@ func bodyIsHeadingsOnly(body []byte) bool {
 	return seen
 }
 
-func skillBodyAfterFrontMatter(body []byte) ([]byte, bool) {
-	lines := bytes.Split(body, []byte("\n"))
-	first, firstIndex := "", -1
-	for i, rawLine := range lines {
-		if line := strings.TrimSpace(string(rawLine)); line != "" {
-			first, firstIndex = line, i
-			break
-		}
-	}
-	if first != "---" {
-		return nil, false
-	}
-	name, description := false, false
-	for i := firstIndex + 1; i < len(lines); i++ {
-		line := strings.TrimSpace(string(lines[i]))
-		if line == "---" {
-			if !name || !description {
-				return nil, false
-			}
-			return bytes.Join(lines[i+1:], []byte("\n")), true
-		}
-		name = name || strings.HasPrefix(line, "name:")
-		description = description || strings.HasPrefix(line, "description:")
-	}
-	return nil, false
-}
-
 func conflictingRuleKindProblem(path string, raw []byte) string {
 	values := fragmentHeaderValues(raw)
 	body, err := fragmentBody(raw)
@@ -6278,9 +6251,7 @@ func fragmentHasNoFields(raw, body []byte) bool {
 			return false
 		}
 	}
-	if skillBody, ok := skillBodyAfterFrontMatter(body); ok {
-		body = skillBody
-	}
+	body = bodyAfterFrontMatter(body)
 	return containsListItem(body)
 }
 
@@ -6299,8 +6270,16 @@ func nonemptyHeaderValue(values map[string][]string, field string) bool {
 }
 
 func containsListItem(body []byte) bool {
+	inFence := false
 	for line := range bytes.SplitSeq(body, []byte("\n")) {
-		line = bytes.TrimSpace(line)
+		trimmed := bytes.TrimSpace(line)
+		if bytes.HasPrefix(trimmed, []byte("```")) {
+			inFence = !inFence
+			continue
+		}
+		if inFence || !bytes.Equal(line, bytes.TrimLeft(line, " \t")) {
+			continue
+		}
 		if bytes.HasPrefix(line, []byte("- ")) {
 			return true
 		}
@@ -6313,6 +6292,26 @@ func containsListItem(body []byte) bool {
 		}
 	}
 	return false
+}
+
+func bodyAfterFrontMatter(body []byte) []byte {
+	lines := bytes.Split(body, []byte("\n"))
+	first, firstIndex := "", -1
+	for i, rawLine := range lines {
+		if line := strings.TrimSpace(string(rawLine)); line != "" {
+			first, firstIndex = line, i
+			break
+		}
+	}
+	if first != "---" {
+		return body
+	}
+	for i := firstIndex + 1; i < len(lines); i++ {
+		if strings.TrimSpace(string(lines[i])) == "---" {
+			return bytes.Join(lines[i+1:], []byte("\n"))
+		}
+	}
+	return body
 }
 func parseManifestLink(line string, m *manifest) (bool, error) {
 	if strings.TrimSpace(line) == "" {
