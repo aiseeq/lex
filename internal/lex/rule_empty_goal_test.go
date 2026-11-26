@@ -289,7 +289,8 @@ func TestUnmarkedListItemAfterHeading(t *testing.T) {
 	}{
 		{"list item after heading", "# Заголовок\n\n- Пункт правила\n", 1},
 		{"heading only", "# Заголовок\n", 0},
-		{"front matter paths list", "---\npaths:\n  - \"src/**\"\n---\n", 0},
+		{"front matter paths list", "---\npaths:\n- \"src/**\"\n---\n", 0},
+		{"thematic break is not front matter", "---\n\n- Пункт правила\n\n---\n", 1},
 		{"fenced list item", "```yaml\n- пример\n```\n", 0},
 	}
 	for _, tc := range cases {

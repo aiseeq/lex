@@ -6306,9 +6306,17 @@ func bodyAfterFrontMatter(body []byte) []byte {
 	if first != "---" {
 		return body
 	}
+	hasKey := false
 	for i := firstIndex + 1; i < len(lines); i++ {
-		if strings.TrimSpace(string(lines[i])) == "---" {
+		line := strings.TrimSpace(string(lines[i]))
+		if line == "---" {
+			if !hasKey {
+				return body
+			}
 			return bytes.Join(lines[i+1:], []byte("\n"))
+		}
+		if key, _, ok := strings.Cut(line, ":"); ok && key != "" && !strings.ContainsAny(key, " \t-") {
+			hasKey = true
 		}
 	}
 	return body
