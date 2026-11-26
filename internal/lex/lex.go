@@ -6281,7 +6281,7 @@ func fragmentHasNoFields(raw, body []byte) bool {
 	if skillBody, ok := skillBodyAfterFrontMatter(body); ok {
 		body = skillBody
 	}
-	return startsWithListItem(body)
+	return containsListItem(body)
 }
 
 // fragmentHasHeaderFields reports a nonempty цель, основание, снять_когда, тип or вид.
@@ -6298,22 +6298,21 @@ func nonemptyHeaderValue(values map[string][]string, field string) bool {
 	return len(values[field]) > 0 && values[field][len(values[field])-1] != ""
 }
 
-func startsWithListItem(body []byte) bool {
+func containsListItem(body []byte) bool {
 	for line := range bytes.SplitSeq(body, []byte("\n")) {
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("- ")) {
+			return true
 		}
-		body = line
-		break
+		i := 0
+		for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+			i++
+		}
+		if i > 0 && i+2 <= len(line) && line[i] == '.' && line[i+1] == ' ' {
+			return true
+		}
 	}
-	if bytes.HasPrefix(body, []byte("- ")) {
-		return true
-	}
-	i := 0
-	for i < len(body) && body[i] >= '0' && body[i] <= '9' {
-		i++
-	}
-	return i > 0 && i+2 <= len(body) && body[i] == '.' && body[i+1] == ' '
+	return false
 }
 func parseManifestLink(line string, m *manifest) (bool, error) {
 	if strings.TrimSpace(line) == "" {

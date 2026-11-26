@@ -281,6 +281,49 @@ func TestUnmarkedListItemsAndKinds(t *testing.T) {
 	}
 }
 
+func TestUnmarkedListItemAfterHeading(t *testing.T) {
+	cases := []struct {
+		name      string
+		body      string
+		wantCount int
+	}{
+		{"list item after heading", "# Заголовок\n\n- Пункт правила\n", 1},
+		{"heading only", "# Заголовок\n", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			codex, output := filepath.Join(root, "codex"), filepath.Join(root, "rules.md")
+			if err := importData(codex, output, "rules.md", []byte("- Пункт правила\n"), false); err != nil {
+				t.Fatal(err)
+			}
+			m, err := readManifest(manifestOf(t, codex, "rules.md"))
+			if err != nil || len(m.parts) != 1 {
+				t.Fatalf("manifest = %#v, err = %v", m, err)
+			}
+			frag := filepath.Join(codex, "frag", filepath.FromSlash(m.parts[0])+".md")
+			raw, err := os.ReadFile(frag)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := fragmentBody(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw = append(bytes.Clone(raw[:len(raw)-len(body)]), []byte(tc.body)...)
+			mustWrite(t, frag, raw)
+			mustWrite(t, output, []byte(tc.body))
+			warnings, err := CheckWithWarnings(codex, CheckOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := countWarningsContaining(warnings, itemHasNoFieldsWarning); got != tc.wantCount {
+				t.Fatalf("item without fields warnings = %v, want count %d", warnings, tc.wantCount)
+			}
+		})
+	}
+}
+
 func TestUnknownFragmentKindRejected(t *testing.T) {
 	raw := []byte("---\nid: x\nцель: \nоснование: \nснять_когда: \nвид: неизвестно\n---\n- пункт\n")
 	if _, err := fragmentBody(raw); err == nil || !strings.Contains(err.Error(), "вид") {
