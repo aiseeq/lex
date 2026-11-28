@@ -3866,6 +3866,22 @@ func CheckWithWarnings(codex string, options CheckOptions) ([]string, error) {
 	}
 	refWarnings, refErr := checkTextRefs(codex, options)
 	warnings = append(warnings, refWarnings...)
+	if !options.RefsOnly && !options.Staged && options.OutputsUnder == "" {
+		builds, roleErr := RoleBuilds(codex)
+		if roleErr != nil {
+			return warnings, errors.Join(refErr, roleErr)
+		}
+		if _, statErr := os.Stat(filepath.Join(codex, "roles.tsv")); statErr == nil {
+			warnings = append(warnings, roleBudgetEnabledNote)
+		} else if !os.IsNotExist(statErr) {
+			return warnings, errors.Join(refErr, statErr)
+		}
+		for _, build := range builds {
+			if build.Rules > build.Limit {
+				warnings = append(warnings, RoleBudgetWarning(build))
+			}
+		}
+	}
 	return warnings, errors.Join(checkErr, refErr)
 }
 
@@ -6008,9 +6024,18 @@ func IsPermanentRuleNote(warning string) bool {
 // RuleWarningSummary returns the closing line of lex check: how many warnings of each rule kind there are.
 func RuleWarningSummary(warnings []string) string {
 	basis, removal, quote, goal, restates, positional := 0, 0, 0, 0, 0, 0
-	bare, generic, until, empty, separators, permanent := 0, 0, 0, 0, 0, 0
+	bare, generic, until, empty, separators, permanent, overRole := 0, 0, 0, 0, 0, 0, 0
+	roleBudgetConfigured := false
 	items := make(map[string]bool)
 	for _, warning := range warnings {
+		if warning == roleBudgetEnabledNote {
+			roleBudgetConfigured = true
+			continue
+		}
+		if strings.HasSuffix(warning, roleBudgetWarning) {
+			overRole++
+			continue
+		}
 		switch {
 		case strings.HasSuffix(warning, itemHasNoFieldsWarning):
 			items[strings.TrimSuffix(warning, itemHasNoFieldsWarning)] = true
@@ -6040,7 +6065,11 @@ func RuleWarningSummary(warnings []string) string {
 			separators++
 		}
 	}
-	return fmt.Sprintf("правил без основания: %d, без условия снятия: %d; фрагментов с цитатой пользователя в тексте: %d; правил без цели: %d; пунктов без полей: %d; цель пересказывает пункт: %d; ссылок по положению: %d; постоянных правил: %d, из них без причины: %d, с общей причиной: %d; «не снимается, пока»: %d; пустых фрагментов: %d; пустых разделителей: %d", basis, removal, quote, goal, len(items), restates, positional, permanent, bare, generic, until, empty, separators)
+	summary := fmt.Sprintf("правил без основания: %d, без условия снятия: %d; фрагментов с цитатой пользователя в тексте: %d; правил без цели: %d; пунктов без полей: %d; цель пересказывает пункт: %d; ссылок по положению: %d; постоянных правил: %d, из них без причины: %d, с общей причиной: %d; «не снимается, пока»: %d; пустых фрагментов: %d; пустых разделителей: %d", basis, removal, quote, goal, len(items), restates, positional, permanent, bare, generic, until, empty, separators)
+	if roleBudgetConfigured {
+		summary += fmt.Sprintf("; сборок сверх предела роли: %d", overRole)
+	}
+	return summary
 }
 
 var positionalReferenceTokenRE = regexp.MustCompile(`[\p{L}\p{N}_]+|[«»“”„\x60]`)

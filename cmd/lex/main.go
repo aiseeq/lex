@@ -52,7 +52,7 @@ var commandHelpTable = []commandHelp{
 	{"build", "--codex DIR [--check] [--force] [--no-header] [FILE]", "собрать файлы из манифестов."},
 	{"absorb", "--codex DIR [--shared] [--force] FILE", "перенести правку собранного файла во фрагменты."},
 	{"sub", "--codex DIR [-n N] OLD NEW FILE | --codex DIR -F SPEC FILE", "заменить точный текст в собранном файле правкой его фрагментов и пересобрать файл; вход как у sub: ровно N совпадений, всё или ничего."},
-	{"check", "--codex DIR [--staged] [--outputs-under PATH] [--tree TREE] [--refs-only] [--decisions PATH] [--unmarked]", "проверить кодекс и собранные файлы; предупреждать о ссылках по положению на строку, пункт, абзац или раздел и называть цель по смыслу; пересказ: максимум доли значимых основ цели, найденных в одном предложении тела; порог 0.5 и минимум 2 общие основы. Это список кандидатов на просмотр, не точный вердикт. Постоянное правило пишут «не снимается — <почему одной фразой>»: голое «не снимается», общая причина («суждение», «страховка», «кодом», «принцип») без пояснения, «не снимается, пока X» и «пока X — не снимается» дают предупреждение, как и фрагмент с шапкой и пустым текстом; фрагмент без полей из одних пустых строк — разделитель: его пустую строку переносят в соседний фрагмент."},
+	{"check", "--codex DIR [--staged] [--outputs-under PATH] [--tree TREE] [--refs-only] [--decisions PATH] [--unmarked] [--roles]", "проверить кодекс и собранные файлы; предупреждать о ссылках по положению на строку, пункт, абзац или раздел и называть цель по смыслу; --roles печатает таблицу числа правил по ролям; см. lex guide."},
 	{"status", "--codex DIR", "показать изменившиеся файлы и команды для них."},
 	{"code-debt", "--codex DIR [--drop TARGET]", "показать или удалить запись о долге ссылок на код."},
 	{"code-confirm", "--codex DIR FRAGMENT", "подтвердить ссылки фрагмента на код."},
@@ -96,6 +96,8 @@ lex status --codex <кодекс> показывает файл, который 
 ## Поля шапки фрагмента
 цель — зачем нужно правило; основание — источник или причина; снять_когда — условие, при котором правило можно убрать. У заголовков, шапок скиллов и пунктов с непустым вид цель и снять_когда пусты, а основание может хранить след правки: кто переписал пункт и по чьему слову. Поле вид помечает шаг, указатель или справку. lex check такие фрагменты правилами не считает; тип: правило вместе с непустым вид — ошибка шапки. Найди фрагмент пункта: grep -rl '<слова пункта>' <кодекс>/frag. После правки пересобери файл: lex build --codex <кодекс> <файл>. lex check предупреждает о правиле (поле тип: правило или непустое любое из полей цель, основание, снять_когда), у которого пусто цель, основание или снять_когда, о цитате пользователя в тексте фрагмента, о пересказе пункта в цели и о ссылках по положению на строку, пункт, абзац или раздел («выше», «ниже», предыдущий или следующий). Названные в кавычках или коде пункты и разделы не считаются ссылками по положению. Для каждого предложения пункта оценивается доля значимых основ цели, найденных в нём; берётся максимум. Порог — 0.5, совпасть должны как минимум две основы. Длина основы — первые 5 букв слова после снятия типичных русских окончаний (короткие слова не обрезаются). Это список кандидатов на просмотр, а не точный вердикт. Считает пункты без полей. Постоянное правило пишут в снять_когда как «не снимается — <почему одной фразой>»; lex check предупреждает о голом «не снимается», об общей причине без пояснения («суждение», «страховка», «кодом», «принцип»; и внутри значения: «<часть> не снимается: это страховка.») и о «не снимается, пока X» или «пока X — не снимается» — это условие снятия, его пишут голым условием X. Предупреждает и о фрагменте с шапкой и пустым текстом; если у такого фрагмента нет полей, а текст — одни пустые строки, это разделитель: перенеси пустую строку в соседний фрагмент, потом убери этот. В конец сводки добавляются «правил без цели: N; пунктов без полей: M; цель пересказывает пункт: K; ссылок по положению: L; постоянных правил: P, из них без причины: B, с общей причиной: G; «не снимается, пока»: U; пустых фрагментов: E; пустых разделителей: S». С --unmarked печатает пути таких пунктов; с --refs-only правила не проверяются и этой строки нет. Код выхода от этих предупреждений не меняется.
 
+Файл roles.tsv задаёт роли, пределы и сборки табуляцией в колонках «роль», «предел», «манифесты»; имена манифестов указываются без .yaml через пробел. Токены {project} и {project-rules} раскрываются в манифесты проекта и его .claude/rules. lex check предупреждает о сборке сверх предела; --roles печатает предупреждения бюджета и таблицу всех сборок для ручной сверки. Без roles.tsv проверка бюджета не выполняется.
+
 ## Не твой файл
 Когда lex build --force <файл> затирает, а lex absorb <файл> переносит во фрагменты правку, которой во фрагментах нет, они печатают строку warning со временем правки и состоянием файла и фрагментов в git. Если правку делал не ты, другая сессия могла ещё работать с файлом — дождись её завершения, прежде чем коммитить. Если lex build или lex check называет файл с незавершённой правкой, не трогай файл и не ставь --force.
 
@@ -131,10 +133,10 @@ func flagValue(args []string, index *int, flag, description string) (string, err
 }
 
 type cliOptions struct {
-	command, codex, source, outputsUnder, tree, decisions, report, drop string
-	refresh, check, force, shared, staged, noHeader, refsOnly, unmarked bool
-	applyQuotes                                                         bool
-	rawArgs                                                             []string // sub: its arguments, read by parseSubArguments
+	command, codex, source, outputsUnder, tree, decisions, report, drop        string
+	refresh, check, force, shared, staged, noHeader, refsOnly, unmarked, roles bool
+	applyQuotes                                                                bool
+	rawArgs                                                                    []string // sub: its arguments, read by parseSubArguments
 }
 
 func run(args []string) error {
@@ -220,10 +222,20 @@ func parseArguments(args []string) (cliOptions, error) {
 			opts.source = arg
 		}
 	}
-	if opts.codex == "" {
-		return opts, usage("--codex DIR is required")
+	if err := validateParsedOptions(opts); err != nil {
+		return opts, err
 	}
 	return opts, nil
+}
+
+func validateParsedOptions(opts cliOptions) error {
+	if opts.codex == "" {
+		return usage("--codex DIR is required")
+	}
+	if opts.roles && opts.command != "check" {
+		return usage("--roles is only accepted by lex check")
+	}
+	return nil
 }
 
 func parseBooleanFlag(opts *cliOptions, arg string) bool {
@@ -232,6 +244,8 @@ func parseBooleanFlag(opts *cliOptions, arg string) bool {
 		opts.refsOnly = true
 	case "--unmarked":
 		opts.unmarked = true
+	case "--roles":
+		opts.roles = true
 	default:
 		return false
 	}
@@ -513,21 +527,16 @@ func shellWord(path string) string {
 }
 
 func checkCommand(o cliOptions) error {
-	if o.source != "" || o.check || o.refresh {
-		return usage("usage: lex check --codex DIR [--staged] [--outputs-under PATH] [--tree TREE]")
+	if err := validateCheckOptions(o); err != nil {
+		return err
 	}
-
-	if o.tree != "" && o.outputsUnder == "" {
-		return usage("--tree requires --outputs-under")
+	if o.roles {
+		return roleReportCommand(o.codex)
 	}
-	if o.staged && o.outputsUnder != "" {
-		return usage("--staged cannot be combined with --outputs-under")
-	}
-
 	warnings, err := lex.CheckWithWarnings(o.codex, lex.CheckOptions{Staged: o.staged, OutputsUnder: o.outputsUnder, Tree: o.tree, RefsOnly: o.refsOnly, Decisions: o.decisions})
 	seenUnmarked := make(map[string]bool)
 	for _, warning := range warnings {
-		if lex.IsPermanentRuleNote(warning) {
+		if lex.IsPermanentRuleNote(warning) || lex.IsRoleBudgetNote(warning) {
 			continue
 		}
 		isUnmarked := strings.HasSuffix(warning, ": item has no fields")
@@ -546,6 +555,41 @@ func checkCommand(o cliOptions) error {
 		fmt.Fprintln(os.Stderr, lex.RuleWarningSummary(warnings))
 	}
 	return err
+}
+
+func validateCheckOptions(o cliOptions) error {
+	if o.source != "" || o.check || o.refresh {
+		return usage("usage: lex check --codex DIR [--staged] [--outputs-under PATH] [--tree TREE]")
+	}
+
+	if o.tree != "" && o.outputsUnder == "" {
+		return usage("--tree requires --outputs-under")
+	}
+	if o.staged && o.outputsUnder != "" {
+		return usage("--staged cannot be combined with --outputs-under")
+	}
+	if o.roles && (o.staged || o.outputsUnder != "" || o.refsOnly || o.unmarked || o.decisions != "") {
+		return usage("--roles cannot be combined with --staged, --outputs-under, --refs-only, --unmarked, or --decisions")
+	}
+	return nil
+}
+
+func roleReportCommand(codex string) error {
+	builds, err := lex.RoleBuilds(codex)
+	if err != nil || len(builds) == 0 {
+		return err
+	}
+	for _, build := range builds {
+		if build.Rules > build.Limit {
+			fmt.Fprintln(os.Stderr, "warning:", lex.RoleBudgetWarning(build))
+		}
+	}
+	fmt.Fprintln(os.Stderr, lex.RoleBudgetSummary(builds))
+	fmt.Println("роль\tпроект\tправил\tпредел")
+	for _, build := range builds {
+		fmt.Printf("%s\t%s\t%d\t%d\n", build.Role, build.Project, build.Rules, build.Limit)
+	}
+	return nil
 }
 func statusCommand(o cliOptions) error {
 	if o.source != "" || o.check || o.refresh {

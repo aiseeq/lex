@@ -396,6 +396,8 @@ func TestGuideFlagsExist(t *testing.T) {
 		command := "build"
 		args := []string{command, "--codex", "codex", flag}
 		switch flag {
+		case "--roles":
+			args = []string{"check", "--codex", "codex", flag}
 		case "--drop":
 			args = []string{"code-debt", "--codex", "codex", flag, "target"}
 		case "--decisions", "--outputs-under", "--tree", "--report":
@@ -912,6 +914,45 @@ func TestCheckOutputsUnderCLIAndStagedConflict(t *testing.T) {
 	err = checkCommand(cliOptions{codex: "codex", staged: true, outputsUnder: "project"})
 	if err == nil || exitCode(err) != 2 || !strings.Contains(err.Error(), "cannot be combined") {
 		t.Fatalf("expected staged conflict usage error, got %v", err)
+	}
+}
+
+func TestCheckRolesCLIReportAndFlagConflicts(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	codex := filepath.Join(root, "codex")
+	output := filepath.Join(root, "git", "alpha", "CLAUDE.md")
+	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(output, []byte("instruction\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := lex.ImportWithOptions(codex, output, lex.ImportOptions{Home: root}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lex.Build(codex, false); err != nil {
+		t.Fatal(err)
+	}
+	roles := "роль\tпредел\tманифесты\nмастер\t256\tgit-alpha-CLAUDE.md\n"
+	if err := os.WriteFile(filepath.Join(codex, "roles.tsv"), []byte(roles), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := captureRun(t, "check", "--codex", codex, "--roles")
+	if err != nil {
+		t.Fatalf("check --roles returned %v", err)
+	}
+	if want := "роль\tпроект\tправил\tпредел\nмастер\t\t0\t256\n"; got != want {
+		t.Fatalf("check --roles output = %q, want %q", got, want)
+	}
+	for _, args := range [][]string{
+		{"check", "--codex", codex, "--roles", "--unmarked"},
+		{"check", "--codex", codex, "--roles", "--decisions", "journal.json"},
+	} {
+		err := run(args)
+		if err == nil || exitCode(err) != 2 || !strings.Contains(err.Error(), "cannot be combined") {
+			t.Errorf("check roles conflict %v returned %v", args, err)
+		}
 	}
 }
 
